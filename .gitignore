@@ -6,7 +6,6 @@ obj/
 
 # IDEs
 .idea/
-.vscode/
 **/.DS_Store
 
 # Caches

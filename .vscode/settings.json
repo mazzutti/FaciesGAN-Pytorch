@@ -1,0 +1,66 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.envFile": "${workspaceFolder}/.env",
+  "python.terminal.activateEnvironment": true,
+  "python.terminal.activateEnvInCurrentTerminal": true,
+  "editor.formatOnSave": true,  
+  "files.watcherExclude": {
+    "**/.venv/**": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "outputs/": true,
+    ".cache/": true
+  },
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true
+  },
+  "search.exclude": {
+    "**/.venv/**": true,
+    "**/.venv/**/site-packages/**": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "outputs/": true,
+    ".cache/": true
+  },
+  "python.analysis.exclude": [
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "outputs/",
+    ".cache/",
+    "data/", 
+    "**/node_modules", 
+    "**/.*", 
+    ".venv"
+  ],
+  "editor.defaultFormatter": "ms-python.black-formatter",
+  "python.analysis.enableTroubleshootMissingImports": true,
+  "python.analysis.typeCheckingMode": "strict",
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingTypeStubs": "error",
+    "reportUnknownMemberType": "error",
+    "reportUnknownArgumentType": "error",
+    "reportUnknownVariableType": "error"
+  },
+  "python.analysis.diagnosticMode": "workspace",
+  "python.analysis.useLibraryCodeForTypes": true,
+  "python.analysis.indexing": false,
+  "python.analysis.autoSearchPaths": true,
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "always"
+  },
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.formatOnSave": true
+  },
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": [
+    "tests"
+  ],
+  "python.testing.autoTestDiscoverOnSaveEnabled": true,
+  "editor.suggest.showTypeParameters": true,
+  "python.analysis.typeEvaluation.analyzeUnannotatedFunctions": true,
+  "python.analysis.languageServerMode": "full",
+  "python.analysis.supportRestructuredText": true,
+}

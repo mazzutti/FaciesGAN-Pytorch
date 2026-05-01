@@ -1,0 +1,101 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Train FaciesGAN (DDP 2 GPUs)",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"OMP_NUM_THREADS=1 PYTHONPATH=${workspaceFolder} VIRTUAL_ENV=${workspaceFolder}/.venv PATH=${workspaceFolder}/.venv/bin:${env:PATH} ${workspaceFolder}/.venv/bin/torchrun --nproc_per_node=2 ${workspaceFolder}/main.py --input-path data --output-path outputs/py/ --num-train-pyramids 200 --batch-size 40 --num-workers 1 --num-iter 100 --num-parallel-scales 7 --discriminator-steps 3 --generator-steps 3 --alpha 10 --scale0-noise-amp 1.5 --min-noise-amp 0.3 --lambda-diversity 1.0 --no-tensorboard --use-wells --use-seismic"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			}
+		},
+		{
+			"label": "Train DDP NVLink (Production)",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"export NCCL_P2P_LEVEL=NVL && export NCCL_ALGO=Ring && export NCCL_PROTO=Simple && export NCCL_DEBUG=WARN && export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 && export OMP_NUM_THREADS=4 && TIMESTAMP=$(date +%Y_%m_%d_%H_%M_%S) && OUTPUT_DIR=\"${workspaceFolder}/outputs/py/ddp_nvlink_${TIMESTAMP}\" && mkdir -p \"$OUTPUT_DIR\" && ${workspaceFolder}/.venv/bin/torchrun --nproc_per_node=2 ${workspaceFolder}/main.py --input-path data --output-path \"$OUTPUT_DIR\" --num-train-pyramids 200 --batch-size 40 --num-workers 4 --num-iter 100 --num-parallel-scales 7 --discriminator-steps 3 --generator-steps 3 --alpha 10 --scale0-noise-amp 1.5 --min-noise-amp 0.3 --lambda-diversity 1.0 --use-wells --use-seismic 2>&1 | tee \"$OUTPUT_DIR/train.log\""
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			},
+			"options": {
+				"cwd": "${workspaceFolder}"
+			}
+		},
+		{
+			"label": "Benchmark NVLink - 2 GPU (global bs=40)",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"set -euo pipefail && export NCCL_P2P_LEVEL=NVL && export NCCL_ALGO=Ring && export NCCL_PROTO=Simple && export NCCL_DEBUG=WARN && export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 && export OMP_NUM_THREADS=4 && TIMESTAMP=$(date +%Y_%m_%d_%H_%M_%S) && OUTPUT_DIR=\"${workspaceFolder}/outputs/bench/2gpu_bs40_${TIMESTAMP}\" && mkdir -p \"$OUTPUT_DIR\" && ${workspaceFolder}/.venv/bin/torchrun --nproc_per_node=2 ${workspaceFolder}/main.py --input-path data --output-path \"$OUTPUT_DIR\" --manual-seed 0 --num-train-pyramids 200 --batch-size 40 --num-workers 4 --num-iter 50 --num-parallel-scales 7 --discriminator-steps 3 --generator-steps 3 --alpha 10 --scale0-noise-amp 1.5 --min-noise-amp 0.3 --lambda-diversity 1.0 --use-wells --use-seismic --no-tensorboard --no-plot-outputs 2>&1 | tee \"$OUTPUT_DIR/train.log\""
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			},
+			"options": {
+				"cwd": "${workspaceFolder}"
+			}
+		},
+		{
+			"label": "start-tensorboard",
+			"type": "shell",
+			"command": "${workspaceFolder}/launch_tensorboard.sh",
+			"isBackground": true,
+			"problemMatcher": {
+				"pattern": {
+					"regexp": "^$",
+					"file": 1
+				},
+				"background": {
+					"activeOnStart": true,
+					"beginsPattern": ".",
+					"endsPattern": "TensorBoard is ready"
+				}
+			},
+			"presentation": {
+				"reveal": "silent",
+				"panel": "dedicated",
+				"close": false
+			}
+		},
+		{
+			"label": "kill-torchrun-orphans",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-c",
+				"pkill -9 -f 'torchrun|torch.distributed.run.*main.py' 2>/dev/null; echo 'Cleaned up torchrun processes'"
+			],
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "silent",
+				"panel": "shared",
+				"close": true
+			}
+		},
+		{
+			"label": "start-training-env",
+			"dependsOn": [
+				"kill-torchrun-orphans",
+				"start-tensorboard"
+			],
+			"problemMatcher": []
+		}
+	]
+}
