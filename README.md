@@ -478,14 +478,16 @@ The `experiments/` package provides a fully automated conditioning-ablation suit
 
 ### Conditioning Ablation Suite
 
-The four variants are:
+The ablation varies the **conditioning inputs** (Wells and Seismic) while keeping the **Rock-Physics output branch** (Ip, Is, Vp/Vs) always enabled — it is a network output, not a conditioning signal.
 
-| Variant | Wells | Seismic | Rock-Physics |
-|---|---|---|---|
+| Variant | Wells *(input)* | Seismic *(input)* | Rock-Physics *(output)* |
+|---|:---:|:---:|:---:|
 | `wells_seismic` | ✅ | ✅ | ✅ |
 | `wells_only` | ✅ | ❌ | ✅ |
 | `seismic_only` | ❌ | ✅ | ✅ |
 | `unconditional` | ❌ | ❌ | ✅ |
+
+> **Note**: Rock-Physics (Ip, Is, Vp/Vs) is always predicted as an **output** of the generator alongside the facies classes. Enabling `--use-rock-physics` activates the physics-informed loss terms that supervise these output channels during training.
 
 #### Full Experiment (Train + Generate + Embed)
 
