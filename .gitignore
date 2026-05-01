@@ -1,0 +1,25 @@
+# Environments
+.venv/
+.env
+bin/
+obj/
+
+# IDEs
+.idea/
+.vscode/
+**/.DS_Store
+
+# Caches
+.cache/
+.checkpoints/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+**/__pycache__/
+
+# Logs & Outputs
+logs/
+outputs*/
+**/events.out.tfevents*
+
+scripts/
