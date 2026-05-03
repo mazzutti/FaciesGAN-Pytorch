@@ -9,7 +9,12 @@ arguments used throughout the project. They may be passed as the
 import argparse
 from dataclasses import dataclass
 
-from config import DATA_DIR, OUTPUTS_DIR
+from config import (
+    DATA_DIR,
+    OUTPUTS_DIR,
+    DomainConfig,
+    PhysicsConfig,
+)
 
 
 @dataclass
@@ -30,7 +35,7 @@ class TrainingOptions(argparse.Namespace):
         discriminator_steps: int = 3,
         scale0_disc_steps_multiplier: int = 1,
         scale0_loss_multiplier: float = 1.0,
-        num_facies_classes: int = 4,
+        num_facies_classes: int = DomainConfig.NUM_FACIES,
         gamma: float = 0.9,
         generator_steps: int = 3,
         gpu_device: int = 0,
@@ -57,7 +62,7 @@ class TrainingOptions(argparse.Namespace):
         num_generated_per_real: int = 5,
         num_iter: int = 2000,
         num_layer: int = 5,
-        noise_channels: int = 4,
+        noise_channels: int = DomainConfig.NOISE_CHANNELS,
         num_real_facies: int = 5,
         num_train_pyramids: int = 200,
         num_parallel_scales: int = 2,
@@ -87,9 +92,9 @@ class TrainingOptions(argparse.Namespace):
         elastic_loss_penalty: float = 1.0,
         physics_loss_penalty: float = 1.0,
         dz_pixel: float = 5.0,
-        wavelet_f_peak: float = 8.0,
-        wavelet_dt: float = 0.001,
-        wavelet_length: float = 0.128,
+        wavelet_f_peak: float = PhysicsConfig.WAVELET_F_PEAK,
+        wavelet_dt: float = PhysicsConfig.WAVELET_DT,
+        wavelet_length: float = PhysicsConfig.WAVELET_LENGTH,
         lr_patience: int = 400,
         lr_min: float = 1e-4,
         lr_smoothing_alpha: float = 0.95,
@@ -116,7 +121,7 @@ class TrainingOptions(argparse.Namespace):
             Multiplier for extra discriminator steps at scale 0 only. E.g. 2
             runs twice as many D-steps at the coarsest scale. Default is 1.
         num_facies_classes : int, optional
-            Number of discrete facies classes to produce. Default is 4.
+            Number of discrete facies classes to produce. Default is DomainConfig.NUM_FACIES.
             The facies classes are typically:
             0: Floodplain, 1: Point bar, 2: Channel, 3: Boundary.
         gamma : float, optional
@@ -125,6 +130,8 @@ class TrainingOptions(argparse.Namespace):
             Number of generator steps per training iteration. Default is 3.
         gpu_device : int, optional
             GPU device id to use when CUDA is available. Default is 0.
+        gpu_devices : list[int] or None, optional
+            Optional list of GPU device IDs for multi-GPU training. Default is None.
         input_path : str, optional
             Path to the dataset root directory. Default is "data/."
         kernel_size : int, optional
@@ -133,12 +140,12 @@ class TrainingOptions(argparse.Namespace):
             Gradient penalty weight for discriminator regularization. Default
             is 0.1.
         lr_d : float, optional
-            Learning rate for the discriminator optimizer. Default is 5e-05.
+            Learning rate for the discriminator optimizer. Default is 5e-04.
         lr_decay : int, optional
             Number of epochs before the learning rate scheduler decays. Default
             is 1000.
         lr_g : float, optional
-            Learning rate for the generator optimizer. Default is 5e-05.
+            Learning rate for the generator optimizer. Default is 5e-04.
         manual_seed : int or None, optional
             Optional random seed for reproducibility. Default is None.
         max_size : int, optional
@@ -153,6 +160,8 @@ class TrainingOptions(argparse.Namespace):
             Minimum noise amplitude floor for diversity. Default is 0.1.
         scale0_noise_amp : float, optional
             Noise amplitude at scale 0 (controls structural diversity). Default is 1.0.
+        grad_clip_norm : float, optional
+            Maximum norm for gradient clipping. Default is 1.0.
         diversity_loss_penalty : float, optional
             Scalar multiplier for the generator diversity loss. Default is 1.0.
         adversarial_loss_penalty : float, optional
@@ -170,11 +179,17 @@ class TrainingOptions(argparse.Namespace):
             shuffles the dataset independently. Default is 2000.
         num_layer : int, optional
             Number of layers per block/scale. Default is 5.
+        noise_channels : int, optional
+            Number of input noise channels. Default is DomainConfig.NOISE_CHANNELS.
         num_real_facies : int, optional
             Number of real facies used when composing result grids. Default is 5.
-        num_train_facies : int, optional
-            Limit on how many training facies to use from the dataset. Default is
+        num_train_pyramids : int, optional
+            Limit on how many training pyramids to use from the dataset. Default is
             200.
+        num_parallel_scales : int, optional
+            Number of scales to train in parallel. Default is 2.
+        num_workers : int, optional
+            Number of worker processes for data loading. Default is 4.
         output_path : str, optional
             Output directory for checkpoints and outputs. Default is "outputs/."
         padding_size : int, optional
@@ -185,6 +200,10 @@ class TrainingOptions(argparse.Namespace):
         save_interval : int, optional
             Interval (in epochs) between saving generated outputs. Default is
             100.
+        checkpoint_interval : int, optional
+            Interval (in epochs) between saving model checkpoints. Default is 1.
+        start_epoch : int, optional
+            Starting epoch index for training. Default is 0.
         start_scale : int, optional
             Starting scale index for training. Default is 0.
         stride : int, optional
@@ -194,32 +213,54 @@ class TrainingOptions(argparse.Namespace):
         use_cpu : bool, optional
             Force CPU even if CUDA is available. Default is False.
         use_wells : bool, optional
-            If True, enable loading/using well data (filter dataset by `wells`). Default is False.
+            If True, enable loading/using well data. Default is False.
         use_seismic : bool, optional
             If True, enable loading/using seismic data during training. Default is False.
         use_rock_physics : bool, optional
             If True, use Ip, Is, and Vp/Vs data as continuous outputs. Default is False.
-        wells : tuple of int, optional
-            Optional list/tuple of well indices to filter dataset. Default is
+        wells_mask_columns : tuple[int, ...], optional
+            Optional tuple of well column indices to filter dataset. Default is
             an empty tuple.
         enable_tensorboard : bool, optional
             Enable TensorBoard logging during training. Default is True.
         enable_plot_outputs : bool, optional
-            Enable saving generated output visualizations (facies and rock physics) during training. Default is True.
+            Enable saving generated output visualizations during training. Default is True.
+        shuffle : bool, optional
+            Whether to shuffle the dataset every epoch. Default is True.
+        gp_interval : int, optional
+            Interval (in steps) for computing the gradient penalty. Default is 8.
+        gradient_checkpointing : bool, optional
+            Enable gradient checkpointing to save VRAM. Default is False.
+        amp_dtype : str, optional
+            Dtype for Automatic Mixed Precision ('fp16' or 'bf16'). Default is 'bf16'.
+        rec_rock_physics_loss_penalty : float, optional
+            Weight for rock physics reconstruction loss. Default is 1.0.
         tv_loss_penalty : float, optional
-            Scalar multiplier for the total variation loss (smoothness) applied to rock physics. Default is 1.0.
+            Scalar multiplier for the total variation loss. Default is 1.0.
         elastic_loss_penalty : float, optional
-            Scalar multiplier for the elastic consistency loss (MSE between Ip/Is and VpVs). Default is 1.0.
+            Scalar multiplier for the elastic consistency loss. Default is 1.0.
         physics_loss_penalty : float, optional
-            Scalar multiplier for the geophysical physics loss (MSE between synthetic and real seismic). Default is 1.0.
+            Scalar multiplier for the geophysical physics loss. Default is 1.0.
         dz_pixel : float, optional
             Vertical resolution of the data in meters per pixel. Default is 5.0.
         wavelet_f_peak : float, optional
-            Peak frequency of the Ricker wavelet in Hz. Default is 8.0.
+            Peak frequency of the Ricker wavelet in Hz. Default is PhysicsConfig.WAVELET_F_PEAK.
         wavelet_dt : float, optional
-            Sampling interval of the wavelet in seconds. Default is 0.001.
+            Sampling interval of the wavelet in seconds. Default is PhysicsConfig.WAVELET_DT.
         wavelet_length : float, optional
-            Total length of the wavelet in seconds. Default is 0.128.
+            Total length of the wavelet in seconds. Default is PhysicsConfig.WAVELET_LENGTH.
+        lr_patience : int, optional
+            Patience for the learning rate scheduler. Default is 400.
+        lr_min : float, optional
+            Minimum learning rate for the scheduler. Default is 1e-4.
+        lr_smoothing_alpha : float, optional
+            Smoothing alpha for LR scheduler metric. Default is 0.95.
+        lr_g_factor : float, optional
+            Multiplicative factor for generator learning rate. Default is 0.8.
+        lr_decay_unit : str, optional
+            Unit for LR decay ('epoch' or 'step'). Default is 'epoch'.
+        compile_backend : bool, optional
+            Whether to use torch.compile for the model backend. Default is False.
 
         Notes
         -----

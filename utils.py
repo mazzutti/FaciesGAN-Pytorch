@@ -20,7 +20,54 @@ import torch
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
 
-from torch_utils import denorm, norm
+# ---------------------------------------------------------------------------
+# Normalization Helpers
+# ---------------------------------------------------------------------------
+
+
+def norm(x: torch.Tensor) -> torch.Tensor:
+    """Normalize tensor from [0, 1] to [-1, 1] range.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input tensor with values in [0, 1] range.
+
+    Returns
+    -------
+    torch.Tensor
+        Normalized tensor with values clamped to [-1, 1].
+    """
+    out = (x - 0.5) * 2
+    return out.clamp(-1, 1)
+
+
+def denorm(
+    tensor: torch.Tensor | NDArray[np.float32], ceiling: bool = False
+) -> torch.Tensor | NDArray[np.float32]:
+    """Denormalize tensor from [-1, 1] to [0, 1] range.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor | NDArray[np.float32]
+        Input tensor or array with values in [-1, 1] range.
+    ceiling : bool, optional
+        Whether to set all positive values to 1. Currently not implemented
+        in the numeric logic. Defaults to False.
+
+    Returns
+    -------
+    torch.Tensor | NDArray[np.float32]
+        Denormalized tensor or array with values clamped to [0, 1].
+    """
+    if isinstance(tensor, torch.Tensor):
+        tensor = (tensor + 1.0) / 2.0
+        tensor = tensor.clamp(0, 1)
+    else:
+        tensor = (tensor + np.float32(1.0)) / np.float32(2.0)
+        tensor = np.clip(tensor, 0, 1).astype(np.float32, copy=False)
+    return tensor
+
 
 from models.palette import PALETTE_RGB
 
@@ -32,7 +79,8 @@ from models.palette import PALETTE_RGB
 # Generic type variable used for helpers that return the same type as the input
 T = TypeVar("T")
 
-from config import OUTPUTS_DIR
+from config import OUTPUTS_DIR, DomainConfig
+from enums import FaciesClass
 
 # ---------------------------------------------------------------------------
 # Color & Palette Helpers
@@ -315,7 +363,7 @@ def facies_to_rgb(
     return np.transpose(rgb, (2, 0, 1))
 
 
-def set_seed(seed: int = 42) -> None:
+def set_seed(seed: int = DomainConfig.RANDOM_SEED) -> None:
     """Set seeds for torch, numpy and python.random at module level.
 
     Keeping a module-level `set_seed` makes it easy for other modules to
@@ -399,7 +447,7 @@ def apply_well_mask(
     # 2. Identify active, non-background well pixels
     # We exclude channel 0 (Floodplain) in One-Hot or dark pixels in RGB.
     if real_facies.ndim == 3 and real_facies.shape[2] > 3:  # One-Hot case
-        is_not_bg = np.argmax(real_facies, axis=-1) != 0
+        is_not_bg = np.argmax(real_facies, axis=-1) != FaciesClass.FLOODPLAIN
     else:  # RGB/Grayscale case
         is_not_bg = np.max(np.abs(real_facies), axis=-1) > 0.3
 
@@ -461,7 +509,7 @@ def np2torch(
     Returns
     -------
     torch.Tensor
-        Converted tensor, always normalized to [-1, 1] range.
+        Converted tensor, normalized to [-1, 1] range if ``normalize`` is True.
 
     """
     # Support input layouts: (B, T, H, W, C), (B, H, W, C), (H, W, C), or (H, W) grayscale.
@@ -484,8 +532,6 @@ def np2torch(
     return tensor
 
 
-
-
 def torch2np(
     tensor: torch.Tensor, denormalize: bool = False, ceiling: bool = False
 ) -> NDArray[np.float32]:
@@ -505,7 +551,8 @@ def torch2np(
     denormalize : bool, optional
         If True, denormalize from [-1, 1] to [0, 1]. Defaults to False.
     ceiling : bool, optional
-        If True, set positive values to 1 during denormalization. Defaults to False.
+        If True, set positive values to 1 during denormalization (currently
+        not implemented in denorm). Defaults to False.
 
     Returns
     -------
@@ -711,11 +758,11 @@ def _apply_colormap_1ch(arr2d: np.ndarray, cmap_name: str = "viridis") -> np.nda
 
 
 def plot_generated_outputs(
-    fake_facies: torch.Tensor,
-    real_facies: torch.Tensor,
+    fake_facies: torch.Tensor | NDArray[np.float32] | list[torch.Tensor | NDArray[np.float32]],
+    real_facies: torch.Tensor | NDArray[np.float32],
     stage: int,
     index: int,
-    masks: torch.Tensor | None = None,
+    masks: torch.Tensor | NDArray[np.float32] | None = None,
     out_dir: str = OUTPUTS_DIR,
     save: bool = False,
     cell_size: int = 256,
@@ -731,10 +778,10 @@ def plot_generated_outputs(
 
     Parameters
     ----------
-    fake_facies : Sequence[torch.Tensor | np.ndarray]
-        Sequence of generated facies tensors/arrays, one entry per real facie
-        containing multiple generated samples. Accepts PyTorch tensors
-        or NumPy arrays (host-side) for worker process compatibility.
+    fake_facies : torch.Tensor | list[torch.Tensor]
+        Sequence of generated facies tensors/arrays, or a single batched
+        tensor. Accepts PyTorch tensors or NumPy arrays (host-side) for
+        worker process compatibility.
     real_facies : torch.Tensor | np.ndarray
         Real facies batch as a tensor/array.
     masks : torch.Tensor | np.ndarray
@@ -755,58 +802,82 @@ def plot_generated_outputs(
     if not save:
         return
 
-    fake_facies_arr: list[list[np.ndarray]] = []
-    ndim = getattr(fake_facies, "ndim", None)
-    if ndim == 5:
-        arr = fake_facies
-        if not isinstance(arr, np.ndarray):
-            arr = tensor2np(arr, denormalize=True)
-        num_real_facies = arr.shape[0]
-        num_generated_per_real = arr.shape[1]
-        fake_facies_arr = [
-            [np.asarray(arr[i, j]) for j in range(num_generated_per_real)]
-            for i in range(num_real_facies)
-        ]
-    elif ndim == 4:
-        arr = fake_facies
-        if not isinstance(arr, np.ndarray):
-            arr = tensor2np(arr, denormalize=True)
-        num_real_facies = arr.shape[0]
-        num_generated_per_real = 1
-        fake_facies_arr = [[np.asarray(arr[i])] for i in range(num_real_facies)]
-    elif ndim == 3:
-        arr = fake_facies
-        if not isinstance(arr, np.ndarray):
-            arr = tensor2np(arr, denormalize=True)
-        num_real_facies = 1
-        num_generated_per_real = 1
-        fake_facies_arr = [[arr]]
-    else:
-        num_real_facies = int(real_facies.shape[0])
+    def _to_numpy_image(
+        value: torch.Tensor | NDArray[np.float32],
+        *,
+        denormalize: bool,
+        ceiling: bool = False,
+    ) -> NDArray[np.float32]:
+        """Convert tensor/array to float32 numpy in channels-last format."""
+        if isinstance(value, torch.Tensor):
+            return tensor2np(value, denormalize=denormalize, ceiling=ceiling)
+
+        arr = np.asarray(value, dtype=np.float32)
+        if denormalize:
+            arr = (arr + 1.0) / 2.0
+
+        if arr.ndim == 4 and arr.shape[1] in [1, 3, 4, 6, 7]:
+            arr = np.transpose(arr, (0, 2, 3, 1))
+        elif arr.ndim == 3 and arr.shape[0] in [1, 3, 4, 6, 7]:
+            arr = np.transpose(arr, (1, 2, 0))
+
+        return np.clip(arr, 0.0, 1.0).astype(np.float32, copy=False)
+
+    fake_facies_arr: list[list[np.ndarray]]
+    num_real_facies: int
+    num_generated_per_real: int
+
+    if isinstance(fake_facies, list):
+        np_real_for_count = _to_numpy_image(real_facies, denormalize=False)
+        num_real_facies = int(np_real_for_count.shape[0]) if np_real_for_count.ndim >= 4 else 1
         fake_facies_arr = [[] for _ in range(num_real_facies)]
+
         for ff in fake_facies:
-            arr = ff
-            if not isinstance(ff, np.ndarray):
-                arr = tensor2np(ff, denormalize=True)
-            # arr shape: (batch_size, H, W, C) or (H, W, C)
+            arr = _to_numpy_image(ff, denormalize=True)
             if arr.ndim == 4:
-                for j in range(min(num_real_facies, arr.shape[0])):
-                    fake_facies_arr[j].append(np.asarray(arr[j]))
+                limit = min(num_real_facies, int(arr.shape[0]))
+                for j in range(limit):
+                    fake_facies_arr[j].append(np.asarray(arr[j], dtype=np.float32))
             else:
+                arr_sample = np.asarray(arr, dtype=np.float32)
                 for j in range(num_real_facies):
-                    fake_facies_arr[j].append(np.asarray(arr))
+                    fake_facies_arr[j].append(arr_sample)
+
         if not fake_facies_arr:
             return
+
         num_real_facies = min(num_real_facies, len(fake_facies_arr))
-        num_generated_per_real = max(len(row) for row in fake_facies_arr)
-
-    if isinstance(real_facies, np.ndarray):
-        np_real_facies = tensor2np(real_facies, denormalize=False)
+        num_generated_per_real = max((len(row) for row in fake_facies_arr), default=0)
+        if num_generated_per_real <= 0:
+            return
     else:
-        np_real_facies = tensor2np(real_facies, denormalize=True, ceiling=True)
+        arr = _to_numpy_image(fake_facies, denormalize=True)
+        if arr.ndim == 5:
+            num_real_facies = int(arr.shape[0])
+            num_generated_per_real = int(arr.shape[1])
+            fake_facies_arr = [
+                [np.asarray(arr[i, j], dtype=np.float32) for j in range(num_generated_per_real)]
+                for i in range(num_real_facies)
+            ]
+        elif arr.ndim == 4:
+            num_real_facies = int(arr.shape[0])
+            num_generated_per_real = 1
+            fake_facies_arr = [[np.asarray(arr[i], dtype=np.float32)] for i in range(num_real_facies)]
+        elif arr.ndim == 3:
+            num_real_facies = 1
+            num_generated_per_real = 1
+            fake_facies_arr = [[np.asarray(arr, dtype=np.float32)]]
+        else:
+            raise ValueError(f"Unsupported fake_facies ndim for plotting: {arr.ndim}")
 
+    if isinstance(real_facies, torch.Tensor):
+        np_real_facies = _to_numpy_image(real_facies, denormalize=True, ceiling=True)
+    else:
+        np_real_facies = _to_numpy_image(real_facies, denormalize=False)
+
+    np_masks: NDArray[np.float32] | None
     if masks is not None:
-        np_masks = masks if isinstance(masks, np.ndarray) else tensor2np(masks)
+        np_masks = _to_numpy_image(masks, denormalize=False)
     else:
         np_masks = None
 

@@ -28,7 +28,7 @@ from umap import UMAP  # type: ignore
 
 import utils
 from background_workers import submit_plot_generated_outputs
-from config import OPT_FILE
+from config import OPT_FILE, DomainConfig
 from datasets.dataset import TorchPyramidsDataset
 from datasets.utils import build_conditioning_pyramids
 from log import format_time
@@ -327,7 +327,7 @@ def plot_umap(
         n_neighbors=min(15, combined.shape[0] - 1),
         min_dist=0.1,
         metric="euclidean",
-        random_state=42,
+        random_state=DomainConfig.RANDOM_SEED,
     )
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=sparse.SparseEfficiencyWarning)  # type: ignore
@@ -465,7 +465,7 @@ def plot_tsne(
     tsne = TSNE(
         n_components=2,
         perplexity=min(30.0, (combined.shape[0] - 1) / 3.0),
-        random_state=42,
+        random_state=DomainConfig.RANDOM_SEED,
     )
     embedding: np.ndarray = tsne.fit_transform(combined)  # type: ignore[assignment]
 

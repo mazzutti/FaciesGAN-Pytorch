@@ -11,8 +11,12 @@ import torch
 import torch.nn.functional as F
 from scipy.signal import fftconvolve  # type: ignore[import]
 
+from config import DomainConfig, PhysicsConfig
 
-def ricker_wavelet(f_peak: float, dt: float, length: float = 0.128) -> np.ndarray:
+
+def ricker_wavelet(
+    f_peak: float, dt: float, length: float = PhysicsConfig.WAVELET_LENGTH
+) -> np.ndarray:
     """
     Generate a Ricker (zero-phase) wavelet.
 
@@ -23,7 +27,7 @@ def ricker_wavelet(f_peak: float, dt: float, length: float = 0.128) -> np.ndarra
     dt : float
         Sampling interval in seconds.
     length : float, optional
-        Total length of the wavelet in seconds. Default is 0.128.
+        Total length of the wavelet in seconds. Default is PhysicsConfig.WAVELET_LENGTH.
 
     Returns
     -------
@@ -70,7 +74,7 @@ def ip_to_reflectivity(ip: np.ndarray, axis: int = 0) -> np.ndarray:
     ip_i = ip[tuple(s_i)]
     ip_i_plus_1 = ip[tuple(s_i_plus_1)]
 
-    rc = (ip_i_plus_1 - ip_i) / (ip_i_plus_1 + ip_i + 1e-6)
+    rc = (ip_i_plus_1 - ip_i) / (ip_i_plus_1 + ip_i + DomainConfig.EPSILON)
 
     # Pad with a zero at the end of the axis to maintain shape
     padding_shape = list(ip.shape)
@@ -81,7 +85,10 @@ def ip_to_reflectivity(ip: np.ndarray, axis: int = 0) -> np.ndarray:
 
 
 def apply_wavelet_to_ip(
-    ip: np.ndarray, f_peak: float = 8.0, dt: float = 0.001, axis: int = 0
+    ip: np.ndarray,
+    f_peak: float = PhysicsConfig.WAVELET_F_PEAK,
+    dt: float = PhysicsConfig.WAVELET_DT,
+    axis: int = 0,
 ) -> np.ndarray:
     """
     Applies a Ricker wavelet to P-Impedance data.
@@ -91,9 +98,9 @@ def apply_wavelet_to_ip(
     ip : np.ndarray
         P-Impedance data.
     f_peak : float, optional
-        Wavelet peak frequency (Hz). Default is 8.0.
+        Wavelet peak frequency (Hz). Default is PhysicsConfig.WAVELET_F_PEAK.
     dt : float, optional
-        Sampling interval (s). Default is 0.001.
+        Sampling interval (s). Default is PhysicsConfig.WAVELET_DT.
     axis : int, optional
         Axis along which to apply the wavelet (depth/time axis).
         Default is 0.
@@ -118,7 +125,10 @@ def apply_wavelet_to_ip(
 
 
 def torch_ricker_wavelet(
-    f_peak: float, dt: float, length: float = 0.128, device: torch.device | None = None
+    f_peak: float,
+    dt: float,
+    length: float = PhysicsConfig.WAVELET_LENGTH,
+    device: torch.device | None = None,
 ) -> torch.Tensor:
     """
     Generate a Ricker (zero-phase) wavelet as a torch Tensor.
@@ -130,7 +140,7 @@ def torch_ricker_wavelet(
     dt : float
         Sampling interval in seconds.
     length : float, optional
-        Total length in seconds. Default is 0.128.
+        Total length in seconds. Default is PhysicsConfig.WAVELET_LENGTH.
     device : torch.device, optional
         Target device for the tensor.
 
@@ -165,7 +175,7 @@ def torch_ip_to_reflectivity(ip: torch.Tensor) -> torch.Tensor:
     """
     # Calculate RC along the H axis (dim 2)
     rc = (ip[:, :, 1:, :] - ip[:, :, :-1, :]) / (
-        ip[:, :, 1:, :] + ip[:, :, :-1, :] + 1e-6
+        ip[:, :, 1:, :] + ip[:, :, :-1, :] + DomainConfig.EPSILON
     )
 
     # Pad with a zero at the bottom to maintain shape
@@ -177,8 +187,8 @@ def resample_wavelet_to_depth(
     vp_mean: float | torch.Tensor,
     dt: torch.Tensor,
     dz_pixel: float | torch.Tensor,
-    vp_min: float | torch.Tensor = 2000.0,
-    fixed_size: int = 255,
+    vp_min: float | torch.Tensor = PhysicsConfig.VP_MIN,
+    fixed_size: int = PhysicsConfig.FIXED_KERNEL_SIZE,
 ) -> torch.Tensor:
     """Resample a time-domain wavelet to depth using a zero-sync grid_sample approach.
 
@@ -196,7 +206,7 @@ def resample_wavelet_to_depth(
     dz_pixel : float or torch.Tensor
         Depth sampling interval (m).
     vp_min : float or torch.Tensor, optional
-        Minimum velocity to clamp vp_mean (m/s). Default is 2000.0.
+        Minimum velocity to clamp vp_mean (m/s). Default is PhysicsConfig.VP_MIN.
     fixed_size : int, optional
         Fixed output size for the kernel buffer. Default is 256.
 
@@ -249,7 +259,7 @@ def resample_wavelet_to_depth(
     )
 
     # Normalize energy
-    w_z = w_z / (torch.norm(w_z) + 1e-6)  # type: ignore[assignment]
+    w_z = w_z / (torch.norm(w_z) + DomainConfig.EPSILON)  # type: ignore[assignment]
 
     # Return as (OutC, InC, H, W) -> (1, 1, fixed_size, 1)
     return w_z.view(1, 1, fixed_size, 1)  # type: ignore[return-value]

@@ -18,6 +18,8 @@ import torch
 from tensorboardX import SummaryWriter  # pyright: ignore
 
 import utils
+from config import TENSORBOARD_LOGS_DIR, DomainConfig, LoggingConfig
+from enums import FeatureKey, MetricKey
 from models.utils import split_facies_rp
 
 if TYPE_CHECKING:
@@ -68,11 +70,11 @@ class TensorBoardVisualizer:
         num_scales: int,
         output_dir: str,
         log_dir: str | None = None,
-        update_interval: int = 1,
-        image_log_interval: int = 100,
+        update_interval: int = LoggingConfig.SCALAR_LOG_INTERVAL,
+        image_log_interval: int = LoggingConfig.IMAGE_LOG_INTERVAL,
         dataset_info: str | None = None,
         purge_step: int | None = None,
-        num_facies: int = 4,
+        num_facies: int = DomainConfig.NUM_FACIES,
         has_rp: bool = False,
         physics_info: SeismicPhysicsInfo | None = None,
     ):
@@ -102,7 +104,7 @@ class TensorBoardVisualizer:
 
         # Setup TensorBoard logging
         if not log_dir:
-            log_dir = os.path.join(output_dir, "tensorboard_logs")
+            log_dir = os.path.join(output_dir, TENSORBOARD_LOGS_DIR)
 
         # Ensure directories exist; guard against empty strings and race conditions.
         if log_dir:
@@ -142,12 +144,13 @@ class TensorBoardVisualizer:
         ----------
         epoch : int
             Current epoch number (used as the global step in TensorBoard).
-        scale_metrics : ScaleMetrics or tuple[dict[str, float], ...]
+        scale_metrics : ScaleMetrics or dict[int, dict[str, float]]
             Either a `ScaleMetrics` dataclass (with tensor fields) or a
-            pre-flattened tuple of metric-name->float dictionaries, one per scale.
+            dictionary of scale -> metric-key->float dictionaries.
             When a `ScaleMetrics` is provided the method will extract scalar
             values via `tensor.item()` before logging.
-            Dictionary of generated sample tensors, one per scale. Expected
+        generated_samples : tuple[torch.Tensor, ...], optional
+            Tuple of generated sample tensors, one per scale. Expected
             tensor shapes: (B, C, H, W) or (C, H, W). The first sample in the
             batch is used for logging. Tensors are detached and moved to CPU
             before conversion to numpy arrays.
@@ -176,17 +179,22 @@ class TensorBoardVisualizer:
         elapsed = current_time - self.start_time
 
         # Define standard metric groups
-        d_keys = ["d_total", "d_real", "d_fake", "d_gp"]
+        d_keys = [
+            MetricKey.D_TOTAL,
+            MetricKey.D_REAL,
+            MetricKey.D_FAKE,
+            MetricKey.D_GP,
+        ]
         g_keys = [
-            "g_total",
-            "g_fake",
-            "g_rec_facies",
-            "g_well",
-            "g_div",
-            "g_rec_rock_physics",
-            "g_tv",
-            "g_elastic",
-            "g_physics",
+            MetricKey.G_TOTAL,
+            MetricKey.G_FAKE,
+            MetricKey.G_REC_FACIES,
+            MetricKey.G_WELL,
+            MetricKey.G_DIV,
+            MetricKey.G_REC_ROCK_PHYSICS,
+            MetricKey.G_TV,
+            MetricKey.G_ELASTIC,
+            MetricKey.G_PHYSICS,
         ]
 
         # Log individual scale metrics
@@ -238,8 +246,8 @@ class TensorBoardVisualizer:
                     has_rp=self.has_rp,
                     channels_last=True,
                 )
-                facies_img = split["facies"]
-                rp_img = split["rock_physics"]
+                facies_img = split[FeatureKey.FACIES]
+                rp_img = split[FeatureKey.ROCK_PHYSICS]
 
                 # Convert one-hot facies to RGB using a high-contrast palette
                 if facies_img is not None:
@@ -343,8 +351,8 @@ class TensorBoardVisualizer:
 
         # Dynamic symmetric normalization to ensure "punchy" colors like matplotlib's imshow
         # We scale by the maximum absolute value to keep 0 at the center (white)
-        v_max_gen = max(abs(synth_np.min()), abs(synth_np.max()))
-        synth_norm = synth_np / (v_max_gen + 1e-6)
+        v_max_gen = np.max(np.abs(synth_np))
+        synth_norm = synth_np / (v_max_gen + DomainConfig.EPSILON)
         synth_mapped = (synth_norm + 1.0) / 2.0
 
         self._add_image_with_cmap(

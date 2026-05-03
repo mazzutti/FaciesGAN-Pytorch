@@ -22,6 +22,7 @@ import torch
 from numpy.typing import NDArray
 from scipy.ndimage import zoom  # type: ignore[import-untyped]
 
+from enums import InterpolationStrategy
 from interpolators.base import BaseInterpolator
 from interpolators.config import InterpolatorConfig
 
@@ -86,7 +87,7 @@ class NumericInterpolator(BaseInterpolator):
             data = data[:, :, None]
         data = np.asarray(data, dtype=np.float32)
 
-        if self.config.strategy == "categorical":
+        if self.config.strategy == InterpolationStrategy.CATEGORICAL:
             return self._interpolate_categorical(data, resolutions)
         else:
             return self._interpolate_continuous(data, resolutions)

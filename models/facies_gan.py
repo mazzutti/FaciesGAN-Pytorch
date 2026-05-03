@@ -19,9 +19,25 @@ import torch.nn.functional as F
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 
-from datasets.utils import get_global_stats
+from config import (
+    AMP_FILE,
+    D_FILE,
+    G_FILE,
+    M_FILE,
+    SHAPE_FILE,
+    DomainConfig,
+    LoggingConfig,
+    PhysicsConfig,
+)
+from enums import LossFunction
+from metrics import DiscriminatorMetrics, GeneratorMetrics, ScaleMetrics
+from models.base import FaciesGAN, IterableMetrics
+from options import TrainingOptions
 from physics.seismic import torch_ricker_wavelet
 
+from . import utils
+from .discriminator import Discriminator
+from .generator import Generator
 from .utils import (
     calculate_physics_loss,
     dice_loss,
@@ -43,15 +59,6 @@ from .utils import (
 # comfortable headroom; raising it prevents FailOnRecompileLimitHit
 # (fullgraph=True treats the limit as a hard error instead of fallback).
 torch._dynamo.config.cache_size_limit = 64  # type: ignore[attr-defined]
-
-from config import AMP_FILE, D_FILE, G_FILE, M_FILE, SHAPE_FILE
-from metrics import DiscriminatorMetrics, GeneratorMetrics, ScaleMetrics
-from models.base import FaciesGAN, IterableMetrics
-from options import TrainingOptions
-
-from . import utils
-from .discriminator import Discriminator
-from .generator import Generator
 
 
 def unwrap_ddp(module: nn.Module) -> nn.Module:
@@ -75,7 +82,7 @@ class TorchFaciesGAN(
         self,
         options: TrainingOptions,
         device: torch.device = torch.device("cpu"),
-        noise_channels: int = 4,
+        noise_channels: int = DomainConfig.NOISE_CHANNELS,
         use_ddp: bool = False,
         *args: tuple[Any, ...],
         **kwargs: dict[str, Any],
@@ -84,12 +91,12 @@ class TorchFaciesGAN(
 
         Parameters
         ----------
-        device : torch.device
-            Primary device for computation.
         options : TrainingOptions
             Training configuration containing hyperparameters.
+        device : torch.device, optional
+            Primary device for computation. Defaults to CPU.
         noise_channels : int, optional
-            Number of input noise channels, by default 3.
+            Number of input noise channels, by default DomainConfig.NOISE_CHANNELS.
         use_ddp : bool, optional
             When ``True``, each per-scale sub-module is wrapped with
             ``DistributedDataParallel`` after creation.  Requires that
@@ -159,6 +166,8 @@ class TorchFaciesGAN(
         self._pending_disc_ar_grads: list[torch.Tensor] | None = None
 
         # Load stats for Elastic Consistency Loss denormalization
+        from datasets.utils import get_global_stats
+
         self.stats = get_global_stats(options.input_path)
 
         # Pre-compute tensors for fast denormalization on GPU
@@ -170,12 +179,16 @@ class TorchFaciesGAN(
             key = comp.name
             s = self.stats[key]
             # Note: VP/VS in stats.json are in Km/s, convert to m/s
-            scale = 1000.0 if comp in [DataFiles.VP, DataFiles.VS] else 1.0
+            scale = (
+                PhysicsConfig.VELOCITY_SCALE
+                if comp in [DataFiles.VP, DataFiles.VS]
+                else 1.0
+            )
             self.phys_min[key] = torch.tensor(
-                s["min"] * scale, device=device, dtype=torch.float32
+                s.min * scale, device=device, dtype=torch.float32
             )
             self.phys_diff[key] = torch.tensor(
-                (s["max"] - s["min"]) * scale, device=device, dtype=torch.float32
+                (s.max - s.min) * scale, device=device, dtype=torch.float32
             )
 
         # Populate pyramid shapes once so they can be used for pre-calculating constants
@@ -194,7 +207,9 @@ class TorchFaciesGAN(
         self.register_buffer(
             "vp_max",
             torch.tensor(
-                self.stats["VP"]["max"] * 1000.0, device=device, dtype=torch.float32
+                self.stats["VP"].max * PhysicsConfig.VELOCITY_SCALE,
+                device=device,
+                dtype=torch.float32,
             ),
         )
 
@@ -205,7 +220,7 @@ class TorchFaciesGAN(
         )
 
         # Register rho_mean as a buffer for fast access in physics loss
-        rho_mean_val = float(self.stats["RHO"]["mean"])
+        rho_mean_val = float(self.stats["RHO"].mean)
         self.register_buffer(
             "rho_mean", torch.tensor(rho_mean_val, device=device, dtype=torch.float32)
         )
@@ -222,7 +237,7 @@ class TorchFaciesGAN(
         )
 
         # Reference velocity for Wavelet Resampling (avoids per-batch sync)
-        ip_mean = float(self.stats["Ip"]["mean"])
+        ip_mean = float(self.stats["Ip"].mean)
         self.vp_ref = ip_mean / rho_mean_val
 
         self._pending_disc_ar_opts: dict[int, torch.optim.Optimizer] | None = None
@@ -301,7 +316,7 @@ class TorchFaciesGAN(
     def update_loss_scale_factor(self, scale: int, d_mag: float | torch.Tensor) -> None:  # type: ignore[override]
         """EMA update keeping values as device-resident scalar tensors.
 
-        The 1e-4 lower bound is enforced here at write time so that
+        The DomainConfig.LOSS_SCALE_MIN lower bound is enforced here at write time so that
         ``get_loss_scale_factor`` can return the stored tensor directly
         without an extra ``torch.clamp`` call on every read (which would
         allocate a new CUDA scalar tensor each time).
@@ -310,9 +325,9 @@ class TorchFaciesGAN(
             d_mag = torch.tensor(d_mag, device=self.device)
         if scale not in self.loss_scale_factors:
             self.loss_scale_factors[scale] = (  # type: ignore[assignment]
-                d_mag.detach().clone().clamp_(min=1e-4)
+                d_mag.detach().clone().clamp_(min=DomainConfig.LOSS_SCALE_MIN)
                 if d_mag > 0
-                else torch.tensor(1e-4, device=self.device)
+                else torch.tensor(DomainConfig.LOSS_SCALE_MIN, device=self.device)
             )
         else:
             prev = self.loss_scale_factors[scale]
@@ -320,19 +335,25 @@ class TorchFaciesGAN(
                 prev = torch.tensor(prev, device=self.device)
             decay = self.loss_scale_ema_decay
             self.loss_scale_factors[scale] = (  # type: ignore[assignment]
-                (decay * prev + (1 - decay) * d_mag).clamp_(min=1e-4)
+                (decay * prev + (1 - decay) * d_mag).clamp_(
+                    min=DomainConfig.LOSS_SCALE_MIN
+                )
             ).detach()
 
     def get_loss_scale_factor(self, scale: int) -> float | torch.Tensor:  # type: ignore[override]
         """Return the current GPU-resident scale factor (no sync).
 
-        The 1e-4 minimum is already enforced by ``update_loss_scale_factor``
+        The DomainConfig.LOSS_SCALE_MIN minimum is already enforced by ``update_loss_scale_factor``
         so no additional ``torch.clamp`` allocation is needed here.
         """
         sf = self.loss_scale_factors.get(scale, 1.0)
         if isinstance(sf, torch.Tensor):
-            return sf  # already clamped to >= 1e-4 on every write
-        return max(sf, 1e-4)  # fallback before first update (float 1.0)
+            return (
+                sf  # already clamped to >= DomainConfig.LOSS_SCALE_MIN on every write
+            )
+        return max(
+            sf, DomainConfig.LOSS_SCALE_MIN
+        )  # fallback before first update (float 1.0)
 
     def __call__(self, *args: Any, **kwds: Any) -> ScaleMetrics:
         return nn.Module.__call__(self, *args, **kwds)
@@ -401,16 +422,16 @@ class TorchFaciesGAN(
 
         Parameters
         ----------
-        indexes (tuple[int, ...]):
+        indexes : torch.Tensor
             Batch/sample indices used to generate fake inputs.
-        scale (int):
+        scale : int
             Pyramid scale index for which to compute the metrics.
-        real_facies (torch.Tensor):
+        real : torch.Tensor
             Ground-truth tensor for the current scale.
-        wells_pyramid (dict[int, torch.Tensor], optional):
+        wells_pyramid : dict[int, torch.Tensor], optional
             Wells tensors dict for conditioning, keyed by scale.
-        seismic_pyramid (dict[int, torch.Tensor], optional):
-            Seismic  tensors dict for conditioning, keyed by scale.
+        seismic_pyramid : dict[int, torch.Tensor], optional
+            Seismic tensors dict for conditioning, keyed by scale.
 
         Returns
         -------
@@ -746,7 +767,7 @@ class TorchFaciesGAN(
             if (
                 self.use_ddp
                 and dist.is_initialized()
-                and self._disc_step_counter % 50 == 0
+                and self._disc_step_counter % LoggingConfig.EMA_SYNC_INTERVAL == 0
             ):
                 scales_list = sorted_scales
                 # Scale factors are already GPU tensors — stack into a
@@ -1172,7 +1193,7 @@ class TorchFaciesGAN(
                 elastic_loss = self._zero_scalar
                 if getattr(self.options, "elastic_loss_penalty", 0) > 0:
                     # 2. Compute Elastic Consistency Loss: MSE(Ip/Is, VpVs)
-                    eps = 1e-6
+                    eps = DomainConfig.EPSILON
                     calc_vpvs = phys["Ip"] / (phys["Is"] + eps)
                     elastic_loss = self.options.elastic_loss_penalty * F.mse_loss(
                         calc_vpvs, phys["VP_VS"]
@@ -1185,7 +1206,7 @@ class TorchFaciesGAN(
                 ):
 
                     # Estimate Vp for dynamic wavelet resampling
-                    # Vp is estimated from Ip and mean density. We multiply by 1000
+                    # Vp is estimated from Ip and mean density. We multiply by VELOCITY_SCALE
                     # to convert from Km/s to m/s. We clamp to the physical range.
                     rho_mean = cast(torch.Tensor, self.rho_mean)
                     vp_min = cast(torch.Tensor, self.vp_min)
@@ -1208,8 +1229,8 @@ class TorchFaciesGAN(
                             ip_max=cast(torch.Tensor, self.ip_max),
                             seis_min=cast(torch.Tensor, self.seis_min),
                             seis_max=cast(torch.Tensor, self.seis_max),
-                            loss_fn="huber",
-                            fixed_kernel_size=255,
+                            loss_fn=LossFunction.HUBER,
+                            fixed_kernel_size=PhysicsConfig.FIXED_KERNEL_SIZE,
                         )
                     )
             else:
@@ -1424,9 +1445,9 @@ class TorchFaciesGAN(
             Generated tensor samples for the current scale.
         real (torch.Tensor):
             Ground-truth tensor samples for the current scale.
-        wells (torch.Tensor):
+        well (torch.Tensor):
             Well-conditioning tensor for the current scale.
-        masks (torch.Tensor):
+        mask (torch.Tensor):
             Well mask tensor for the current scale.
 
         Returns

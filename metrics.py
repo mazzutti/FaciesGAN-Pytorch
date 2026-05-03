@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import torch
 
+from enums import MetricKey
 from log import Any
 
 
@@ -29,19 +30,19 @@ class DiscriminatorMetrics:
     fake: torch.Tensor
     gp: torch.Tensor
 
-    def as_dict(self) -> dict[str, float]:
+    def as_dict(self) -> dict[MetricKey, float]:
         """Return the metric values as a dictionary.
 
         Returns
         -------
-        dict[str, float]
-            Dictionary mapping metric names to their tensor values.
+        dict[MetricKey, float]
+            Dictionary mapping metric keys to their tensor values.
         """
         return {
-            "d_total": self.total.item(),  # type: ignore
-            "d_real": self.real.item(),  # type: ignore
-            "d_fake": self.fake.item(),  # type: ignore
-            "d_gp": self.gp.item(),  # type: ignore
+            MetricKey.D_TOTAL: self.total.item(),  # type: ignore
+            MetricKey.D_REAL: self.real.item(),  # type: ignore
+            MetricKey.D_FAKE: self.fake.item(),  # type: ignore
+            MetricKey.D_GP: self.gp.item(),  # type: ignore
         }
 
     def as_tuple(self) -> tuple[torch.Tensor, ...]:
@@ -75,24 +76,24 @@ class GeneratorMetrics:
     elastic: torch.Tensor
     physics: torch.Tensor
 
-    def as_dict(self) -> dict[str, float]:
+    def as_dict(self) -> dict[MetricKey, float]:
         """Return the metric values as a dictionary.
 
         Returns
         -------
-        dict[str, float]
-            Dictionary mapping metric names to their tensor values.
+        dict[MetricKey, float]
+            Dictionary mapping metric keys to their tensor values.
         """
         return {
-            "g_total": self.total.item(),  # type: ignore
-            "g_fake": self.fake.item(),  # type: ignore
-            "g_rec_facies": self.facies_rec.item(),  # type: ignore
-            "g_well": self.well.item(),  # type: ignore
-            "g_div": self.div.item(),  # type: ignore
-            "g_rec_rock_physics": self.rec_rock_physics.item(),  # type: ignore
-            "g_tv": self.tv.item(),  # type: ignore
-            "g_elastic": self.elastic.item(),  # type: ignore
-            "g_physics": self.physics.item(),  # type: ignore
+            MetricKey.G_TOTAL: self.total.item(),  # type: ignore
+            MetricKey.G_FAKE: self.fake.item(),  # type: ignore
+            MetricKey.G_REC_FACIES: self.facies_rec.item(),  # type: ignore
+            MetricKey.G_WELL: self.well.item(),  # type: ignore
+            MetricKey.G_DIV: self.div.item(),  # type: ignore
+            MetricKey.G_REC_ROCK_PHYSICS: self.rec_rock_physics.item(),  # type: ignore
+            MetricKey.G_TV: self.tv.item(),  # type: ignore
+            MetricKey.G_ELASTIC: self.elastic.item(),  # type: ignore
+            MetricKey.G_PHYSICS: self.physics.item(),  # type: ignore
         }
 
     def as_tuple(self) -> tuple[torch.Tensor, ...]:
@@ -186,7 +187,7 @@ class ScaleMetrics:
             for s in sorted(self.generator.keys())
         }
 
-    def as_tuple_of_dicts(self) -> tuple[dict[str, float], ...]:
+    def as_tuple_of_dicts(self) -> tuple[dict[MetricKey, float], ...]:
         """Return all metric values as a tuple of dictionaries in a fixed order.
 
         The order is by scale index (ascending), with generator metrics
@@ -194,7 +195,7 @@ class ScaleMetrics:
 
         Returns
         -------
-        tuple[dict[str, float], ...]
+        tuple[dict[MetricKey, float], ...]
             Tuple of dictionaries mapping metric names to their values in the order:
             (gen_scale0..., disc_scale0..., gen_scale1..., disc_scale1..., ...).
         """

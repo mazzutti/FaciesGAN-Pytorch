@@ -2,7 +2,8 @@
 
 from argparse import ArgumentParser, Namespace
 
-from .constants import EmbeddingMethod
+from .constants import EmbeddingMethod, VariantConfig
+from config import PhysicsConfig
 
 
 def get_arguments() -> ArgumentParser:
@@ -221,15 +222,15 @@ def get_arguments() -> ArgumentParser:
         "--wavelet-f-peak",
         type=float,
         dest="wavelet_f_peak",
-        default=8.0,
-        help="Peak frequency for the default Ricker wavelet (default: 8.0).",
+        default=PhysicsConfig.WAVELET_F_PEAK,
+        help=f"Peak frequency for the default Ricker wavelet (default: {PhysicsConfig.WAVELET_F_PEAK}).",
     )
     parser.add_argument(
         "--wavelet-dt",
         type=float,
         dest="wavelet_dt",
-        default=0.001,
-        help="Sampling interval of the wavelet in seconds (default: 0.001).",
+        default=PhysicsConfig.WAVELET_DT,
+        help=f"Sampling interval of the wavelet in seconds (default: {PhysicsConfig.WAVELET_DT}).",
     )
 
     # Latent space / Metrics options
@@ -260,7 +261,7 @@ def get_arguments() -> ArgumentParser:
 
 
 def build_training_args(
-    args: Namespace, variant: dict[str, bool], output: str, start_scale: int = 0
+    args: Namespace, variant: VariantConfig, output: str, start_scale: int = 0
 ) -> list[str]:
     """Compose the command-line arguments for a single variant training run."""
     cmd: list[str] = [
@@ -346,9 +347,9 @@ def build_training_args(
         cmd.append("--compile-backend")
 
     # Conditioning flags
-    if variant["use_wells"]:
+    if variant.use_wells:
         cmd.append("--use-wells")
-    if variant["use_seismic"]:
+    if variant.use_seismic:
         cmd.append("--use-seismic")
 
     # Rock physics flags

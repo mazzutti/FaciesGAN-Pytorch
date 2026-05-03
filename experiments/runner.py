@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 import utils
+from datasets.data_files import DataFiles
 from datasets.dataset import TorchPyramidsDataset
 from datasets.utils import build_conditioning_pyramids
 from log import format_time
@@ -15,8 +16,9 @@ from main import get_arguments as get_main_arguments
 from options import TrainingOptions
 
 from .cli import build_training_args, get_arguments
-from .constants import VARIANT_NAMES, VARIANTS
+from .constants import ExperimentVariant, VariantConfig
 from .embeddings import (
+    ExperimentCache,
     compute_shared_embeddings,
     load_shared_embeddings,
     save_shared_embeddings,
@@ -55,10 +57,10 @@ def main() -> None:
                 "--skip-training requires --model-paths with 4 paths "
                 "(wells_seismic, wells_only, seismic_only, unconditional)."
             )
-        for name, path in zip(VARIANT_NAMES, args.model_paths):
+        for variant, path in zip(ExperimentVariant, args.model_paths):
             if not os.path.isdir(path):
                 parser.error(f"Model path does not exist: {path}")
-            model_paths[name] = path
+            model_paths[variant.id] = path
         print("Skipping training, using provided model paths.")
     else:
         # ── Train all 4 variants ──
@@ -67,15 +69,17 @@ def main() -> None:
         print("=" * 70)
         print(f"Device: {device} (DDP with {nproc} GPUs)")
         print(f"compile_backend: {'ON' if args.compile_backend else 'OFF'}")
-        print(f"Variants: {', '.join(VARIANT_NAMES)}")
+        print(f"Variants: {', '.join(v.id for v in ExperimentVariant)}")
         print(f"Output:   {base_output}")
         print("=" * 70 + "\n")
 
-        for name, variant in VARIANTS.items():
+        for variant in ExperimentVariant:
+            name = variant.id
+            v_config: VariantConfig = variant.value
             variant_output = os.path.join(base_output, name)
             os.makedirs(variant_output, exist_ok=True)
-            wells_flag = "ON" if variant["use_wells"] else "OFF"
-            seismic_flag = "ON" if variant["use_seismic"] else "OFF"
+            wells_flag = "ON" if v_config.use_wells else "OFF"
+            seismic_flag = "ON" if v_config.use_seismic else "OFF"
 
             # Check for existing checkpoint
             last_done = find_last_completed_scale(variant_output)
@@ -142,7 +146,7 @@ def main() -> None:
             print(f"{'─' * 60}")
 
             variant_args = build_training_args(
-                args, variant, variant_output, start_scale=resume_scale
+                args, v_config, variant_output, start_scale=resume_scale
             )
 
             # Inject start_epoch
@@ -163,8 +167,8 @@ def main() -> None:
             print(f"  Training complete ({elapsed}) -> {variant_output}")
 
     # ── Load base options & dataset (needed for plots and embeddings) ──
-    first_model = model_paths[VARIANT_NAMES[0]]
-    _base_args = build_training_args(args, VARIANTS[VARIANT_NAMES[0]], first_model)
+    first_model = model_paths[list(ExperimentVariant)[0].id]
+    _base_args = build_training_args(args, list(ExperimentVariant)[0].value, first_model)
     _base_opts = get_main_arguments().parse_args(
         _base_args, namespace=TrainingOptions()
     )
@@ -187,7 +191,11 @@ def main() -> None:
         else None
     )
     if cached is not None:
-        shared, all_facies, all_mask_indexes, all_ip, all_seismic = cached
+        shared = cached.shared
+        all_facies = cached.all_facies
+        all_mask_indexes = cached.all_mask_indexes
+        all_ip = cached.all_ip
+        all_seismic = cached.all_seismic
         print(f"Loaded cached embeddings for epoch {args.num_iter}")
     else:
         # ── Generate facies (and rock_physics) from all trained models ──
@@ -202,7 +210,9 @@ def main() -> None:
 
         from models.utils import calculate_noise_channels
 
-        for name in VARIANT_NAMES:
+        for variant in ExperimentVariant:
+            name = variant.id
+            v_config = variant.value
             model_path = model_paths[name]
             gen_output = os.path.join(base_output, name, "generated")
 
@@ -210,7 +220,7 @@ def main() -> None:
             print(f"  model: {model_path}")
 
             # Calculate noise channels for this specific variant configuration
-            v_args = build_training_args(args, VARIANTS[name], model_path)
+            v_args = build_training_args(args, v_config, model_path)
             variant_opts = get_main_arguments().parse_args(
                 v_args, namespace=TrainingOptions()
             )
@@ -246,14 +256,17 @@ def main() -> None:
             )
 
             # Persist for future resume
-            save_shared_embeddings(
-                shared,
-                all_facies,
-                base_output,
-                args.num_iter,
+            cache = ExperimentCache(
+                shared=shared,
+                all_facies=all_facies,
                 all_mask_indexes=all_mask_indexes,
                 all_ip=all_ip,
                 all_seismic=all_seismic,
+            )
+            save_shared_embeddings(
+                cache,
+                base_output,
+                args.num_iter,
             )
         else:
             shared = {}
@@ -263,7 +276,7 @@ def main() -> None:
         getattr(args, "embedding_methods", ["isomap", "mds", "tsne", "umap"])
     )
     emb_data_kinds: list[str] = list(
-        getattr(args, "embedding_data", ["facies", "rock_physics"])
+        getattr(args, "embedding_data", [DataFiles.FACIES.name.lower(), "rock_physics"])
     )
 
     # ── 1. Comparison Grids ────────────────────────────────────────────────
@@ -280,10 +293,10 @@ def main() -> None:
 
     # Define kinds to plot
     plots = [
-        PlotData("facies", all_facies, real_full_np[..., :facies_ch]),
-        PlotData("ip", all_ip, real_full_np[..., facies_ch] if all_ip else None),
+        PlotData(DataFiles.FACIES.name.lower(), all_facies, real_full_np[..., :facies_ch]),
+        PlotData(DataFiles.Ip.name.lower(), all_ip, real_full_np[..., facies_ch] if all_ip else None),
         PlotData(
-            "seismic",
+            DataFiles.SEISMIC.name.lower(),
             all_seismic,
             (
                 np.transpose(real_seismic_tensor.cpu().numpy(), (0, 2, 3, 1))
@@ -307,12 +320,12 @@ def main() -> None:
         print(f"{'=' * 70}")
 
         emb_data_map = {
-            "facies": (all_facies, {"rock_physics_only": False, "seismic_only": False}),
+            DataFiles.FACIES.name.lower(): (all_facies, {"rock_physics_only": False, "seismic_only": False}),
             "rock_physics": (
                 all_ip,
                 {"rock_physics_only": True, "seismic_only": False},
             ),
-            "seismic": (
+            DataFiles.SEISMIC.name.lower(): (
                 all_seismic,
                 {"rock_physics_only": False, "seismic_only": True},
             ),
@@ -323,13 +336,13 @@ def main() -> None:
                 continue
 
             data_dict, emb_args = emb_data_map[kind]
-            plot_kind = "ip" if kind == "rock_physics" else kind
+            plot_kind = DataFiles.Ip.name.lower() if kind == "rock_physics" else kind
 
             print(f"\n{'-' * 70}")
             print(f"Computing shared {kind} embeddings for plots...", flush=True)
 
             # Use shared embeddings if available for facies, otherwise compute
-            if kind == "facies" and shared:
+            if kind == DataFiles.FACIES.name.lower() and shared:
                 current_shared = shared
             else:
                 current_shared = compute_shared_embeddings(
@@ -352,5 +365,5 @@ def main() -> None:
     print(f"ALL EXPERIMENTS COMPLETE  ({total_elapsed})")
     print(f"{'=' * 70}\n")
     print(f"\nOutputs in: {base_output}")
-    for name in VARIANT_NAMES:
-        print(f"  {name}: {model_paths.get(name, 'N/A')}")
+    for variant in ExperimentVariant:
+        print(f"  {variant.id}: {model_paths.get(variant.id, 'N/A')}")

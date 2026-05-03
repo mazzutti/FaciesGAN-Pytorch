@@ -39,8 +39,10 @@ class SeismicInterpolator(BaseInterpolator):
         from datasets.data_files import DEFAULT_DATA_DIR
         from datasets.utils import get_global_stats
 
-        stats = get_global_stats(DEFAULT_DATA_DIR).get("SEISMIC", {})
-        return float(stats.get("min", 0.0)), float(stats.get("max", 1.0))
+        stats = get_global_stats(DEFAULT_DATA_DIR).get("SEISMIC")
+        if stats is not None:
+            return float(stats.min), float(stats.max)
+        return 0.0, 1.0
 
     def interpolate_array(
         self,

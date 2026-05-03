@@ -6,6 +6,7 @@ from typing import cast
 import numpy as np
 import torch
 
+from datasets.data_files import DataFiles
 from models.facies_gan import TorchFaciesGAN
 from models.utils import calculate_synthetic_seismic, split_facies_rp
 from options import TrainingOptions
@@ -55,9 +56,9 @@ def _generate_on_device(
     # Batch size for generation to avoid OOM
     batch_size = 20
 
-    facies_dir = os.path.join(gen_output, "facies")
-    ip_dir = os.path.join(gen_output, "ip")
-    seismic_dir = os.path.join(gen_output, "seismic")
+    facies_dir = os.path.join(gen_output, DataFiles.FACIES.name.lower())
+    ip_dir = os.path.join(gen_output, DataFiles.Ip.name.lower())
+    seismic_dir = os.path.join(gen_output, DataFiles.SEISMIC.name.lower())
     os.makedirs(facies_dir, exist_ok=True)
     if has_rock_physics:
         os.makedirs(ip_dir, exist_ok=True)
@@ -119,7 +120,7 @@ def _generate_on_device(
                     .astype(np.int64)
                 )
                 np.save(
-                    os.path.join(facies_dir, f"generated_facie_{idx}.npy"), facies_idx
+                    os.path.join(facies_dir, f"generated_{DataFiles.FACIES.name.lower()}_{idx}.npy"), facies_idx
                 )
 
                 if has_rock_physics and rp_t is not None:
@@ -171,9 +172,9 @@ def _generate_on_device(
                     all_ip.append(ip_arr)
                     all_seismic.append(syn_seismic)
 
-                    np.save(os.path.join(ip_dir, f"generated_ip_{idx}.npy"), ip_arr)
+                    np.save(os.path.join(ip_dir, f"generated_{DataFiles.Ip.name.lower()}_{idx}.npy"), ip_arr)
                     np.save(
-                        os.path.join(seismic_dir, f"generated_seismic_{idx}.npy"),
+                        os.path.join(seismic_dir, f"generated_{DataFiles.SEISMIC.name.lower()}_{idx}.npy"),
                         syn_seismic,
                     )
         all_mi.append(mi.cpu())

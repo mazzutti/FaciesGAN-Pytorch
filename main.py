@@ -60,7 +60,7 @@ import torch
 import torch.distributed as dist
 from dateutil import tz  # type: ignore[import-untyped]
 
-from config import OPT_FILE
+from config import OPT_FILE, PhysicsConfig
 from log import init_output_logging
 from options import TrainingOptions
 from training import Trainer
@@ -429,15 +429,15 @@ def get_arguments() -> ArgumentParser:
         "--wavelet-f-peak",
         type=float,
         dest="wavelet_f_peak",
-        default=8.0,
-        help="Peak frequency of the Ricker wavelet in Hz (default: 8.0).",
+        default=PhysicsConfig.WAVELET_F_PEAK,
+        help=f"Peak frequency of the Ricker wavelet in Hz (default: {PhysicsConfig.WAVELET_F_PEAK}).",
     )
     parser.add_argument(
         "--wavelet-dt",
         type=float,
         dest="wavelet_dt",
-        default=0.001,
-        help="Wavelet sampling interval in seconds (default: 0.001).",
+        default=PhysicsConfig.WAVELET_DT,
+        help=f"Wavelet sampling interval in seconds (default: {PhysicsConfig.WAVELET_DT}).",
     )
 
     parser.add_argument(

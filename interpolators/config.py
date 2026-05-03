@@ -4,8 +4,10 @@ This module contains configuration dataclasses used by all interpolator
 implementations (numeric, seismic, well, neural). They provide a
 compact way to pass rendering options and geometry parameters.
 """
-
 from dataclasses import dataclass
+
+from config import DomainConfig, PhysicsConfig
+from enums import InterpolationStrategy
 
 
 @dataclass
@@ -21,8 +23,8 @@ class InterpolatorConfig:
         Number of output facies classes. Defaults to 4.
     strategy : str
         Interpolation strategy to use for numeric data. Supported values
-        are ``"categorical"`` (mode-filter) and ``"continuous"``
-        (Backus averaging). Defaults to ``"categorical"``.
+        are ``InterpolationStrategy.CATEGORICAL`` (mode-filter) and ``InterpolationStrategy.CONTINUOUS``
+        (Backus averaging). Defaults to ``InterpolationStrategy.CATEGORICAL``.
     scale : float
         Scale parameter (sigma) for Fourier feature encoding (used by
         NeuralSmoother). Defaults to 1.0.
@@ -39,15 +41,19 @@ class InterpolatorConfig:
     use_mode_filter : bool
         If True, uses majority-vote pooling for downscaling categorical
         data. Defaults to True.
+    data_min : float, optional
+        Minimum value for data normalization. Defaults to None.
+    data_max : float, optional
+        Maximum value for data normalization. Defaults to None.
     """
 
-    num_classes: int = 4
+    num_classes: int = DomainConfig.NUM_FACIES
     scale: float = 1.0
     upsample: int = 4
     chunk_size: int = 65536
-    geometry: tuple[int, int] = (150, 120)
+    geometry: tuple[int, int] = PhysicsConfig.INTERP_GEOMETRY
     channels_last: bool = False
     use_mode_filter: bool = True
-    strategy: str = "categorical"
+    strategy: str = InterpolationStrategy.CATEGORICAL
     data_min: float | None = None
     data_max: float | None = None

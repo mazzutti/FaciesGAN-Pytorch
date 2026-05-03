@@ -12,13 +12,7 @@ from matplotlib.image import imread
 # Use relative imports if needed, but since this is usually run as a script:
 from config import DATA_DIR, OUTPUTS_DIR
 
-VARIANTS = ["wells_seismic", "wells_only", "seismic_only", "unconditional"]
-VARIANT_LABELS = {
-    "wells_seismic": "Wells + Seismic",
-    "wells_only": "Wells Only",
-    "seismic_only": "Seismic Only",
-    "unconditional": "Unconditional",
-}
+from experiments.constants import ExperimentVariant
 EMBEDDING_METHODS = ["mds", "umap", "isomap", "tsne"]
 EMBEDDING_LABELS = {"mds": "MDS", "umap": "UMAP", "isomap": "Isomap", "tsne": "t-SNE"}
 EPOCHS_MILESTONES = [100, 200, 300, 400, 500]
@@ -67,7 +61,7 @@ def _add_title_page(pdf: PdfPages) -> None:
         color="gray",
     )
 
-    variant_text = "Variants: " + " · ".join(VARIANT_LABELS.values())
+    variant_text = "Variants: " + " · ".join([v.value.label for v in ExperimentVariant])
     fig.text(0.5, 0.35, variant_text, ha="center", va="center", fontsize=12)  # type: ignore
 
     pdf.savefig(fig)  # type: ignore
@@ -77,7 +71,8 @@ def _add_title_page(pdf: PdfPages) -> None:
 def _add_hyperparams_page(pdf: PdfPages, outputs_dir: Path) -> None:
     """One page with a table comparing hyperparameters across variants."""
     configs: dict[str, dict[str, float]] = {}
-    for v in VARIANTS:
+    for variant in ExperimentVariant:
+        v = variant.id
         opts_path = outputs_dir / v / "options.json"
         if opts_path.exists():
             with open(opts_path) as f:
@@ -90,11 +85,12 @@ def _add_hyperparams_page(pdf: PdfPages, outputs_dir: Path) -> None:
     ax.axis("off")
     fig.suptitle("Training Hyperparameters", fontsize=18, fontweight="bold", y=0.95)  # type: ignore
 
-    col_labels = ["Parameter"] + [VARIANT_LABELS[v] for v in VARIANTS if v in configs]
+    col_labels = ["Parameter"] + [v.value.label for v in ExperimentVariant if v.id in configs]
     rows: list[list[str]] = []
     for key, label in KEY_HPARAMS:
         row = [label]
-        for v in VARIANTS:
+        for variant in ExperimentVariant:
+            v = variant.id
             if v in configs:
                 val = configs[v].get(key, "—")
                 row.append(str(val))
@@ -211,10 +207,10 @@ def _add_image_page(
 def _add_training_progression_page(
     pdf: PdfPages,
     outputs_dir: Path,
-    variant: str,
+    variant: ExperimentVariant,
 ) -> None:
     """Show training sample progression at the final scale across epochs."""
-    sample_dir = outputs_dir / variant / str(FINAL_SCALE) / "real_x_generated_facies"
+    sample_dir = outputs_dir / variant.id / str(FINAL_SCALE) / "real_x_generated_facies"
     images = []
     epoch_labels = []
     for epoch in TRAINING_EPOCHS:
@@ -231,7 +227,7 @@ def _add_training_progression_page(
         _add_image_page(
             pdf,
             None,
-            f"{VARIANT_LABELS[variant]} — {label} (Scale {FINAL_SCALE})",
+            f"{variant.value.label} — {label} (Scale {FINAL_SCALE})",
             img_array=img,  # type: ignore
         )
 
@@ -341,8 +337,8 @@ def generate_report(
         _add_hyperparams_page(pdf, outputs_dir)
 
         # --- Per-variant sections ---
-        for variant in VARIANTS:
-            label = VARIANT_LABELS[variant]
+        for variant in ExperimentVariant:
+            label = variant.value.label
             _add_section_divider(
                 pdf,
                 label,
@@ -355,7 +351,7 @@ def generate_report(
             # Per-variant embedding comparison plots
             for method in EMBEDDING_METHODS:
                 img_path = (
-                    outputs_dir / variant / "generated" / f"{method}_comparison.png"
+                    outputs_dir / variant.id / "generated" / f"{method}_comparison.png"
                 )
                 _add_image_page(
                     pdf,

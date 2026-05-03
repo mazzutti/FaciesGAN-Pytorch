@@ -18,20 +18,22 @@ from datasets import TorchPyramidsDataset
 
 from .constants import EMBEDDINGS_FILE, EmbeddingMethod
 
+from dataclasses import dataclass
+
 # Type alias for shared embeddings: method -> (real_reduced, {variant: fake_reduced})
 _SharedEmbeddings = dict[str, tuple[np.ndarray, dict[str, np.ndarray]]]
 
+@dataclass
+class ExperimentCache:
+    """Encapsulates cached embeddings and generated samples across all variants."""
+    shared: _SharedEmbeddings
+    all_facies: dict[str, list[np.ndarray]]
+    all_mask_indexes: dict[str, torch.Tensor]
+    all_ip: dict[str, list[np.ndarray]]
+    all_seismic: dict[str, list[np.ndarray]]
 
-def load_shared_embeddings(base_output: str, num_iter: int) -> (
-    tuple[
-        _SharedEmbeddings,
-        dict[str, list[np.ndarray]],
-        dict[str, torch.Tensor],
-        dict[str, list[np.ndarray]],
-        dict[str, list[np.ndarray]],
-    ]
-    | None
-):
+
+def load_shared_embeddings(base_output: str, num_iter: int) -> ExperimentCache | None:
     """Load cached embeddings and samples from disk if they exist."""
     path = os.path.join(base_output, EMBEDDINGS_FILE)
     if not os.path.isfile(path):
@@ -58,7 +60,13 @@ def load_shared_embeddings(base_output: str, num_iter: int) -> (
         all_seismic = data.get("all_seismic", np.array({})).item()
 
         print(f"    [Cache] Successfully loaded embeddings from {path}")
-        return shared, all_facies, all_mi, all_ip, all_seismic
+        return ExperimentCache(
+            shared=shared,
+            all_facies=all_facies,
+            all_mask_indexes=all_mi,
+            all_ip=all_ip,
+            all_seismic=all_seismic,
+        )
 
     except Exception as e:
         print(f"    [Cache] Warning: Could not load {path} ({e}). Recomputing...")
@@ -66,23 +74,19 @@ def load_shared_embeddings(base_output: str, num_iter: int) -> (
 
 
 def save_shared_embeddings(
-    shared: _SharedEmbeddings,
-    all_facies: dict[str, list[np.ndarray]],
+    cache: ExperimentCache,
     base_output: str,
     num_iter: int,
-    all_mask_indexes: dict[str, torch.Tensor] | None = None,
-    all_ip: dict[str, list[np.ndarray]] | None = None,
-    all_seismic: dict[str, list[np.ndarray]] | None = None,
 ) -> None:
     """Cache embeddings and generated samples to disk."""
     path = os.path.join(base_output, EMBEDDINGS_FILE)
     np.savez_compressed(
         path,
-        shared=np.array(shared, dtype=object),
-        all_facies=np.array(all_facies, dtype=object),
-        all_mi=np.array(all_mask_indexes or {}, dtype=object),
-        all_ip=np.array(all_ip or {}, dtype=object),
-        all_seismic=np.array(all_seismic or {}, dtype=object),
+        shared=np.array(cache.shared, dtype=object),
+        all_facies=np.array(cache.all_facies, dtype=object),
+        all_mi=np.array(cache.all_mask_indexes, dtype=object),
+        all_ip=np.array(cache.all_ip, dtype=object),
+        all_seismic=np.array(cache.all_seismic, dtype=object),
         num_iter=num_iter,
     )
 

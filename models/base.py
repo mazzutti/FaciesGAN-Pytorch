@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import torch
 
-from config import AMP_FILE, D_FILE, G_FILE, M_FILE, SHAPE_FILE
+from config import AMP_FILE, D_FILE, G_FILE, M_FILE, SHAPE_FILE, DomainConfig
 from metrics import (
     DiscriminatorMetrics,
     GeneratorMetrics,
@@ -58,7 +58,7 @@ class FaciesGAN(ABC):
     def __init__(
         self,
         options: TrainingOptions,
-        noise_channels: int = 4,
+        noise_channels: int = DomainConfig.NOISE_CHANNELS,
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -69,7 +69,7 @@ class FaciesGAN(ABC):
         options : TrainingOptions
             Training options containing hyperparameters and configuration.
         noise_channels : int, optional
-            Number of noise channels for the generator input (default is 3).
+            Number of noise channels for the generator input (default is DomainConfig.NOISE_CHANNELS).
 
         args : Any
             Additional positional arguments (not used).
@@ -197,7 +197,7 @@ class FaciesGAN(ABC):
 
         Returns 1.0 if no factor has been recorded yet (first iteration).
         """
-        return max(self.loss_scale_factors.get(scale, 1.0), 1e-4)
+        return max(self.loss_scale_factors.get(scale, 1.0), DomainConfig.LOSS_SCALE_MIN)
 
     @abstractmethod
     def __call__(

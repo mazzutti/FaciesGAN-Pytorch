@@ -12,24 +12,47 @@ class EmbeddingMethod(str, Enum):
     UMAP = "umap"
 
 
-VARIANTS = {
-    "wells_seismic": {"use_wells": True, "use_seismic": True, "use_rock_physics": True},
-    "wells_only": {"use_wells": True, "use_seismic": False, "use_rock_physics": True},
-    "seismic_only": {"use_wells": False, "use_seismic": True, "use_rock_physics": True},
-    "unconditional": {
-        "use_wells": False,
-        "use_seismic": False,
-        "use_rock_physics": True,
-    },
-}
+from dataclasses import dataclass
+from enum import Enum
 
-VARIANT_NAMES = list(VARIANTS.keys())
 
-VARIANT_LABELS = {
-    "wells_seismic": "Wells + Seismic",
-    "wells_only": "Wells Only",
-    "seismic_only": "Seismic Only",
-    "unconditional": "Unconditional",
-}
+@dataclass(frozen=True)
+class VariantConfig:
+    use_wells: bool
+    use_seismic: bool
+    use_rock_physics: bool
+    label: str
+
+
+class ExperimentVariant(Enum):
+    WELLS_SEISMIC = VariantConfig(
+        use_wells=True,
+        use_seismic=True,
+        use_rock_physics=True,
+        label="Wells + Seismic",
+    )
+    WELLS_ONLY = VariantConfig(
+        use_wells=True,
+        use_seismic=False,
+        use_rock_physics=True,
+        label="Wells Only",
+    )
+    SEISMIC_ONLY = VariantConfig(
+        use_wells=False,
+        use_seismic=True,
+        use_rock_physics=True,
+        label="Seismic Only",
+    )
+    UNCONDITIONAL = VariantConfig(
+        use_wells=False,
+        use_seismic=False,
+        use_rock_physics=True,
+        label="Unconditional",
+    )
+
+    @property
+    def id(self) -> str:
+        return self.name.lower()
+
 
 EMBEDDINGS_FILE = "cached_embeddings.npz"

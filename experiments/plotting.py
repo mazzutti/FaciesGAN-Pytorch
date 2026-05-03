@@ -9,13 +9,14 @@ from matplotlib.axes import Axes
 
 import utils
 
-from .constants import VARIANT_LABELS, VARIANT_NAMES
+from datasets.data_files import DataFiles
+from .constants import ExperimentVariant
 
 
 def setup_imshow_for_kind(ax: Axes, img: np.ndarray, data_kind: str):
     """Helper to configure imshow with correct colormap and settings."""
     cmap = (
-        "RdBu" if data_kind == "seismic" else ("viridis" if data_kind == "ip" else None)
+        "RdBu" if data_kind == DataFiles.SEISMIC.name.lower() else ("viridis" if data_kind == DataFiles.Ip.name.lower() else None)
     )
     return ax.imshow(img, cmap=cmap, interpolation="nearest", aspect="auto")  # type: ignore
 
@@ -27,7 +28,7 @@ def get_method_label(method: str) -> str:
 
 def get_data_kind_suffix(data_kind: str) -> str:
     """Return a filename suffix for non-facies data kinds."""
-    return f"_{data_kind}" if data_kind != "facies" else ""
+    return f"_{data_kind}" if data_kind != DataFiles.FACIES.name.lower() else ""
 
 
 def get_gen_output_dir(base_output: str, variant_name: str) -> str:
@@ -63,11 +64,9 @@ def plot_sample_grid(
     num_samples: int = 5,
 ) -> None:
     """Create a comparison grid of real vs generated samples per variant."""
-    variant_labels = VARIANT_LABELS
-
-    # Build per-variant rows: (label, real_img_or_None, [generated_imgs])
     rows: list[tuple[str, np.ndarray | None, list[np.ndarray]]] = []
-    for i, name in enumerate(VARIANT_NAMES):
+    for i, variant in enumerate(ExperimentVariant):
+        name = variant.id
         if name not in all_generated or not all_generated[name]:
             continue
 
@@ -78,7 +77,7 @@ def plot_sample_grid(
             real_img = real_samples[i]
 
         # Convert to RGB if plotting facies
-        if data_kind == "facies":
+        if data_kind == DataFiles.FACIES.name.lower():
             real_img = facies_to_rgb_img(real_img)
             rgb_imgs: list[np.ndarray] = []
             for img in imgs:
@@ -87,7 +86,7 @@ def plot_sample_grid(
                     rgb_imgs.append(rgb)
             imgs = rgb_imgs
 
-        rows.append((variant_labels.get(name, name), real_img, imgs))
+        rows.append((variant.value.label, real_img, imgs))
 
     if not rows:
         print(f"  No {data_kind} data available; skipping comparison grid.")
@@ -147,7 +146,7 @@ def plot_per_variant_embedding(
     real_reduced: np.ndarray,
     fake_reduced: np.ndarray,
     save_path: str,
-    data_kind: str = "facies",
+    data_kind: str = DataFiles.FACIES.name.lower(),
 ) -> None:
     """Save a single per-variant embedding plot using pre-computed coordinates."""
     kind_title = data_kind.capitalize()
@@ -173,10 +172,9 @@ def plot_combined_embeddings(
     shared_embedding: tuple[np.ndarray, dict[str, np.ndarray]],
     base_output: str,
     num_iter: int = 0,
-    data_kind: str = "facies",
+    data_kind: str = DataFiles.FACIES.name.lower(),
 ) -> None:
     """Create a 2x2 combined embedding plot."""
-    variant_labels = VARIANT_LABELS
     kind_title = data_kind.capitalize()
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))  # type: ignore
     fig.suptitle(  # type: ignore
@@ -184,9 +182,10 @@ def plot_combined_embeddings(
         fontsize=14,
     )
 
-    for ax, name in zip(axes.flat, VARIANT_NAMES):
+    for ax, variant in zip(axes.flat, ExperimentVariant):
+        name = variant.id
         if name not in shared_embedding[1]:
-            ax.set_title(f"{variant_labels.get(name, name)} (no data)")
+            ax.set_title(f"{variant.value.label} (no data)")
             ax.axis("off")
             continue
         real_reduced = shared_embedding[0]
@@ -194,7 +193,7 @@ def plot_combined_embeddings(
 
         ax.scatter(real_reduced[:, 0], real_reduced[:, 1], alpha=0.6, label="Real")
         ax.scatter(fake_reduced[:, 0], fake_reduced[:, 1], alpha=0.6, label="Generated")
-        setup_scatter_plot(ax, method, data_kind, variant_labels.get(name, name))
+        setup_scatter_plot(ax, method, data_kind, variant.value.label)
 
     plt.tight_layout()
     epoch_tag = f"_epoch{num_iter}" if num_iter > 0 else ""
@@ -212,7 +211,7 @@ def plot_per_facies_embedding(
     fake_reduced_for_facies: np.ndarray,
     facies_idx: int,
     save_path: str,
-    data_kind: str = "facies",
+    data_kind: str = DataFiles.FACIES.name.lower(),
 ) -> None:
     """Save an embedding plot for a single conditioning crossline index."""
     kind_title = data_kind.capitalize()
@@ -248,10 +247,11 @@ def save_per_facies_embeddings(
     all_mask_indexes: dict[str, torch.Tensor],
     base_output: str,
     methods: list[str],
-    data_kind: str = "facies",
+    data_kind: str = DataFiles.FACIES.name.lower(),
 ) -> None:
     """Generate per-crossline embedding plots for every variant and method."""
-    for name in VARIANT_NAMES:
+    for variant in ExperimentVariant:
+        name = variant.id
         if name not in all_mask_indexes:
             continue
         if not methods or not any(
@@ -312,7 +312,8 @@ def plot_method_all_variants(
     real_reduced, per_variant_fakes = shared[method]
 
     # 1. Per-variant individual plots
-    for name in VARIANT_NAMES:
+    for variant in ExperimentVariant:
+        name = variant.id
         if name not in per_variant_fakes:
             continue
         gen_output = get_gen_output_dir(base_output, name)

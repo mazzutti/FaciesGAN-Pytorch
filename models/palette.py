@@ -11,13 +11,15 @@ import numpy as np
 import torch
 from numpy.typing import NDArray
 
+from enums import FaciesClass
+
 # ── Facies Class Names ───────────────────────────────────────────────
-FACIES_NAMES: list[str] = [
-    "Floodplain",  # Class 0: Black
-    "Point bar",   # Class 1: Red
-    "Channel",     # Class 2: Blue
-    "Boundary",    # Class 3: Green
-]
+FACIES_NAMES: dict[FaciesClass, str] = {
+    FaciesClass.FLOODPLAIN: "Floodplain",
+    FaciesClass.POINT_BAR: "Point bar",
+    FaciesClass.CHANNEL: "Channel",
+    FaciesClass.BOUNDARY: "Boundary",
+}
 
 # ── Standard RGB Palette [0, 1] ──────────────────────────────────────
 # High-contrast palette for visualization (TensorBoard, Matplotlib)

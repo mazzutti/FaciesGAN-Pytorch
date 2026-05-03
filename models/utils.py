@@ -9,6 +9,8 @@ from typing import Any, cast
 import torch
 import torch.nn.functional as F
 
+from config import DomainConfig, PhysicsConfig
+from enums import FeatureKey, LossFunction
 from options import TrainingOptions
 
 
@@ -267,8 +269,8 @@ def split_facies_rp(
 
     Returns
     -------
-    dict[str, torch.Tensor | None]
-        Dictionary with keys: 'facies', 'rock_physics', 'wells', 'seismic'.
+    dict[FeatureKey, torch.Tensor | None]
+        Dictionary with keys from FeatureKey (e.g., FeatureKey.FACIES).
     """
     if channels_last:
         dim = -1
@@ -286,10 +288,10 @@ def split_facies_rp(
     total_ch = tensor.shape[dim]
 
     res: dict[str, torch.Tensor | None] = {
-        "facies": None,
-        "rock_physics": None,
-        "wells": None,
-        "seismic": None,
+        FeatureKey.FACIES: None,
+        FeatureKey.ROCK_PHYSICS: None,
+        FeatureKey.WELLS: None,
+        FeatureKey.SEISMIC: None,
     }
 
     curr = 0
@@ -307,7 +309,7 @@ def split_facies_rp(
         return tensor[start : start + length, ...]
 
     # 1. Facies (always first)
-    res["facies"] = _slice(0, num_facies)
+    res[FeatureKey.FACIES] = _slice(0, num_facies)
     curr = num_facies
 
     # 2. Rock Physics (if flagged and present)
@@ -318,17 +320,17 @@ def split_facies_rp(
         num_rp = len(DataFiles.generator_output_rock_physics())
 
     if has_rp and total_ch >= curr + num_rp:
-        res["rock_physics"] = _slice(curr, num_rp)
+        res[FeatureKey.ROCK_PHYSICS] = _slice(curr, num_rp)
         curr += num_rp
 
     # 3. Wells (if flagged and present)
     if has_wells and total_ch >= curr + num_facies:
-        res["wells"] = _slice(curr, num_facies)
+        res[FeatureKey.WELLS] = _slice(curr, num_facies)
         curr += num_facies
 
     # 4. Seismic (if flagged and present)
     if has_seismic and total_ch >= curr + 1:
-        res["seismic"] = _slice(curr, 1)
+        res[FeatureKey.SEISMIC] = _slice(curr, 1)
         curr += 1
 
     return res
@@ -338,7 +340,7 @@ def dice_loss(
     inputs: torch.Tensor,
     targets: torch.Tensor,
     smooth: float = 1.0,
-    eps: float = 1e-7,
+    eps: float = DomainConfig.EPSILON,
 ) -> torch.Tensor:
     """Compute the multi-class Dice loss.
 
@@ -410,7 +412,7 @@ def masked_cross_entropy(
         return inputs.sum() * 0.0
 
 
-def rms_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+def rms_normalize(x: torch.Tensor, eps: float = DomainConfig.EPSILON) -> torch.Tensor:
     """Apply Root-Mean-Square (RMS) normalization to a tensor."""
     return x / (torch.sqrt(torch.mean(x**2)) + eps)
 
@@ -426,7 +428,7 @@ def calculate_synthetic_seismic(
     ip_max: torch.Tensor,
     seis_min: torch.Tensor,
     seis_max: torch.Tensor,
-    fixed_kernel_size: int = 255,
+    fixed_kernel_size: int = PhysicsConfig.FIXED_KERNEL_SIZE,
 ) -> torch.Tensor:
     """Perform Geophysical Modeling to produce normalized synthetic seismic.
 
@@ -449,7 +451,7 @@ def calculate_synthetic_seismic(
     seis_min, seis_max : torch.Tensor
         Min/Max values for Seismic normalization.
     fixed_kernel_size : int, optional
-        Fixed size for the convolution kernel. Default is 255.
+        Fixed size for the convolution kernel. Default is PhysicsConfig.FIXED_KERNEL_SIZE.
 
     Returns
     -------
@@ -487,7 +489,7 @@ def calculate_synthetic_seismic(
     synth = F.conv2d(rc, wavelet_z, padding=(padding_z, 0))
 
     # 5. Normalization using Dataset Statistics -> [-1, 1]
-    synth = 2.0 * (synth - seis_min) / (seis_max - seis_min + 1e-6) - 1.0
+    synth = 2.0 * (synth - seis_min) / (seis_max - seis_min + DomainConfig.EPSILON) - 1.0
     return synth.clamp(-1.0, 1.0)
 
 
@@ -504,8 +506,8 @@ def calculate_physics_loss(
     ip_max: torch.Tensor,
     seis_min: torch.Tensor,
     seis_max: torch.Tensor,
-    loss_fn: str = "huber",
-    fixed_kernel_size: int = 255,
+    loss_fn: str = LossFunction.HUBER,
+    fixed_kernel_size: int = PhysicsConfig.FIXED_KERNEL_SIZE,
 ) -> torch.Tensor:
     """Calculate Geophysical Consistency Loss (Physics Loss).
 
@@ -534,7 +536,7 @@ def calculate_physics_loss(
     loss_fn : str, optional
         Loss function to use ('huber' or 'mse'). Default is 'huber'.
     fixed_kernel_size : int, optional
-        Fixed size for the convolution kernel to avoid recompilation. Default is 255.
+        Fixed size for the convolution kernel to avoid recompilation. Default is PhysicsConfig.FIXED_KERNEL_SIZE.
 
     Returns
     -------
@@ -566,7 +568,7 @@ def calculate_physics_loss(
     synth_norm = rms_normalize(synth)
     real_seismic_norm = rms_normalize(real_seismic)
 
-    if loss_fn == "huber":
+    if loss_fn == LossFunction.HUBER:
         loss = F.huber_loss(synth_norm, real_seismic_norm)
     else:
         loss = F.mse_loss(synth_norm, real_seismic_norm)

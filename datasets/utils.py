@@ -8,6 +8,7 @@ for facies, wells, and rock-physics properties.
 import json
 import logging
 import math
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,19 +16,21 @@ import numpy as np
 import torch
 from joblib import Memory  # type: ignore
 
+from config import CACHE_DIR
 from datasets.data_files import DEFAULT_DATA_DIR, DataFiles
+from enums import InterpolationStrategy
 from interpolators.config import InterpolatorConfig
 from interpolators.mask import MaskInterpolator
 from interpolators.numeric import NumericInterpolator
 from interpolators.seismic import SeismicInterpolator
 from interpolators.well import WellInterpolator
 from options import TrainingOptions
-from torch_utils import norm
+from utils import norm
 
 logger = logging.getLogger(__name__)
 
 # Create a cache directory for joblib memory
-memory = Memory("./.cache", verbose=0)  # type: ignore
+memory = Memory(CACHE_DIR, verbose=0)  # type: ignore
 
 
 def generate_scales(
@@ -119,21 +122,31 @@ def load_samples(
         return {}
 
 
-def get_global_stats(data_dir: str | None = None) -> dict[str, dict[str, float]]:
-    """Retrieve or compute global min/max statistics for all data components."""
+@dataclass
+class NormalizationStats:
+    """Statistics for dataset components used in normalization."""
+
+    min: float
+    max: float
+    mean: float
+
+
+def get_global_stats(data_dir: str | None = None) -> dict[str, NormalizationStats]:
+    """Retrieve or compute global min/max/mean statistics for all data components."""
     base_dir = Path(data_dir if data_dir else DEFAULT_DATA_DIR)
     stats_path = base_dir / "stats.json"
 
     if stats_path.exists():
         try:
             with open(stats_path, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+                return {k: NormalizationStats(**v) for k, v in data.items()}
         except Exception as e:
             logger.warning("Failed to load stats from %s: %e", stats_path, e)
 
     # Compute and save if not exists
     logger.info("Computing global dataset statistics from .npz archives...")
-    stats: dict[str, dict[str, float]] = {}
+    stats: dict[str, NormalizationStats] = {}
 
     # We care about continuous numeric components
     components = [
@@ -158,11 +171,11 @@ def get_global_stats(data_dir: str | None = None) -> dict[str, dict[str, float]]
 
                     if all_values:
                         combined = np.concatenate(all_values)
-                        stats[comp.name] = {
-                            "min": float(combined.min()),
-                            "max": float(combined.max()),
-                            "mean": float(combined.mean()),
-                        }
+                        stats[comp.name] = NormalizationStats(
+                            min=float(combined.min()),
+                            max=float(combined.max()),
+                            mean=float(combined.mean()),
+                        )
             except Exception as e:
                 logger.warning(f"Failed to compute stats for {comp.name}: {e}")
         else:
@@ -171,14 +184,14 @@ def get_global_stats(data_dir: str | None = None) -> dict[str, dict[str, float]]
                 stats[comp.name] = _compute_derived_global_stats(base_dir, comp)
 
     with open(stats_path, "w") as f:
-        json.dump(stats, f, indent=4)
+        json.dump({k: asdict(v) for k, v in stats.items()}, f, indent=4)
 
     return stats
 
 
 def _compute_derived_global_stats(
     data_dir: Path, component: DataFiles
-) -> dict[str, float]:
+) -> NormalizationStats:
     """Helper to compute global stats for derived attributes (Ip, Is, Vp/Vs)."""
     facies_samples = load_samples(DataFiles.FACIES, str(data_dir))
     vp_samples = load_samples(DataFiles.VP, str(data_dir))
@@ -211,12 +224,16 @@ def _compute_derived_global_stats(
             c_count += derived.size
 
     if c_min == float("inf"):
-        return {"min": 0.0, "max": 1.0, "mean": 0.5}
-    return {
-        "min": c_min,
-        "max": c_max,
-        "mean": c_sum / c_count if c_count > 0 else (c_min + c_max) / 2.0,
-    }
+        return NormalizationStats(min=0.0, max=1.0, mean=0.5)
+    return (
+        NormalizationStats(min=c_min, max=c_max, mean=c_sum / c_count)
+        if c_count > 0
+        else NormalizationStats(
+            min=c_min,
+            max=c_max,
+            mean=(c_min + c_max) / 2.0,
+        )
+    )
 
 
 def _empty_pyramid_tensor(
@@ -286,16 +303,16 @@ def _to_generic_pyramid(
     scale_list: tuple[tuple[int, ...], ...],
     data_dir: str | None = None,
     channels_last: bool = False,
-    global_stats: dict[str, dict[str, float]] | None = None,
+    global_stats: dict[str, NormalizationStats] | None = None,
 ) -> tuple[torch.Tensor, ...]:
     """Generic helper to load and interpolate numeric data into a pyramid."""
-    stats = global_stats.get(data_file.name, {}) if global_stats else {}
+    stats = global_stats.get(data_file.name) if global_stats else None
     interpolator = NumericInterpolator(
         InterpolatorConfig(
             channels_last=channels_last,
-            strategy="continuous",
-            data_min=stats.get("min"),
-            data_max=stats.get("max"),
+            strategy=InterpolationStrategy.CONTINUOUS,
+            data_min=stats.min if stats else None,
+            data_max=stats.max if stats else None,
         )
     )
     return _build_pyramid_batch(
@@ -313,7 +330,9 @@ def to_facies_pyramids(
     """Generate multi-scale pyramid tensors for facies data from .npz."""
     interpolator = NumericInterpolator(
         InterpolatorConfig(
-            channels_last=channels_last, num_classes=num_classes, strategy="categorical"
+            channels_last=channels_last,
+            num_classes=num_classes,
+            strategy=InterpolationStrategy.CATEGORICAL,
         )
     )
     return _build_pyramid_batch(
@@ -365,7 +384,7 @@ def _to_derived_pyramid(
     scale_list: tuple[tuple[int, ...], ...],
     data_dir: str | None = None,
     channels_last: bool = False,
-    global_stats: dict[str, dict[str, float]] | None = None,
+    global_stats: dict[str, NormalizationStats] | None = None,
 ) -> tuple[torch.Tensor, ...]:
     """Generic helper to derive Ip, Is or Vp/Vs from Vp, Vs and Rho if missing."""
     base_dir = Path(data_dir) if data_dir else Path(DEFAULT_DATA_DIR)
@@ -385,13 +404,13 @@ def _to_derived_pyramid(
     vs_samples = load_samples(DataFiles.VS, data_dir)
     rho_samples = load_samples(DataFiles.RHO, data_dir)
 
-    stats = global_stats.get(component.name, {}) if global_stats else {}
+    stats = global_stats.get(component.name) if global_stats else None
     interpolator = NumericInterpolator(
         InterpolatorConfig(
             channels_last=channels_last,
-            strategy="continuous",
-            data_min=stats.get("min"),
-            data_max=stats.get("max"),
+            strategy=InterpolationStrategy.CONTINUOUS,
+            data_min=stats.min if stats else None,
+            data_max=stats.max if stats else None,
         )
     )
 
@@ -471,12 +490,12 @@ def to_seismic_pyramids(
 ) -> tuple[torch.Tensor, ...]:
     """Generate multi-scale pyramid tensors for seismic data."""
     global_stats = get_global_stats(data_dir)
-    stats = global_stats.get(DataFiles.SEISMIC.name, {})
+    stats = global_stats.get(DataFiles.SEISMIC.name) if global_stats else None
     interpolator = SeismicInterpolator(
         InterpolatorConfig(
             channels_last=channels_last,
-            data_min=stats.get("min"),
-            data_max=stats.get("max"),
+            data_min=stats.min if stats else None,
+            data_max=stats.max if stats else None,
         )
     )
     return _build_pyramid_batch(
@@ -536,5 +555,3 @@ def build_conditioning_pyramids(
                 seismic_pyramid[s] = se
 
     return wells_pyramid, seismic_pyramid
-
-

@@ -124,9 +124,11 @@ class TorchTrainer(Trainer):
         self,
         scales: tuple[int, ...],
         indexes: torch.Tensor,
-        wells_pyramid: dict[int, torch.Tensor] = {},
-        seismic_pyramid: dict[int, torch.Tensor] = {},
+        wells_pyramid: dict[int, torch.Tensor] | None = None,
+        seismic_pyramid: dict[int, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, ...]:
+        wells_pyramid = wells_pyramid or {}
+        seismic_pyramid = seismic_pyramid or {}
         with torch.no_grad():
             return tuple(
                 self.model.generate_fake(
