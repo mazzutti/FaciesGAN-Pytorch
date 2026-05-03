@@ -22,6 +22,7 @@ from interpolators.numeric import NumericInterpolator
 from interpolators.seismic import SeismicInterpolator
 from interpolators.well import WellInterpolator
 from options import TrainingOptions
+from torch_utils import norm
 
 logger = logging.getLogger(__name__)
 
@@ -537,7 +538,3 @@ def build_conditioning_pyramids(
     return wells_pyramid, seismic_pyramid
 
 
-def norm(x: torch.Tensor) -> torch.Tensor:
-    """Normalize tensor from [0, 1] to [-1, 1] range."""
-    out = (x - 0.5) * 2
-    return out.clamp(-1, 1)

@@ -180,7 +180,7 @@ class TensorBoardVisualizer:
         g_keys = [
             "g_total",
             "g_fake",
-            "g_facies_rec",
+            "g_rec_facies",
             "g_well",
             "g_div",
             "g_rec_rock_physics",

@@ -189,8 +189,6 @@ class SPADEGenerator(nn.Module):
 
     def forward(self, cond: torch.Tensor) -> torch.Tensor:
         x = self.init_conv(cond)
-        if torch.isnan(x).any() or torch.isinf(x).any():
-            print(f"[DEBUG] SPADEGenerator: NaN/Inf detected before LeakyReLU. cond range: [{cond.min().item()}, {cond.max().item()}]")
         x = F.leaky_relu(x, 0.2)
 
         for spade_block in self.spade_blocks:

@@ -86,7 +86,7 @@ class GeneratorMetrics:
         return {
             "g_total": self.total.item(),  # type: ignore
             "g_fake": self.fake.item(),  # type: ignore
-            "g_facies_rec": self.facies_rec.item(),  # type: ignore
+            "g_rec_facies": self.facies_rec.item(),  # type: ignore
             "g_well": self.well.item(),  # type: ignore
             "g_div": self.div.item(),  # type: ignore
             "g_rec_rock_physics": self.rec_rock_physics.item(),  # type: ignore
@@ -120,6 +120,7 @@ class GeneratorMetrics:
 @dataclass
 class ScaleMetric:
     """Container for generator and discriminator metrics at a specific scale."""
+
     generator: GeneratorMetrics
     discriminator: DiscriminatorMetrics
 

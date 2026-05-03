@@ -1234,7 +1234,7 @@ class Trainer(ABC):
         (
             g_total,
             g_fake,
-            g_facies_rec,
+            g_rec_facies,
             g_well,
             g_div,
             g_rec_rock_physics,
@@ -1248,7 +1248,7 @@ class Trainer(ABC):
 
         writer.add_scalar("G/Total", g_total, global_step)
         writer.add_scalar("G/Adv", g_fake, global_step)
-        writer.add_scalar("G/Facies_Rec", g_facies_rec, global_step)
+        writer.add_scalar("G/Rec_Facies", g_rec_facies, global_step)
         writer.add_scalar("G/Well", g_well, global_step)
         writer.add_scalar("G/Diversity", g_div, global_step)
         writer.add_scalar("G/Rec_Rock_Physics", g_rec_rock_physics, global_step)
@@ -1272,7 +1272,7 @@ class Trainer(ABC):
 
         # Log to TensorBoard - generator losses
         writer.add_scalar("Loss/train/generator/adversarial", g_fake, step)  # type: ignore
-        writer.add_scalar("Loss/train/generator/facies_rec", g_facies_rec, step)  # type: ignore
+        writer.add_scalar("Loss/train/generator/facies_rec", g_rec_facies, step)  # type: ignore
         writer.add_scalar("Loss/train/generator/well_constraint", g_well, step)  # type: ignore
         writer.add_scalar("Loss/train/generator/diversity", g_div, step)  # type: ignore
         writer.add_scalar("Loss/train/generator/rec_rock_physics", g_rec_rock_physics, step)  # type: ignore
