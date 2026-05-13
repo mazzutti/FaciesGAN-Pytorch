@@ -301,9 +301,9 @@ def get_arguments() -> ArgumentParser:
         help="Scalar multiplier for the elastic-consistency loss (default: 0.1).",
     )
     parser.add_argument(
-        "--physics-loss-penalty",
+        "--seismic-loss-penalty",
         type=float,
-        dest="physics_loss_penalty",
+        dest="seismic_loss_penalty",
         default=0.1,
         help="Scalar multiplier for the seismic physics loss (default: 0.1).",
     )
@@ -499,7 +499,7 @@ def build_training_args(
         )
         cmd.extend(["--tv-loss-penalty", str(args.tv_loss_penalty)])
         cmd.extend(["--elastic-loss-penalty", str(args.elastic_loss_penalty)])
-        cmd.extend(["--physics-loss-penalty", str(args.physics_loss_penalty)])
+        cmd.extend(["--seismic-loss-penalty", str(args.seismic_loss_penalty)])
         cmd.extend(["--dz-pixel", str(args.dz_pixel)])
         cmd.extend(["--wavelet-f-peak", str(args.wavelet_f_peak)])
         cmd.extend(["--wavelet-dt", str(args.wavelet_dt)])

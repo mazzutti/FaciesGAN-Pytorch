@@ -506,7 +506,7 @@ def compute_rock_physics_loss(
     """Compute rock physics loss."""
 
     def needs_phys() -> bool:
-        return options.elastic_loss_penalty > 0 or options.physics_loss_penalty > 0
+        return options.elastic_loss_penalty > 0 or options.seismic_loss_penalty > 0
 
     fake_rock_physics = fake[:, options.num_facies_channels :, ...]
     fake_facies = fake[:, : options.num_facies_channels, ...]
@@ -533,7 +533,7 @@ def compute_rock_physics_loss(
         )
 
     seismic_loss = ZERO_SCALAR
-    if options.physics_loss_penalty > 0 and seismic_pyramid.get(scale) is not None:
+    if options.seismic_loss_penalty > 0 and seismic_pyramid.get(scale) is not None:
         vp_phys = phys["Ip"] / physics_state.rho_mean
         vp_mean = torch.mean(vp_phys).clamp(physics_state.vp_min, physics_state.vp_max)
 
@@ -549,7 +549,7 @@ def compute_rock_physics_loss(
             ),
             loss_fn=LossFn.HUBER,
         )
-        seismic_loss = options.physics_loss_penalty * seismic_unweighted
+        seismic_loss = options.seismic_loss_penalty * seismic_unweighted
 
     return tv_loss, elastic_loss, seismic_loss
 

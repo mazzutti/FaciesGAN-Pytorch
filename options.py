@@ -93,7 +93,7 @@ class TrainingOptions(argparse.Namespace):
         rec_rock_physics_loss_penalty: float = 10.0,
         tv_loss_penalty: float = 1e-4,
         elastic_loss_penalty: float = 0.1,
-        physics_loss_penalty: float = 0.1,
+        seismic_loss_penalty: float = 0.1,
         dz_pixel: float = 5.0,
         wavelet_f_peak: float = 8.0,
         wavelet_dt: float = 0.001,
@@ -220,8 +220,8 @@ class TrainingOptions(argparse.Namespace):
             Scalar multiplier for the total variation loss (smoothness) applied to rock physics. Default is 1e-4.
         elastic_loss_penalty : float, optional
             Scalar multiplier for the elastic consistency loss (MSE between Ip/Is and VpVs). Default is 1.0.
-        physics_loss_penalty : float, optional
-            Scalar multiplier for the geophysical physics loss (MSE between synthetic and real seismic). Default is 1e-4.
+        seismic_loss_penalty : float, optional
+            Scalar multiplier for the geophysical seismic loss (MSE between synthetic and real seismic). Default is 1e-4.
         dz_pixel : float, optional
             Vertical resolution of the data in meters per pixel. Default is 5.0.
         wavelet_f_peak : float, optional
@@ -305,7 +305,7 @@ class TrainingOptions(argparse.Namespace):
         self.rec_rock_physics_loss_penalty = rec_rock_physics_loss_penalty
         self.tv_loss_penalty = tv_loss_penalty
         self.elastic_loss_penalty = elastic_loss_penalty
-        self.physics_loss_penalty = physics_loss_penalty
+        self.seismic_loss_penalty = seismic_loss_penalty
         self.dz_pixel = dz_pixel
         self.wavelet_f_peak = wavelet_f_peak
         self.wavelet_dt = wavelet_dt
