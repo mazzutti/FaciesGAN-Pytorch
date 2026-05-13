@@ -10,20 +10,19 @@ from typing import Iterator, cast
 
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader
 
 import utils
 
-from .pyramids_batch import Batch, PyramidsBatch
+from .pyramids_batch import Batch, IDataLoader, PyramidsBatch
 
 
-class TorchDataPrefetcher:
+class DataPrefetcher:
     """Wraps a :class:`torch.utils.data.DataLoader` and preloads the next
     batch while the current one is being processed.
 
     Parameters
     ----------
-    loader: DataLoader[tuple[int, Batch] | Batch]
+    loader: IDataLoader
         A PyTorch ``DataLoader`` instance to iterate over.
     scale_indices : tuple[int, ...]
         Sequence of scale indices (0-based) to prepare data for.
@@ -33,11 +32,11 @@ class TorchDataPrefetcher:
 
     def __init__(
         self,
-        loader: DataLoader[tuple[int, Batch] | Batch],
+        loader: IDataLoader,
         scale_indices: tuple[int, ...],
         device: torch.device = torch.device("cpu"),
     ) -> None:
-        self.loader = iter(loader)
+        self.loader: Iterator[tuple[int, Batch] | Batch] = iter(loader)
         self.scale_indices = scale_indices
         self.device = device
 
@@ -46,8 +45,8 @@ class TorchDataPrefetcher:
             if self.device.type == "cuda"
             else None
         )
-        self.next_batch = None
-        self.next_prepared = None
+        self.next_batch: tuple[int, Batch] | Batch | None = None
+        self.next_prepared: PyramidsBatch | None = None
         # List of dataset sample indices contained in the most recent batch
         # (one index per batch element). Set to None when unavailable.
         self.last_seen_indices: torch.Tensor | None = None
@@ -93,11 +92,23 @@ class TorchDataPrefetcher:
         }
 
     def _coerce_indices(self, values: object) -> torch.Tensor:
+        """Convert indices to a tensor on the target device.
+
+        Parameters
+        ----------
+        values : object
+            Either a torch.Tensor or a value that can be converted to a tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Indices tensor of dtype int64 on the target device.
+        """
         if isinstance(values, torch.Tensor):
             return values.detach().to(self.device)
         return torch.as_tensor(values, device=self.device, dtype=torch.long)
 
-    def prepare_batch_async(self, batch: Batch) -> PyramidsBatch:
+    def prepare_batch_async(self, batch: tuple[int, Batch] | Batch) -> PyramidsBatch:
         """Perform batch preparation logic asynchronously.
 
         Moves facies, wells, and seismic data to the target device and
@@ -105,20 +116,24 @@ class TorchDataPrefetcher:
 
         Parameters
         ----------
-        batch : Batch
-            The raw batch from the DataLoader.
+        batch : tuple[int, Batch] | Batch
+            The raw batch from the DataLoader. It may be a ``Batch`` named
+            tuple or a ``(indices, Batch)`` pair depending on the collate
+            function.
 
         Returns
         -------
         PyramidsBatch
-            A tuple of (facies, wells, masks, seismic) dictionaries.
+            A tuple of ``(indices, facies, wells, masks, seismic)`` where
+            the per-scale components are dictionaries keyed by scale index.
         """
         # Expect either:
         #  - (indices_tensor, facies, wells, masks, seismic)
         #  - (facies, wells, masks, seismic)
-        if len(batch) >= 5:
-            indexed_batch = cast(tuple[object, object, object, object, object], batch)
-            first = batch[0]
+        batch_tuple: tuple[object, ...] = cast(tuple[object, ...], batch)
+
+        if len(batch_tuple) >= 5:
+            first = batch_tuple[0]
             if (
                 isinstance(first, torch.Tensor)
                 and first.dim() == 1
@@ -126,22 +141,36 @@ class TorchDataPrefetcher:
             ):
                 self.last_seen_indices = self._coerce_indices(first)
                 self.seen_indices.append(self.last_seen_indices)
-                facies, wells, masks, seismic = cast(
-                    tuple[tuple[torch.Tensor, ...], ...], indexed_batch[1:]
-                )
+                facies = cast(tuple[torch.Tensor, ...], batch_tuple[1])
+                wells = cast(tuple[torch.Tensor, ...], batch_tuple[2])
+                masks = cast(tuple[torch.Tensor, ...], batch_tuple[3])
+                seismic = cast(tuple[torch.Tensor, ...], batch_tuple[4])
             else:
                 self.last_seen_indices = None
-                facies, wells, masks, seismic = batch[:4]
-        elif len(batch) == 2:
+                facies = cast(tuple[torch.Tensor, ...], batch_tuple[0])
+                wells = cast(tuple[torch.Tensor, ...], batch_tuple[1])
+                masks = cast(tuple[torch.Tensor, ...], batch_tuple[2])
+                seismic = cast(tuple[torch.Tensor, ...], batch_tuple[3])
+        elif len(batch_tuple) == 2:
             # Case: (indices, Batch_as_named_tuple)
-            self.last_seen_indices = self._coerce_indices(batch[0])
+            self.last_seen_indices = self._coerce_indices(batch_tuple[0])
             self.seen_indices.append(self.last_seen_indices)
-            facies, wells, masks, seismic = cast(
-                tuple[tuple[torch.Tensor, ...], ...], batch[1]
+            facies_batch = cast(Batch, batch_tuple[1])
+            facies, wells, masks, seismic = (
+                facies_batch.facies,
+                facies_batch.wells,
+                facies_batch.masks,
+                facies_batch.seismic,
             )
         else:
             self.last_seen_indices = None
-            facies, wells, masks, seismic = batch
+            facies_batch = cast(Batch, batch)
+            facies, wells, masks, seismic = (
+                facies_batch.facies,
+                facies_batch.wells,
+                facies_batch.masks,
+                facies_batch.seismic,
+            )
 
         # Move primary components to device
         facies_pyramid = self._to_pyramid(facies)
@@ -153,9 +182,9 @@ class TorchDataPrefetcher:
             masks_pyramid = self._to_pyramid(masks)
         elif wells_pyramid:
             # Masks are computed from the device-resident well tensors.
-            # In One-Hot Tanh, background is -1.0. We check for any channel > -0.5.
+            # In one-hot [0,1], background is 0.0. We check for any channel > 0.5.
             masks_pyramid = {
-                idx: (w[:, 1:, ...].max(dim=1, keepdim=True).values > -0.5).float()
+                idx: (w[:, 1:, ...].max(dim=1, keepdim=True).values > 0.5).float()
                 for idx, w in wells_pyramid.items()
             }
         else:
@@ -196,7 +225,8 @@ class TorchDataPrefetcher:
         Yields
         ------
         PyramidsBatch
-            The next prepared batch of multi-scale tensors.
+            The next prepared batch of multiscale tensors, represented as
+            ``(indices, facies, wells, masks, seismic)``.
         """
         prepared = self._fetch_next()
         while prepared is not None:
@@ -205,17 +235,22 @@ class TorchDataPrefetcher:
 
     def __repr__(self) -> str:
         return (
-            f"TorchDataPrefetcher(device='{self.device}', "
+            f"TorchDataPrefetcher(device='{self.device.type}', "
             f"scale_indices={self.scale_indices})"
         )
 
 
-def gather_seen_indices(prefetcher: TorchDataPrefetcher) -> list[int]:
+def gather_seen_indices(prefetcher: DataPrefetcher) -> list[int]:
     """Return dataset indices seen by all ranks during the current iteration.
 
     In DDP, each rank processes different data. We gather all indices
     to all ranks so that visualization can access any sample from the
     full dataset that was seen in this epoch.
+
+    Returns
+    -------
+    list[int]
+        A flat list of sample indices gathered across all ranks.
     """
     local_indices: list[torch.Tensor] = prefetcher.seen_indices
     if not local_indices:

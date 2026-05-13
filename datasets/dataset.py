@@ -1,9 +1,11 @@
-"""Dataset of multi-scale pyramids for facies, wells and seismic data.
+"""Dataset of multiscale pyramids for facies, wells and seismic data.
 
-This module provides :class:`TorchPyramidsDataset` which loads precomputed
+This module provides :class:`PyramidsDataset` which loads precomputed
 multi-resolution tensors (pyramids) for facies images and optional
 conditioning channels (wells, seismic). Each dataset item is a :class:`Batch`
-named tuple containing per-scale tensors used by the training pipeline.
+named tuple containing per-scale tensors used by the training pipeline. When
+``include_index=True``, items are returned as ``(idx, Batch)`` pairs for use
+with data prefetching systems.
 """
 
 from itertools import repeat
@@ -12,18 +14,20 @@ from typing import Optional
 import torch
 from torch.utils.data import Dataset
 
+from config import DomainConfig
 from options import TrainingOptions
 
 from . import utils
 from .pyramids_batch import Batch
 
 
-class TorchPyramidsDataset(Dataset[tuple[int, Batch] | Batch]):
-    """PyTorch dataset for multi-scale facies with optional conditioning.
+class PyramidsDataset(Dataset[tuple[int, Batch] | Batch]):
+    """PyTorch dataset for multiscale facies with optional conditioning.
 
     Loads precomputed multi-resolution pyramids for facies images and optional
-    Each dataset item (a "batch") is a :class:`Batch` object containing four
-    tuple attributes, each containing one tensor per scale:
+    conditioning channels (wells, seismic, masks, and rock-physics properties).
+    Each dataset item is a :class:`Batch` object containing four tuple attributes,
+    each with one tensor per scale:
 
     - ``facies``: Main target channels.
       - 4 channels: One-hot encoded facies [0:4].
@@ -33,19 +37,22 @@ class TorchPyramidsDataset(Dataset[tuple[int, Batch] | Batch]):
       - 4 channels: One-hot encoded facies present at well locations.
     - ``seismic``: Conditioning seismic amplitude.
       - 1 channel: Normalized seismic volume slice.
-    - ``masks``: (Reserved) binary masks for sparse conditioning.
+    - ``masks``: Binary masks indicating well locations for sparse conditioning.
 
     Parameters
     ----------
     options : TrainingOptions
         Configuration providing ``input_path``, ``use_wells``, ``use_seismic``
-        and other scale-generation parameters.
+        ``use_rock_physics``, and other scale-generation parameters.
     shuffle : bool, optional
         Shuffle samples after generation (default: ``False``).
     regenerate : bool, optional
         If ``True``, force recomputation of pyramid caches (default: ``False``).
     channels_last : bool, optional
         If ``True``, tensors use channels-last ordering (default: ``False``).
+    include_index : bool, optional
+        If ``True``, ``__getitem__`` returns ``(global_idx, Batch)`` tuples for
+        use with data prefetchers (default: ``False``).
     """
 
     def __init__(
@@ -115,7 +122,10 @@ class TorchPyramidsDataset(Dataset[tuple[int, Batch] | Batch]):
         """Generate pyramid tensors for facies, wells, masks and seismic.
 
         This method orchestrates calls to the :mod:`datasets.utils` functions
-        to load and normalize precomputed pyramid files from disk.
+        to load and normalize precomputed pyramid files from disk. When
+        ``use_rock_physics`` is enabled, rock-physics properties (Ip, Is, Vp/Vs)
+        are concatenated to the facies channels. When ``use_wells`` is enabled,
+        masks are generated from well locations.
 
         Returns
         -------
@@ -123,20 +133,56 @@ class TorchPyramidsDataset(Dataset[tuple[int, Batch] | Batch]):
             A 4-tuple of (facies, wells, masks, seismic) pyramids. Each
             component is a tuple of tensors (one per scale).
         """
+        normalization_range = (
+            float(self.options.normalization_range[0]),
+            float(self.options.normalization_range[1]),
+        )
+
         facies_pyramids = utils.to_facies_pyramids(
             self.scales,
             data_dir=self.data_dir,
             channels_last=self.channels_last,
-            num_classes=self.options.num_facies_classes,
+            num_classes=DomainConfig.NUM_FACIES,
+            normalization_range=normalization_range,
         )
 
-        if getattr(self.options, "use_rock_physics", False):
+        if self.options.use_rock_physics:
             # We call the public wrappers directly to ensure Joblib populates
             # the specific cache folders (to_ip_pyramids, to_is_pyramids, etc.)
             rock_physics_attrs = [
-                utils.to_ip_pyramids(self.scales, self.data_dir, self.channels_last),
-                utils.to_is_pyramids(self.scales, self.data_dir, self.channels_last),
-                utils.to_vp_vs_pyramids(self.scales, self.data_dir, self.channels_last),
+                utils.to_ip_pyramids(
+                    self.scales,
+                    self.data_dir,
+                    self.channels_last,
+                    normalization_range=normalization_range,
+                ),
+                utils.to_is_pyramids(
+                    self.scales,
+                    self.data_dir,
+                    self.channels_last,
+                    normalization_range=normalization_range,
+                ),
+                utils.to_vp_vs_pyramids(
+                    self.scales,
+                    self.data_dir,
+                    self.channels_last,
+                    normalization_range=normalization_range,
+                    use_robust_range=bool(
+                        getattr(self.options, "vp_vs_robust_range", False)
+                    ),
+                    robust_percentiles=(
+                        float(
+                            getattr(
+                                self.options, "vp_vs_robust_percentiles", (1.0, 99.0)
+                            )[0]
+                        ),
+                        float(
+                            getattr(
+                                self.options, "vp_vs_robust_percentiles", (1.0, 99.0)
+                            )[1]
+                        ),
+                    ),
+                ),
             ]
 
             combined: list[torch.Tensor] = []
@@ -164,17 +210,20 @@ class TorchPyramidsDataset(Dataset[tuple[int, Batch] | Batch]):
             facies_pyramids = tuple(combined)
 
         # Wells
-        if getattr(self.options, "use_wells", False):
+        if self.options.use_wells:
             wells_pyramids = utils.to_wells_pyramids(
                 self.scales,
                 data_dir=self.data_dir,
                 channels_last=self.channels_last,
-                num_classes=self.options.num_facies_classes,
+                num_classes=DomainConfig.NUM_FACIES,
+                normalization_range=normalization_range,
             )
             masks_pyramids = utils.to_masks_pyramids(
                 self.scales,
                 data_dir=self.data_dir,
                 channels_last=self.channels_last,
+                num_classes=DomainConfig.NUM_FACIES,
+                normalization_range=normalization_range,
             )
 
         else:
@@ -182,11 +231,12 @@ class TorchPyramidsDataset(Dataset[tuple[int, Batch] | Batch]):
             masks_pyramids = tuple()
 
         # Seismic
-        if getattr(self.options, "use_seismic", False):
+        if self.options.use_seismic:
             seismic_pyramids = utils.to_seismic_pyramids(
                 self.scales,
                 data_dir=self.data_dir,
                 channels_last=self.channels_last,
+                normalization_range=normalization_range,
             )
         else:
             seismic_pyramids = tuple()
@@ -224,22 +274,25 @@ class TorchPyramidsDataset(Dataset[tuple[int, Batch] | Batch]):
         if seed is not None:
             g = torch.Generator()
             g.manual_seed(seed)
-            idxs = torch.randperm(len(self.batches), generator=g)
+            indexes = torch.randperm(len(self.batches), generator=g)
         else:
-            idxs = torch.randperm(len(self.batches))
+            indexes = torch.randperm(len(self.batches))
 
-        self.batches = [self.batches[i] for i in idxs]
+        self.batches = [self.batches[i] for i in indexes]
         # Invalidate the scale data cache since order has changed
         self._scale_data_cache.clear()
 
     def clean_cache(self) -> None:
-        """Clear any on-disk or in-memory cache used by the dataset."""
+        """Clear the joblib pyramid cache and internal scale-data cache.
+
+        Useful when regenerating pyramids or freeing memory after dataset use.
+        """
         utils.memory.clear(warn=False)
         self._scale_data_cache.clear()
 
     def __repr__(self) -> str:
         return (
-            f"TorchPyramidsDataset(n_samples={len(self)}, "
+            f"PyramidsDataset(n_samples={len(self)}, "
             f"n_scales={len(self.scales)}, "
             f"wells={getattr(self.options, 'use_wells', False)}, "
             f"seismic={getattr(self.options, 'use_seismic', False)}, "
@@ -250,10 +303,24 @@ class TorchPyramidsDataset(Dataset[tuple[int, Batch] | Batch]):
         return len(self.batches)
 
     def __getitem__(self, idx: int) -> tuple[int, Batch] | Batch:
+        """Return a dataset item at the given index.
+
+        Parameters
+        ----------
+        idx : int
+            The sample index.
+
+        Returns
+        -------
+        Batch or tuple[int, Batch]
+            If ``include_index=False`` (default), returns the ``Batch`` directly.
+            If ``include_index=True``, returns ``(idx, Batch)`` for use with
+            data prefetchers that expect global sample indices.
+        """
         item = self.batches[idx]
-        if getattr(self, "include_index", False):
+        if self.include_index:
             # Return tuple: (idx, item)
-            return (idx, item)
+            return idx, item
         return item
 
     def get_scale_data(self, scale: int | None = None) -> tuple[torch.Tensor, ...]:
