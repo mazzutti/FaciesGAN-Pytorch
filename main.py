@@ -26,7 +26,7 @@ os.environ.setdefault("TORCHINDUCTOR_AUTOTUNE_NUM_CHOICES_DISPLAYED", "0")
 os.environ.setdefault("TORCHINDUCTOR_MAX_AUTOTUNE_REPORT_CHOICES_STATS", "0")
 os.environ.setdefault(
     "PYTORCH_CUDA_ALLOC_CONF",
-    "expandable_segments:True,max_split_size_mb:128",
+    "expandable_segments:True,max_split_size_mb:128"
 )
 
 
@@ -92,8 +92,8 @@ if "TORCH_LOGS" not in os.environ:
         pass
 
 import utils
-from constants import OPT_FILE, OUTPUTS_DIR
-from enums import AmpDtype, DdpBackend
+from config import CheckpointFilenames, DirectoryConfig
+from enums import AmpDtype, DdpBackend, DeviceType
 from log import init_output_logging
 from options import NORMALIZATION_RANGE, LrDecayUnit, TrainingOptions
 from training import Trainer
@@ -116,39 +116,41 @@ def get_arguments() -> ArgumentParser:
 
     # load, input, save configurations:
     parser.add_argument("--manual-seed", type=int, help="manual seed")
-    parser.add_argument("--output-path", help="output folder path", default=OUTPUTS_DIR)
+    parser.add_argument(
+        "--output-path", help="output folder path", default=DirectoryConfig.OUTPUTS
+    )
     parser.add_argument(
         "--output-fullpath",
         help="Set exact output path (overrides automatic timestamp prefix).",
-        default=None,
-    )
+        default=None
+)
     parser.add_argument("--stop-scale", type=int, help="stop scale", default=6)
     parser.add_argument(
         "--start-scale",
         type=int,
         help="scale to start/resume training from (default: 0)",
-        default=0,
-    )
+        default=0
+)
     parser.add_argument(
         "--num-facies",
         type=int,
         dest="num_facies",
         help="number of one-hot encoded facies classes (channels)",
-        default=3,
-    )
+        default=3
+)
     parser.add_argument(
         "--noise-channels",
         type=int,
         help="number of noise channels to generate per scale",
-        default=3,
-    )
+        default=3
+)
     parser.add_argument(
         "--img-color-range",
         type=int,
         nargs=2,
         help="range of values in the input facie",
-        default=[0, 255],
-    )
+        default=[0, 255]
+)
     parser.add_argument(
         "--crop-size", type=int, help="crop size to train the facie", default=256
     )
@@ -156,8 +158,8 @@ def get_arguments() -> ArgumentParser:
         "--batch-size",
         default=1,
         type=int,
-        help="Total batch size - e.g: num_gpus = 2, batch_size = 128 then, effectively, 64",
-    )
+        help="Total batch size - e.g: num_gpus = 2, batch_size = 128 then, effectively, 64"
+)
 
     # networks hyperparameters:
     parser.add_argument(
@@ -165,23 +167,23 @@ def get_arguments() -> ArgumentParser:
         dest="num_feature",
         type=int,
         help="initial number of features in each layer",
-        default=32,
-    )
+        default=32
+)
     parser.add_argument(
         "--min-num-features",
         dest="min_num_feature",
         type=int,
         help="minimal number of features in each layer",
-        default=32,
-    )
+        default=32
+)
     parser.add_argument("--kernel-size", type=int, help="kernel size", default=3)
     parser.add_argument(
         "--num-layers",
         dest="num_layer",
         type=int,
         help="number of layers in each scale",
-        default=5,
-    )
+        default=5
+)
     parser.add_argument("--stride", type=int, help="stride", default=1)
     parser.add_argument(
         "--normalization-range",
@@ -190,8 +192,8 @@ def get_arguments() -> ArgumentParser:
         metavar=("MIN", "MAX"),
         dest="normalization_range",
         help="Normalization range [MIN MAX] used to derive default padding midpoint.",
-        default=NORMALIZATION_RANGE,
-    )
+        default=NORMALIZATION_RANGE
+)
     parser.add_argument("--padding-size", type=int, help="net pad size", default=0)
 
     # pyramid parameters:
@@ -202,37 +204,37 @@ def get_arguments() -> ArgumentParser:
         "--min-noise-amp",
         type=float,
         help="minimum noise amplitude floor for diversity",
-        default=0.1,
-    )
+        default=0.1
+)
     parser.add_argument(
         "--scale0-noise-amp",
         type=float,
         help="noise amplitude at scale 0 (controls structural diversity)",
-        default=1.0,
-    )
+        default=1.0
+)
 
     # Parallel training specific parameters:
     parser.add_argument(
         "--num-parallel-scales",
         type=int,
         help="Number of scales to train in parallel (default: 2)",
-        default=2,
-    )
+        default=2
+)
 
     # profiling
     parser.add_argument(
         "--use-profiler",
         action="store_true",
-        help="Enable PyTorch profiler and export a chrome trace to the output path",
-    )
+        help="Enable PyTorch profiler and export a chrome trace to the output path"
+)
 
     # optimization hyperparameters:
     parser.add_argument(
         "--num-iter",
         type=int,
         default=2000,
-        help="number of full dataset passes (each pass shuffles the dataset independently)",
-    )
+        help="number of full dataset passes (each pass shuffles the dataset independently)"
+)
     parser.add_argument("--gamma", type=float, help="scheduler gamma", default=0.9)
     parser.add_argument(
         "--lr-g", type=float, default=5e-4, help="learning rate, default=5e-4"
@@ -244,8 +246,8 @@ def get_arguments() -> ArgumentParser:
         "--lr-decay",
         type=int,
         default=1000,
-        help="number of epochs (or steps if --lr-decay-unit=step) before lr decay (used by discriminator StepLR)",
-    )
+        help="number of epochs (or steps if --lr-decay-unit=step) before lr decay (used by discriminator StepLR)"
+)
     parser.add_argument(
         "--lr-decay-unit",
         type=str,
@@ -253,32 +255,32 @@ def get_arguments() -> ArgumentParser:
         default=LrDecayUnit.EPOCH,
         help="unit for --lr-decay: 'epoch' decays per-batch epoch count (reset each batch), "
         "'step' decays by global optimisation step across all batches, "
-        "'batch' decays once every N dataset batches (schedulers accumulate across batches, default: epoch)",
-    )
+        "'batch' decays once every N dataset batches (schedulers accumulate across batches, default: epoch)"
+)
     parser.add_argument(
         "--lr-patience",
         type=int,
         default=400,
-        help="ReduceLROnPlateau patience: epochs with no improvement before reducing generator LR (default: 400)",
-    )
+        help="ReduceLROnPlateau patience: epochs with no improvement before reducing generator LR (default: 400)"
+)
     parser.add_argument(
         "--lr-min",
         type=float,
         default=1e-4,
-        help="minimum learning rate for generator ReduceLROnPlateau (default: 1e-4)",
-    )
+        help="minimum learning rate for generator ReduceLROnPlateau (default: 1e-4)"
+)
     parser.add_argument(
         "--lr-smoothing-alpha",
         type=float,
         default=0.95,
-        help="EMA smoothing factor for generator loss fed to ReduceLROnPlateau (0=no smoothing, 0.99=very smooth, default: 0.95)",
-    )
+        help="EMA smoothing factor for generator loss fed to ReduceLROnPlateau (0=no smoothing, 0.99=very smooth, default: 0.95)"
+)
     parser.add_argument(
         "--lr-g-factor",
         type=float,
         default=0.8,
-        help="Factor by which the generator LR is reduced on plateau (default: 0.8)",
-    )
+        help="Factor by which the generator LR is reduced on plateau (default: 0.8)"
+)
     parser.add_argument(
         "--beta1", type=float, default=0.5, help="beta1 for adam. default=0.5"
     )
@@ -292,14 +294,14 @@ def get_arguments() -> ArgumentParser:
         "--scale0-disc-steps-multiplier",
         type=int,
         default=1,
-        help="Extra D-step multiplier for scale 0 only (default: 1, i.e. no extra steps).",
-    )
+        help="Extra D-step multiplier for scale 0 only (default: 1, i.e. no extra steps)."
+)
     parser.add_argument(
         "--scale0-loss-multiplier",
         type=float,
         default=1.0,
-        help="Extra loss multiplier applied to rec and rock physics losses at scale 0 (default: 1.0).",
-    )
+        help="Extra loss multiplier applied to rec and rock physics losses at scale 0 (default: 1.0)."
+)
     parser.add_argument(
         "--scale0-padding-size",
         type=int,
@@ -310,8 +312,8 @@ def get_arguments() -> ArgumentParser:
             "None (default) means use --padding-size globally. "
             "Set to 1 to give scale 0 full-resolution D output (12x12 "
             "vs 2x2 with padding=0), fixing WGAN-GP undercoverage."
-        ),
-    )
+        )
+)
     parser.add_argument(
         "--scale0-r1-gamma",
         type=float,
@@ -321,8 +323,8 @@ def get_arguments() -> ArgumentParser:
             "R1 gradient penalty weight for scale 0 discriminator "
             "(Mescheder et al. 2018). Penalises ||∇D(real)||² at real "
             "samples. 0.0 = disabled (default). Recommended: 10.0."
-        ),
-    )
+        )
+)
     parser.add_argument(
         "--scale0-disc-grad-clip",
         type=float,
@@ -333,8 +335,8 @@ def get_arguments() -> ArgumentParser:
             "Applied after backward() but before optimizer.step(), "
             "independently of WGAN-GP. 0.0 = disabled (default). "
             "Recommended: 25.0 to tame s0 exploding gradients."
-        ),
-    )
+        )
+)
     parser.add_argument(
         "--scale0-gp-alpha",
         type=float,
@@ -345,8 +347,8 @@ def get_arguments() -> ArgumentParser:
             "0.0 = use global --gradient-loss-penalty (default). "
             "Set > 0 to apply a higher GP weight at scale 0, "
             "e.g. 50.0 to suppress s0 Lipschitz violations."
-        ),
-    )
+        )
+)
     parser.add_argument(
         "--scale0-disc-lr-factor",
         type=float,
@@ -357,21 +359,21 @@ def get_arguments() -> ArgumentParser:
             "1.0 = same as global --lr-d (default). "
             "Set < 1 to slow down D at s0 so G can keep up, "
             "e.g. 0.2 when Wasserstein distance at s0 grows unboundedly."
-        ),
-    )
+        )
+)
     parser.add_argument(
         "--gradient-loss-penalty",
         type=float,
         help="gradient penalty weight",
-        default=10.0,
-    )
+        default=10.0
+)
     parser.add_argument(
         "--rec-facies-loss-penalty",
         type=float,
         dest="rec_facies_loss_penalty",
         help="reconstruction loss weight",
-        default=10,
-    )
+        default=10
+)
     parser.add_argument(
         "--gp-interval",
         type=int,
@@ -381,27 +383,27 @@ def get_arguments() -> ArgumentParser:
             "of every step (StyleGAN2-style). Weight is scaled by N to "
             "compensate. Default 16."
         ),
-        default=16,
-    )
+        default=16
+)
     parser.add_argument(
         "--num-diversity-samples",
         type=int,
         help="number of diverse samples to generate per G-step for diversity loss (default: 3)",
-        default=3,
-    )
+        default=3
+)
     parser.add_argument(
         "--diversity-loss-penalty",
         type=float,
         dest="diversity_loss_penalty",
         help="additional scalar multiplier applied to the generator diversity loss (default: 1.0)",
-        default=1.0,
-    )
+        default=1.0
+)
     parser.add_argument(
         "--adversarial-loss-penalty",
         type=float,
         help="scalar multiplier applied to the generator adversarial loss -E[D(fake)] (default: 1.0)",
-        default=1.0,
-    )
+        default=1.0
+)
     parser.add_argument(
         "--save-interval", type=int, help="save log interval", default=100
     )
@@ -409,80 +411,80 @@ def get_arguments() -> ArgumentParser:
         "--checkpoint-interval",
         type=int,
         help="Interval (in epochs) between saving training state checkpoints for resume (default: 1).",
-        default=1,
-    )
+        default=1
+)
     parser.add_argument(
         "--num-real-facies",
         type=int,
         help="Number of real facies to use in the grid plot",
-        default=5,
-    )
+        default=5
+)
     parser.add_argument(
         "--num-generated-per-real",
         type=int,
         help="Number of generated facies per real facies to use in the grid plot",
-        default=5,
-    )
+        default=5
+)
     parser.add_argument(
         "--num-train-pyramids",
         type=int,
         help="Number of train pyramids to use in the FaciesGAN training",
-        default=200,
-    )
+        default=200
+)
     parser.add_argument(
         "--num-workers",
         type=int,
         help="Number of workers for data loading (0 = main process only). "
         "Defaults to min(4, cpu_count//2) for parallel data prep.",
-        default=min(4, max(1, (os.cpu_count() or 1) // 2)),
-    )
+        default=min(4, max(1, (os.cpu_count() or 1) // 2))
+)
 
     parser.add_argument(
         "--use-wells",
         action="store_true",
-        help="enable using wells during data loading (filter by --wells-mask-columns if set)",
-    )
+        help="enable using wells during data loading (filter by --wells-mask-columns if set)"
+)
 
     parser.add_argument(
         "--wells-mask-columns",
         type=int,
         help="list of well indices to train the model from",
         nargs="+",
-        default=tuple(),
-    )
+        default=tuple()
+)
 
     parser.add_argument(
         "--well-loss-penalty",
         type=float,
         help="weight multiplier for well/mask reconstruction loss",
-        default=10.0,
-    )
+        default=10.0
+)
 
     parser.add_argument(
         "--grad-clip-norm",
         type=float,
         default=1.0,
-        help="max gradient norm for generator clipping (default: 1.0; set to 0 to disable)",
-    )
+        help="max gradient norm for generator clipping (default: 1.0; set to 0 to disable)"
+)
 
     parser.add_argument(
         "--use-seismic",
         action="store_true",
-        help="enable using seismic data during data loading",
-    )
+        help="enable using seismic data during data loading"
+)
 
     parser.add_argument(
         "--use-rock-physics",
         action="store_true",
         dest="use_rock_physics",
-        help="Train with rock physics volumes (Ip, Is, Vp/Vs) as additional output channels.",
-    )
+        help="Train with rock physics volumes (Ip, Is, Vp/Vs) as additional output channels."
+)
     parser.add_argument(
         "--vp-vs-robust-range",
         action="store_true",
         dest="vp_vs_robust_range",
-        help="Use percentile-based robust normalization range for VP/VS pyramids.",
-    )
+        help="Use percentile-based robust normalization range for VP/VS pyramids."
+)
     parser.add_argument(
         "--vp-vs-robust-percentiles",
         type=float,
@@ -490,80 +492,80 @@ def get_arguments() -> ArgumentParser:
         metavar=("LOW", "HIGH"),
         dest="vp_vs_robust_percentiles",
         default=(1.0, 99.0),
-        help="Percentiles [LOW HIGH] used when --vp-vs-robust-range is enabled (default: 1 99).",
-    )
+        help="Percentiles [LOW HIGH] used when --vp-vs-robust-range is enabled (default: 1 99)."
+)
     parser.add_argument(
         "--rock-physics-loss-penalty",
         type=float,
         dest="rock_physics_loss_penalty",
         default=1.0,
-        help="Extra loss multiplier for rock physics reconstruction (default: 1.0).",
-    )
+        help="Extra loss multiplier for rock physics reconstruction (default: 1.0)."
+)
     parser.add_argument(
         "--rec-rock-physics-loss-penalty",
         type=float,
         dest="rec_rock_physics_loss_penalty",
         default=1.0,
-        help="Extra loss multiplier for rock-physics reconstruction on the generated volume (default: 1.0).",
-    )
+        help="Extra loss multiplier for rock-physics reconstruction on the generated volume (default: 1.0)."
+)
     parser.add_argument(
         "--tv-loss-penalty",
         type=float,
         dest="tv_loss_penalty",
         default=1.0,
-        help="Scalar multiplier for the total-variation smoothness loss (default: 1.0).",
-    )
+        help="Scalar multiplier for the total-variation smoothness loss (default: 1.0)."
+)
     parser.add_argument(
         "--elastic-loss-penalty",
         type=float,
         dest="elastic_loss_penalty",
         default=0.1,
-        help="Scalar multiplier for the elastic-consistency loss (default: 0.1).",
-    )
+        help="Scalar multiplier for the elastic-consistency loss (default: 0.1)."
+)
     parser.add_argument(
         "--seismic-loss-penalty",
         type=float,
         dest="seismic_loss_penalty",
         default=0.1,
-        help="Scalar multiplier for the seismic physics loss (default: 0.1).",
-    )
+        help="Scalar multiplier for the seismic physics loss (default: 0.1)."
+)
     parser.add_argument(
         "--dz-pixel",
         type=float,
         dest="dz_pixel",
         default=5.0,
-        help="Vertical resolution in meters per pixel (default: 5.0).",
-    )
+        help="Vertical resolution in meters per pixel (default: 5.0)."
+)
     parser.add_argument(
         "--wavelet-f-peak",
         type=float,
         dest="wavelet_f_peak",
         default=8.0,
-        help="Peak frequency of the Ricker wavelet in Hz (default: 8.0).",
-    )
+        help="Peak frequency of the Ricker wavelet in Hz (default: 8.0)."
+)
     parser.add_argument(
         "--wavelet-dt",
         type=float,
         dest="wavelet_dt",
         default=0.001,
-        help="Wavelet sampling interval in seconds (default: 0.001).",
-    )
+        help="Wavelet sampling interval in seconds (default: 0.001)."
+)
 
     parser.add_argument(
         "--no-shuffle",
         action="store_true",
-        help="disable dataset shuffling (useful for reproducible debugging)",
-    )
+        help="disable dataset shuffling (useful for reproducible debugging)"
+)
     parser.add_argument(
         "--no-tensorboard",
         action="store_true",
-        help="disable TensorBoard logging during training",
-    )
+        help="disable TensorBoard logging during training"
+)
     parser.add_argument(
         "--no-plot-outputs",
         action="store_true",
-        help="disable generated output visualizations (facies and rock physics) during training",
-    )
+        help="disable generated output visualizations (facies and rock physics) during training"
+)
     parser.add_argument(
         "--seismic-stretch-percentile",
         type=int,
@@ -572,8 +574,8 @@ def get_arguments() -> ArgumentParser:
         help=(
             "Percentile for TensorBoard seismic contrast stretch (display-only). "
             "Allowed: 95, 98, 99 (default: 98)."
-        ),
-    )
+        )
+)
     parser.add_argument(
         "--rec-skip-per-scale",
         type=int,
@@ -583,23 +585,23 @@ def get_arguments() -> ArgumentParser:
             "In parallel multi-scale training, skip the rec_facies loss for scale s "
             "during the first s*N epochs. Gives lower scales time to stabilize before "
             "higher scales depend on their outputs. Default: 0 (disabled)."
-        ),
-    )
+        )
+)
     parser.add_argument(
         "--no-compile",
         action="store_true",
-        help="disable torch.compile on CUDA (enabled by default for Ampere+ GPUs)",
-    )
+        help="disable torch.compile on CUDA (enabled by default for Ampere+ GPUs)"
+)
     parser.add_argument(
         "--compile-backend",
         action="store_true",
-        help="enable torch.compile on CUDA (enabled by default)",
-    )
+        help="enable torch.compile on CUDA (enabled by default)"
+)
     parser.add_argument(
         "--hand-off-to-c",
         action="store_true",
-        help="Hand off orchestration to compiled C library via ctypes (thin wrapper)",
-    )
+        help="Hand off orchestration to compiled C library via ctypes (thin wrapper)"
+)
     parser.add_argument(
         "--gradient-checkpoint",
         action="store_true",
@@ -608,8 +610,8 @@ def get_arguments() -> ArgumentParser:
             "~30%% extra compute for significantly lower peak GPU memory, "
             "allowing larger batch sizes.  Incompatible with torch.compile "
             "(compile is automatically disabled when this flag is set)."
-        ),
-    )
+        )
+)
     parser.add_argument(
         "--amp-dtype",
         type=str,
@@ -618,8 +620,8 @@ def get_arguments() -> ArgumentParser:
         help=(
             "AMP compute dtype for CUDA autocast. "
             "Use bf16 on Ampere+ for improved stability/perf tradeoff."
-        ),
-    )
+        )
+)
 
     return parser
 
@@ -741,7 +743,7 @@ def main() -> None:
             raise RuntimeError(
                 "Distributed training requires CUDA. No CUDA devices found."
             )
-        device_id = torch.device(f"cuda:{local_rank}")
+        device_id = torch.device(f"{DeviceType.CUDA}:{local_rank}")
         # Use a 5-minute timeout so a DDP desync surfaces as an error
         # instead of hanging silently for the default 30 minutes.
         from datetime import timedelta
@@ -749,12 +751,12 @@ def main() -> None:
         dist.init_process_group(
             backend=DdpBackend.NCCL,
             device_id=device_id,
-            timeout=timedelta(minutes=15),
-        )
+            timeout=timedelta(minutes=15)
+)
         rank = dist.get_rank()
         torch.cuda.set_device(local_rank)
         torch.cuda.set_per_process_memory_fraction(0.90)  # type: ignore
-        device = torch.device(f"cuda:{local_rank}")
+        device = torch.device(f"{DeviceType.CUDA}:{local_rank}")
         # Keep model initialisation deterministic (same weights on every rank);
         # the DistributedSampler gives each rank different data.
         if options.manual_seed is not None:
@@ -765,10 +767,11 @@ def main() -> None:
             if torch.cuda.is_available():
                 torch.cuda.manual_seed(options.manual_seed + rank)
     else:
+        # Non-distributed initialization
         device = (
-            torch.device("cpu")
+            torch.device(DeviceType.CPU)
             if getattr(options, "use_cpu", False) or not torch.cuda.is_available()
-            else torch.device(f"cuda:{options.gpu_device}")
+            else torch.device(f"{DeviceType.CUDA}:{options.gpu_device}")
         )
 
     is_main = rank == 0
@@ -788,7 +791,9 @@ def main() -> None:
         utils.create_dirs(options.output_path)
 
         # Save the input parameters options
-        with open(os.path.join(options.output_path, OPT_FILE), "w") as file:
+        with open(
+            os.path.join(options.output_path, CheckpointFilenames.OPTIONS), "w"
+        ) as file:
             json.dump(vars(options), file, indent=4)  # type: ignore
 
         init_output_logging(os.path.join(options.output_path, "log.txt"))
@@ -824,7 +829,7 @@ def main() -> None:
 
     # Performance tuning: enable cuDNN autotuner and TF32 where available
     try:
-        if device.type == "cuda":
+        if device.type == DeviceType.CUDA:
             torch.backends.cudnn.benchmark = True
             # Allow TF32 for faster matmuls on compatible NVIDIA GPUs
             try:
@@ -920,8 +925,8 @@ def main() -> None:
             f"\n{rank_label}{'=' * 60}\n"
             f"{rank_label}TRAINING FAILED — cleaning up\n"
             f"{rank_label}{'=' * 60}",
-            file=sys.stderr,
-        )
+            file=sys.stderr
+)
         traceback.print_exc(file=sys.stderr)
 
         # Surface CUDA memory stats when the failure looks like OOM.
@@ -936,8 +941,8 @@ def main() -> None:
                     f"{rank_label}CUDA memory: "
                     f"alloc={alloc:.2f}G  reserved={reserved:.2f}G  "
                     f"peak={peak:.2f}G  total={total:.2f}G",
-                    file=sys.stderr,
-                )
+                    file=sys.stderr
+)
             except Exception:
                 pass
 
@@ -964,8 +969,8 @@ def main() -> None:
                 except Exception as sync_err:
                     print(
                         f"Warning: CUDA sync before exit failed: {sync_err}",
-                        file=sys.stderr,
-                    )
+                        file=sys.stderr
+)
             os._exit(1)
 
         raise exc
@@ -998,8 +1003,8 @@ def main() -> None:
             except Exception as profile_err:
                 print(
                     f"Warning: allreduce profile reporting failed: {profile_err}",
-                    file=sys.stderr,
-                )
+                    file=sys.stderr
+)
 
             # Explicitly delete trainer/model BEFORE destroying the NCCL
             # process group.  If these objects survive until Python's
@@ -1026,8 +1031,8 @@ def main() -> None:
                     print(
                         f"Warning: CUDA sync before destroy_process_group "
                         f"failed: {sync_err}",
-                        file=sys.stderr,
-                    )
+                        file=sys.stderr
+)
             # Barrier so both ranks reach destroy_process_group together.
             # Without this, one rank may be stuck in BackgroundWorker
             # shutdown while the other already entered destroy_process_group
@@ -1042,8 +1047,8 @@ def main() -> None:
             except Exception as e:
                 print(
                     f"Warning: destroy_process_group failed: {e}",
-                    file=sys.stderr,
-                )
+                    file=sys.stderr
+)
 
             # Pre-empt the Inductor atexit handler that waits 300s for
             # compile-worker subprocesses to exit — after NCCL teardown
@@ -1070,8 +1075,8 @@ def main() -> None:
         except Exception as e:
             print(
                 f"Warning: could not save inductor cache artifacts: {e}",
-                file=sys.stderr,
-            )
+                file=sys.stderr
+)
 
 
 if __name__ == "__main__":

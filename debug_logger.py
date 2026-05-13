@@ -61,6 +61,8 @@ from typing import Any
 
 import torch
 
+from config import DomainConfig
+
 
 class DebugLogger:
     """Thread-safe JSONL debug logger with per-key throttling.
@@ -405,9 +407,9 @@ class DebugLogger:
         with torch.no_grad():
             t = tensor.detach().float()[:, :num_facies_channels]
             probs = torch.softmax(t, dim=1)
-            # Shannon entropy per pixel: -sum(p * log(p)); mean over batch
-            eps = 1e-8
-            entropy = -(probs * (probs + eps).log()).sum(dim=1).mean().item()
+            entropy = (
+                -(probs * (probs + DomainConfig.EPSILON).log()).sum(dim=1).mean().item()
+            )
             # Fraction of pixels where any single class dominates (prob > 0.8)
             confident_frac = float(
                 (probs.max(dim=1).values > 0.8).float().mean().item()

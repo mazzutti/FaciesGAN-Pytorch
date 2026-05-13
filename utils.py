@@ -128,8 +128,8 @@ from models.palette import PALETTE_RGB
 T = TypeVar("T")
 
 from config import DomainConfig
-from constants import OUTPUTS_DIR
-from enums import FaciesClass
+from config import DirectoryConfig
+from enums import DeviceType, FaciesClass
 
 # ---------------------------------------------------------------------------
 # Color & Palette Helpers
@@ -156,7 +156,9 @@ class ExtractUniqueColors:
         return cls._instance
 
     def __init__(
-        self, max_cache_size: int = 128, device: torch.device = torch.device("cpu")
+        self,
+        max_cache_size: int = 128,
+        device: torch.device = torch.device(DeviceType.CPU),
     ) -> None:
         # initialize cache once - safe even if __init__ called multiple times
         if getattr(self, "_cache", None) is None:
@@ -285,7 +287,9 @@ class PreprocessWellMask:
     """
 
     def __init__(
-        self, max_cache_size: int = 128, device: torch.device = torch.device("cpu")
+        self,
+        max_cache_size: int = 128,
+        device: torch.device = torch.device(DeviceType.CPU),
     ) -> None:
         # OrderedDict for LRU eviction
         self._cache: OrderedDict[
@@ -529,8 +533,8 @@ def resolve_device(gpu_device: int = 0) -> torch.device:
     without constructing a `NeuralSmoother` instance.
     """
     if torch.cuda.is_available():
-        return torch.device(f"cuda:{gpu_device}")
-    return torch.device("cpu")
+        return torch.device(f"{DeviceType.CUDA}:{gpu_device}")
+    return torch.device(DeviceType.CPU)
 
 
 def apply_well_mask(
@@ -778,7 +782,7 @@ def tensor2np(
     # Check if it's a torch tensor using hasattr instead of isinstance
     # (isinstance can fail due to import/module reloading issues)
     if (
-        hasattr(tensor, "cpu")
+        hasattr(tensor, DeviceType.CPU)
         and hasattr(tensor, "detach")
         and hasattr(tensor, "numpy")
     ):
@@ -820,7 +824,7 @@ def to_device(
     This helper centralizes device-layout handling so callers can avoid
     duplicating `.to(...).contiguous(...)` branches.
     """
-    if device.type == "cuda":
+    if device.type == DeviceType.CUDA:
         if channels_last:
             return tensor.to(device, non_blocking=non_blocking).contiguous(
                 memory_format=torch.channels_last
@@ -945,10 +949,10 @@ def plot_generated_outputs(
     stage: int,
     index: int,
     masks: torch.Tensor | NDArray[np.float32] | None = None,
-    out_dir: str = OUTPUTS_DIR,
+    out_dir: str = DirectoryConfig.OUTPUTS,
     save: bool = False,
     cell_size: int = 256,
-    device: torch.device = torch.device("cpu"),
+    device: torch.device = torch.device(DeviceType.CPU),
     batch_id: int | None = None,
     plot_title: str = "Facies",
     cmap: str = "viridis",
@@ -974,7 +978,7 @@ def plot_generated_outputs(
     index : int
         Iteration index for filename when saving.
     out_dir : str, optional
-        Directory to save the plot. Defaults to OUTPUTS_DIR.
+        Directory to save the plot. Defaults to DirectoryConfig.OUTPUTS.
     save : bool, optional
         Whether to save the plot to disk. Defaults to False.
     cell_size : int

@@ -177,21 +177,21 @@
         "--scale0-loss-multiplier", "1.0",
         "--scale0-noise-amp", "0.7",
         "--generator-steps", "3",
+
         "--well-loss-penalty", "1.5",
         "--rec-facies-loss-penalty", "3.0",
         "--rec-rock-physics-loss-penalty", "3.0",
-        "--tv-loss-penalty", "0.4",
+        "--tv-loss-penalty", "0.2",
         "--elastic-loss-penalty", "1.0",
-        // Hybrid physics loss = raw-amplitude + RMS-waveform.
-        // Increase to make seismic-physics supervision matter in optimization.
-        "--seismic-loss-penalty", "0.8",
+        "--gradient-loss-penalty", "10",
+        "--diversity-loss-penalty", "2.0",
+        "--adversarial-loss-penalty", "0.25",
+        "--seismic-loss-penalty", "0.5",
+
         "--dz-pixel", "1.0",
         "--wavelet-f-peak", "8.0",
         "--wavelet-dt", "0.001",
-        "--gradient-loss-penalty", "10",
         "--scale0-gp-alpha", "40.0",
-        "--diversity-loss-penalty", "3.0",
-        "--adversarial-loss-penalty", "0.25",
         "--grad-clip-norm", "10.0",
         "--num-diversity-samples", "3",
         "--gp-interval", "4",

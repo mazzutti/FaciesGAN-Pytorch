@@ -10,9 +10,8 @@ import argparse
 import os
 from dataclasses import dataclass
 
-from config import DomainConfig
-from constants import DATA_DIR, OUTPUTS_DIR
-from enums import LrDecayUnit as LrDecayUnit  # re-export for backwards compatibility
+from config import DirectoryConfig, DomainConfig
+from enums import LrDecayUnit
 
 NORMALIZATION_RANGE: tuple[float, float] = (-1.0, 1.0)
 
@@ -41,7 +40,7 @@ class TrainingOptions(argparse.Namespace):
         generator_steps: int = 3,
         gpu_device: int = 0,
         gpu_devices: list[int] | None = None,
-        input_path: str = DATA_DIR,
+        input_path: str = DirectoryConfig.DATA,
         kernel_size: int = 3,
         gradient_loss_penalty: float = 10.0,
         lr_d: float = 5e-04,
@@ -68,7 +67,7 @@ class TrainingOptions(argparse.Namespace):
         num_train_pyramids: int = 200,
         num_parallel_scales: int = 2,
         num_workers: int = min(4, max(1, (os.cpu_count() or 1) // 2)),
-        output_path: str = OUTPUTS_DIR,
+        output_path: str = DirectoryConfig.OUTPUTS,
         normalization_range: tuple[float, ...] = NORMALIZATION_RANGE,
         padding_size: int = 0,
         regen_npy_gz: bool = False,

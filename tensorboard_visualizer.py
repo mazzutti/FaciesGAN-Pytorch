@@ -18,8 +18,7 @@ from tensorboardX import SummaryWriter  # pyright: ignore
 
 import utils
 from background_workers import submit_save_image
-from config import DomainConfig, LoggingConfig
-from constants import TENSORBOARD_LOGS_DIR
+from config import DirectoryConfig, DomainConfig, LoggingConfig
 from enums import MetricKey
 from models.utils import SplitKey, split_facies_rp
 from physics.seismic import calculate_synthetic_seismic
@@ -104,7 +103,7 @@ class TensorBoardVisualizer:
 
         # Setup TensorBoard logging
         if not log_dir:
-            log_dir = os.path.join(output_dir, TENSORBOARD_LOGS_DIR)
+            log_dir = os.path.join(output_dir, DirectoryConfig.TENSORBOARD_LOGS)
 
         # Ensure directories exist; guard against empty strings and race conditions.
         if log_dir:
@@ -324,7 +323,7 @@ class TensorBoardVisualizer:
                             # of the colormap and spatial variation is invisible.
                             p1 = float(np.percentile(channel_raw, 1))
                             p99 = float(np.percentile(channel_raw, 99))
-                            if p99 - p1 > 1e-6:
+                            if p99 - p1 > DomainConfig.EPSILON:
                                 attr_hw = np.clip(
                                     (channel_raw - p1) / (p99 - p1), 0.0, 1.0
                                 )
