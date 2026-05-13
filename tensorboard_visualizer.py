@@ -9,7 +9,6 @@ from __future__ import annotations
 # pyright: reportUnknownMemberType=false
 import os
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import matplotlib.cm as cm
@@ -18,29 +17,16 @@ import torch
 from tensorboardX import SummaryWriter  # pyright: ignore
 
 import utils
-from config import TENSORBOARD_LOGS_DIR, DomainConfig, LoggingConfig
-from enums import FeatureKey, MetricKey
-from models.utils import split_facies_rp
+from background_workers import submit_save_image
+from config import DomainConfig, LoggingConfig
+from constants import TENSORBOARD_LOGS_DIR
+from enums import MetricKey
+from models.utils import SplitKey, split_facies_rp
+from physics.seismic import calculate_synthetic_seismic
 
 if TYPE_CHECKING:
-    from metrics import ScaleMetrics
-
-
-@dataclass
-class SeismicPhysicsInfo:
-    """Metadata required for synthetic seismic modeling in TensorBoard."""
-
-    ip_min: float | torch.Tensor
-    ip_max: float | torch.Tensor
-    seis_min: float | torch.Tensor
-    seis_max: float | torch.Tensor
-    vp_min: float | torch.Tensor
-    vp_max: float | torch.Tensor
-    vp_ref: float | torch.Tensor
-    rho_mean: float | torch.Tensor
-    dz_pyramid: dict[int, float] | torch.Tensor
-    wavelet_t: torch.Tensor
-    dt_wavelet: float
+    from training.metrics import ScaleMetrics
+    from physics.physics import PhysicsState
 
 
 class TensorBoardVisualizer:
@@ -74,9 +60,11 @@ class TensorBoardVisualizer:
         image_log_interval: int = LoggingConfig.IMAGE_LOG_INTERVAL,
         dataset_info: str | None = None,
         purge_step: int | None = None,
-        num_facies: int = DomainConfig.NUM_FACIES,
+        num_facies: int = DomainConfig.NUM_FACIES_CHANNELS,
         has_rp: bool = False,
-        physics_info: SeismicPhysicsInfo | None = None,
+        physics_state: "PhysicsState | None" = None,
+        normalization_range: tuple[float, float] = (-1.0, 1.0),
+        seismic_stretch_percentile: int = 98,
     ):
         """Initialize the TensorBoard visualizer.
 
@@ -92,15 +80,27 @@ class TensorBoardVisualizer:
             How often to log metrics (in epochs).
         dataset_info : str, optional
             Information about the dataset being used.
+        seismic_stretch_percentile : int, optional
+            Percentile used in robust seismic contrast stretch for TensorBoard
+            display. Allowed values are 95, 98, and 99. Default is 98.
         """
         self.num_scales = num_scales
         self.output_dir = output_dir
         self.update_interval = update_interval
         self.image_log_interval = image_log_interval
         self.dataset_info = dataset_info or "Unknown dataset"
-        self.num_facies = num_facies
+        self.num_facies_channels = num_facies
         self.has_rp = has_rp
-        self.physics_info = physics_info
+        self.physics_state = physics_state
+        self.normalization_range = (
+            float(normalization_range[0]),
+            float(normalization_range[1]),
+        )
+        self.seismic_stretch_percentile = (
+            int(seismic_stretch_percentile)
+            if int(seismic_stretch_percentile) in {95, 98, 99}
+            else 98
+        )
 
         # Setup TensorBoard logging
         if not log_dir:
@@ -137,6 +137,7 @@ class TensorBoardVisualizer:
         samples_processed: int = 0,
         scales: tuple[int, ...] | None = None,
         real_seismic: dict[int, torch.Tensor] | None = None,
+        force_update: bool = False,
     ) -> None:
         """Update TensorBoard with per-scale metrics and optional images.
 
@@ -159,12 +160,13 @@ class TensorBoardVisualizer:
 
         Notes
         -----
-        This method normalizes images to the [0, 1] range when necessary and
+        This method normalizes images to the configured normalization range
+        when necessary and
         converts them to CHW format for TensorBoard. Mean scalars across
         scales are written under the `Mean/*` tags.
         """
-        # Update at intervals
-        if epoch % self.update_interval != 0 and epoch != 1:
+        # Update at intervals, or if forced (e.g. final epoch)
+        if not force_update and epoch % self.update_interval != 0 and epoch != 1:
             return
 
         # Use attribute detection to determine whether we have a typed
@@ -194,7 +196,7 @@ class TensorBoardVisualizer:
             MetricKey.G_REC_ROCK_PHYSICS,
             MetricKey.G_TV,
             MetricKey.G_ELASTIC,
-            MetricKey.G_PHYSICS,
+            MetricKey.G_SEISMIC,
         ]
 
         # Log individual scale metrics
@@ -230,55 +232,121 @@ class TensorBoardVisualizer:
         self.writer.add_scalar("Training/Elapsed_Time_Minutes", elapsed / 60, epoch)
 
         # Log generated samples as images with color mapping
-        if generated_samples and epoch % self.image_log_interval == 0:
+        if generated_samples and (epoch % self.image_log_interval == 0 or force_update):
             for i, sample in enumerate(generated_samples):
                 scale = scales[i] if scales is not None else i
-                # Convert to numpy (B, H, W, C) in [0, 1] range
+                # Convert to numpy (B, H, W, C) in the normalized domain
                 # tensor2np handles detach, cpu, and denormalization automatically.
-                img_bhwc = utils.tensor2np(sample, denormalize=True)
+                img_bhwc = utils.tensor2np(
+                    sample,
+                    denormalize=False,
+                    normalization_range=self.normalization_range,
+                )
                 img_hwc = img_bhwc[0]
 
                 # Use centralized logic to split facies and rock physics if present.
                 # Since these are generated samples, they do not contain conditioning.
                 split = split_facies_rp(
                     torch.from_numpy(img_hwc),
-                    num_facies=self.num_facies,
+                    num_facies=self.num_facies_channels,
                     has_rp=self.has_rp,
                     channels_last=True,
                 )
-                facies_img = split[FeatureKey.FACIES]
-                rp_img = split[FeatureKey.ROCK_PHYSICS]
+                facies_img = split[SplitKey.FACIES]
+                rp_img = split[SplitKey.ROCK_PHYSICS]
 
                 # Convert one-hot facies to RGB using a high-contrast palette
                 if facies_img is not None:
                     # facies_img is (H, W, C) due to channels_last=True
                     # We need to transpose back to (C, H, W) for facies_to_rgb
                     facies_chw = facies_img.permute(2, 0, 1)
-                    facies_rgb_chw = utils.facies_to_rgb(facies_chw)
+                    # Quantize continuous [-1,1] generator output to nearest
+                    # palette colour (same as plot_pyramids.py: rgb_to_facies
+                    # then facies_to_rgb), so TensorBoard shows discrete
+                    # palette colours instead of a blurry continuous image.
+                    facies_idx = utils.rgb_to_facies(facies_chw)
+                    facies_rgb_chw = utils.facies_to_rgb(facies_idx)
                     self.writer.add_image(
                         f"Samples_Facies/Scale_{scale}", facies_rgb_chw, epoch
                     )
 
-                if rp_img is not None:
-                    # Rock physics contains [Ip, Is, Vp/Vs]
-                    # Transpose to (C, H, W) for easier slicing
-                    rp_chw = rp_img.permute(2, 0, 1).cpu().numpy()
+                    # Also save to disk
+                    try:
+                        # Organize by scale
+                        scale_dir = os.path.join(self.output_dir, f"Scale_{scale}")
+                        os.makedirs(scale_dir, exist_ok=True)
+
+                        out_path = os.path.join(
+                            scale_dir, f"Facies_epoch_{epoch:05d}.png"
+                        )
+                        # facies_rgb_chw is already a numpy array (3, H, W) from utils.facies_to_rgb
+                        rgb_hwc = facies_rgb_chw.transpose(1, 2, 0)
+                        submit_save_image(rgb_hwc, out_path)
+                    except Exception as e:
+                        print(
+                            f"Warning: Could not submit facies image for background save: {e}"
+                        )
+
+                if rp_img is not None and self.physics_state is not None:
+                    # Rock physics contains [Ip, Is, Vp/Vs].
+                    # Use raw tensor channels (without tensor2np default
+                    # clipping to [0, 1]) so diagnostics and plots reflect
+                    # the true normalization domain (e.g. [-1, 1]).
+                    sample_chw = sample[0].detach().cpu()
+                    rp_chw_t = sample_chw[
+                        self.num_facies_channels : self.num_facies_channels + 3, ...
+                    ]
+                    rp_chw = rp_chw_t.numpy()
 
                     # Log individual RP attributes if they exist
+                    # Keep legacy TensorBoard tag spelling for VP/VS so
+                    # dashboards and historical runs stay comparable.
                     names = ["Ip", "Is", "VpVs"]
                     cmaps = ["magma", "magma", "viridis"]
-                    for i, name in enumerate(names):
-                        if rp_chw.shape[0] > i:
-                            attr_hw = np.clip(rp_chw[i], 0.0, 1.0)
+                    for ch_idx, name in enumerate(names):
+                        if rp_chw.shape[0] > ch_idx:
+                            norm_min, norm_max = float(
+                                self.physics_state.norm_min
+                            ), float(self.physics_state.norm_max)
+                            lo = float(min(norm_min, norm_max))
+                            hi = float(max(norm_min, norm_max))
+                            span = hi - lo
+                            channel_raw = np.asarray(rp_chw[ch_idx], dtype=np.float32)
+                            channel_raw = np.nan_to_num(
+                                channel_raw, nan=lo, posinf=hi, neginf=lo
+                            )
+                            # Percentile contrast stretch for display only.
+                            # RP channels can live in a narrow sub-range of the
+                            # configured normalization domain
+                            # (e.g. VP/VS normalises into [0.017, 0.36] due to
+                            # stats.json being wider than the actual data range).
+                            # Without stretching, all values map to the dark end
+                            # of the colormap and spatial variation is invisible.
+                            p1 = float(np.percentile(channel_raw, 1))
+                            p99 = float(np.percentile(channel_raw, 99))
+                            if p99 - p1 > 1e-6:
+                                attr_hw = np.clip(
+                                    (channel_raw - p1) / (p99 - p1), 0.0, 1.0
+                                )
+                            else:
+                                if span > DomainConfig.EPSILON:
+                                    attr_hw = np.clip(
+                                        (channel_raw - lo) / span, 0.0, 1.0
+                                    )
+                                else:
+                                    attr_hw = np.zeros_like(
+                                        channel_raw, dtype=np.float32
+                                    )
+
                             self._add_image_with_cmap(
                                 f"Samples_{name}/Scale_{scale}",
                                 attr_hw,
-                                cmaps[i],
+                                cmaps[ch_idx],
                                 epoch,
                             )
 
                 # Log Synthetic Seismic if Rock Physics is enabled
-                if self.has_rp and self.physics_info is not None:
+                if self.has_rp and self.physics_state is not None:
                     self._log_seismic(scale, sample, real_seismic, epoch)
 
         self.last_update_time = current_time
@@ -294,76 +362,122 @@ class TensorBoardVisualizer:
         epoch: int,
     ) -> None:
         """Compute and log synthetic seismic vs real seismic."""
-        if self.physics_info is None:
+        if self.physics_state is None:
             return
-
-        from models.utils import calculate_synthetic_seismic
 
         # 1. Extract Ip from generated sample (B, C, H, W)
         # generated sample contains [Facies | Ip, Is, VpVs]
-        if sample.shape[1] <= self.num_facies:
+        if sample.shape[1] <= self.num_facies_channels:
             return
 
-        ip_norm = sample[:, self.num_facies : self.num_facies + 1, ...]
+        ip_norm = sample[
+            :, self.num_facies_channels : self.num_facies_channels + 1, ...
+        ]
 
         # 2. Compute Synthetic Seismic
         # We estimate vp_mean from Ip for dynamic resampling
-        rho_mean = torch.as_tensor(self.physics_info.rho_mean, device=sample.device)
-        vp_min = torch.as_tensor(self.physics_info.vp_min, device=sample.device)
-        vp_max = torch.as_tensor(self.physics_info.vp_max, device=sample.device)
+        rho_mean = self.physics_state.rho_mean
+        vp_min = self.physics_state.vp_min
+        vp_max = self.physics_state.vp_max
+        ip_min = self.physics_state.ip_min
+        ip_max = self.physics_state.ip_max
 
-        ip_min = torch.as_tensor(self.physics_info.ip_min, device=sample.device)
-        ip_max = torch.as_tensor(self.physics_info.ip_max, device=sample.device)
-
-        ip_phys_approx = ((ip_norm + 1) / 2) * (ip_max - ip_min) + ip_min
+        norm_min = self.physics_state.norm_min
+        norm_max = self.physics_state.norm_max
+        ip_phys_approx = (ip_norm - norm_min) / (
+            norm_max - norm_min + DomainConfig.EPSILON
+        ) * (ip_max - ip_min) + ip_min
         vp_phys = ip_phys_approx / rho_mean
         vp_mean = torch.mean(vp_phys).clamp(vp_min, vp_max)
-
-        # Ensure wavelet/time parameters are tensors to match calculate_synthetic_seismic API
-        device = ip_norm.device
-        dtype = ip_norm.dtype
-        wavelet_t = torch.as_tensor(
-            self.physics_info.wavelet_t, device=device, dtype=dtype
-        )
-        dt_wavelet = torch.as_tensor(
-            self.physics_info.dt_wavelet, device=device, dtype=dtype
-        )
-        dz_value = self.physics_info.dz_pyramid
-        dz_value = dz_value[scale]
-        dz = torch.as_tensor(float(dz_value), device=device, dtype=dtype)
+        dz = self.physics_state.dz_pyramid[scale]
 
         synth = calculate_synthetic_seismic(
             ip_norm,
-            wavelet_t,
-            dt_wavelet,
-            dz,
             vp_mean,
-            vp_min,
-            ip_min,
-            ip_max,
-            torch.as_tensor(self.physics_info.seis_min, device=device),
-            torch.as_tensor(self.physics_info.seis_max, device=device),
+            dz,
+            self.physics_state,
         )
 
         # 3. Log Generated Seismic
-        # Convert to RGB with RdBu colormap (Standard for seismic)
-        synth_np = synth[0, 0].detach().cpu().numpy()
+        # Convert to RGB with a diverging colormap centered at physical zero.
+        # Training seismic is normalized to normalization_range using
+        # dataset min/max, but
+        # seismic amplitudes are naturally signed. If values cluster near the
+        # center, direct mapping can look washed out; we apply a robust
+        # center-preserving stretch for display only.
+        synth_np = np.asarray(synth[0, 0].detach().cpu().numpy(), dtype=np.float32)
 
-        # Dynamic symmetric normalization to ensure "punchy" colors like matplotlib's imshow
-        # We scale by the maximum absolute value to keep 0 at the center (white)
-        v_max_gen = np.max(np.abs(synth_np))
-        synth_norm = synth_np / (v_max_gen + DomainConfig.EPSILON)
-        synth_mapped = (synth_norm + 1.0) / 2.0
+        seis_min = float(torch.as_tensor(self.physics_state.seis_min).item())
+        seis_max = float(torch.as_tensor(self.physics_state.seis_max).item())
+        lo = float(min(norm_min, norm_max))
+        hi = float(max(norm_min, norm_max))
+        center_norm = (0.0 - seis_min) / (seis_max - seis_min + DomainConfig.EPSILON)
+        center_norm = lo + center_norm * (hi - lo)
+        center_norm = float(np.clip(center_norm, lo, hi))
+        synth_mapped = self._stretch_diverging_for_display(
+            synth_np,
+            center=center_norm,
+            normalization_range=(norm_min, norm_max),
+            percentile=float(self.seismic_stretch_percentile),
+        )
 
         self._add_image_with_cmap(
             f"Samples_Seismic/Scale_{scale}", synth_mapped, "RdBu", epoch
         )
 
+    @staticmethod
+    def _stretch_diverging_for_display(
+        data_hw: np.ndarray,
+        center: float,
+        normalization_range: tuple[float, float],
+        percentile: float = 98.0,
+    ) -> np.ndarray:
+        """Increase visual contrast around a diverging center for plotting.
+
+        Parameters
+        ----------
+        data_hw : np.ndarray
+            2-D normalized array in ``normalization_range``.
+        center : float
+            Normalized value that should map to the neutral colormap color
+            (e.g. physical zero amplitude).
+        percentile : float, optional
+            Robust scale percentile for |x-center|, default 98.
+
+        Returns
+        -------
+        np.ndarray
+            Contrast-stretched array in the unit interval suitable for
+            diverging colormaps.
+        """
+        norm_min, norm_max = normalization_range
+        lo = float(min(norm_min, norm_max))
+        hi = float(max(norm_min, norm_max))
+        span = hi - lo
+
+        arr = np.asarray(data_hw, dtype=np.float32)
+        arr = np.nan_to_num(arr, nan=center, posinf=hi, neginf=lo)
+        arr = np.clip(arr, lo, hi)
+
+        if span <= DomainConfig.EPSILON:
+            return np.zeros_like(arr, dtype=np.float32)
+
+        arr01 = (arr - lo) / span
+        center01 = float(np.clip((float(center) - lo) / span, 0.0, 1.0))
+
+        delta = arr01 - center01
+        robust = float(np.percentile(np.abs(delta), percentile))
+        if not np.isfinite(robust) or robust < DomainConfig.EPSILON:
+            return arr01
+
+        stretched = 0.5 + 0.5 * (delta / robust)
+        return np.clip(stretched, 0.0, 1.0).astype(np.float32, copy=False)
+
     def _add_image_with_cmap(
         self, tag: str, data_hw: np.ndarray, cmap_name: str, epoch: int
     ) -> None:
         """Apply colormap to HxW data and log as CHW image."""
-        # Ensure data is within [0, 1] for colormap
+        # Ensure data is within the unit interval for colormap lookup
         data_norm = np.clip(data_hw, 0.0, 1.0)
         # Apply colormap (returns HxWx4)
         rgb_hwc = np.asarray(
@@ -372,6 +486,25 @@ class TensorBoardVisualizer:
         # Transpose to CHW for TensorBoard
         rgb_chw = np.transpose(rgb_hwc, (2, 0, 1))
         self.writer.add_image(tag, rgb_chw, epoch)
+
+        # Also save to disk as a PNG file in training_visualizations
+        try:
+            # tag is e.g. "Samples_Facies/Scale_0" or "Samples_Ip/Scale_0"
+            parts = tag.split("/")
+            category = parts[0].replace("Samples_", "")
+            scale_name = parts[1] if len(parts) > 1 else "Global"
+
+            # Create scale-specific directory
+            scale_dir = os.path.join(self.output_dir, scale_name)
+            os.makedirs(scale_dir, exist_ok=True)
+
+            out_path = os.path.join(scale_dir, f"{category}_epoch_{epoch:05d}.png")
+
+            # Offload to background thread
+            submit_save_image(rgb_hwc, out_path)
+        except Exception as e:
+            # Don't crash training if image saving fails
+            print(f"Warning: Could not submit visualization for background save: {e}")
 
     def close(self):
         """Close the TensorBoard writer."""

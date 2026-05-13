@@ -1,56 +1,29 @@
-"""Background worker helpers to offload CPU-bound visualization and quantization.
+"""Background worker helpers to offload CPU-bound visualization and I/O.
 
-This module exposes a small :class:`concurrent.futures.ProcessPoolExecutor`
-and helper ``submit_*`` functions that run heavy image processing and
-saving in separate processes so the main training loop stays responsive.
+This module exposes a :class:`concurrent.futures.ThreadPoolExecutor`-backed
+singleton and helper ``submit_*`` functions that run heavy image processing
+and saving in background threads so the main training loop stays responsive.
 
 Design notes:
-    (e.g. moved to CPU with ``tensor.detach().cpu()``) so the worker process
-    can safely serialize and operate on them. Avoid passing CUDA tensors
-    directly into the process pool to prevent pickling errors.
-- Uses ``multiprocessing.get_context('spawn')`` to be compatible across
-    platforms (macOS).
+- Arrays passed to worker functions are accessed directly via shared memory
+  (no pickling / IPC serialization), which eliminates the ~100 ms per-call
+  overhead that a ProcessPoolExecutor with spawn would impose.
+- PIL and numpy release the GIL for most operations, so plotting threads run
+  concurrently with GPU computation without blocking the training loop.
+- CUDA tensors must still be moved to CPU (``tensor.detach().cpu()``) before
+  submitting to avoid accidental GPU-to-CPU copies inside the worker.
 """
 
 from __future__ import annotations
 
+import atexit
 import logging
-import multiprocessing as mp
 import threading
-from concurrent.futures import Future, ProcessPoolExecutor
-from typing import Any
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any, Self, cast
 
 logger = logging.getLogger(__name__)
-
-
-def _configure_python_executable() -> None:
-    """Ensure multiprocessing spawn uses the local venv python when available."""
-    try:
-        import os
-        import sys
-
-        # Prefer local .venv if present
-        repo_root = os.path.dirname(os.path.abspath(__file__))
-        venv_py = os.path.join(repo_root, ".venv", "bin", "python")
-        py = None
-        if os.path.exists(venv_py):
-            py = venv_py
-        else:
-            venv = os.environ.get("VIRTUAL_ENV", "")
-            if venv:
-                candidate = os.path.join(venv, "bin", "python")
-                if os.path.exists(candidate):
-                    py = candidate
-
-        if py:
-            sys.executable = py
-            os.environ["PYTHONEXECUTABLE"] = py
-            try:
-                mp.set_executable(py)
-            except Exception:
-                pass
-    except Exception:
-        pass
 
 
 def _save_plot_task(
@@ -63,20 +36,16 @@ def _save_plot_task(
     batch_id: int | None = None,
     plot_title: str = "Facies",
     cmap: str = "viridis",
+    normalization_range: tuple[float, float] = (0.0, 1.0),
 ) -> bool:
     """
-    Internal task to save a plot in a background process.
+    Internal task to save a plot in a background thread.
 
     Supports 3D, 4D, and 5D tensors/arrays for fake_list, real_arr, and masks_arr:
       - fake_list can be a sequence of tensors/arrays or a single tensor/array
       - (C, H, W), (B, C, H, W), (B, T, C, H, W) for torch/mx/np
       - (B, H, W, C), (B, T, H, W, C) for np arrays (after conversion)
     """
-    import os
-
-    os.environ["FG_NO_TORCH_IMPORT"] = "1"
-
-    # Import locally so the worker process has its own module imports
     from utils import plot_generated_outputs
 
     # The plotting helper will accept the tensors and perform any
@@ -92,24 +61,8 @@ def _save_plot_task(
         batch_id=batch_id,
         plot_title=plot_title,
         cmap=cmap,
+        normalization_range=normalization_range,
     )
-    return True
-
-
-def _warmup_worker() -> bool:
-    """Pre-import heavy dependencies in the worker process.
-
-    Called once at pool creation time so that the first real plotting task
-    does not pay the ~3-4 second matplotlib/numpy import cost.
-    """
-    import os
-
-    os.environ["FG_NO_TORCH_IMPORT"] = "1"
-    # Import the plotting module which pulls in matplotlib, numpy, etc.
-    try:
-        from utils import plot_generated_outputs  # type: ignore[import]
-    except Exception:
-        pass
     return True
 
 
@@ -121,17 +74,14 @@ def _save_plot_task_from_npy(
     out_dir: str,
     masks_path: str | None = None,
     batch_id: int | None = None,
+    normalization_range: tuple[float, float] = (0.0, 1.0),
 ) -> bool:
     """
     Internal task to load .npy files and save a plot in a background process.
 
-    This keeps numpy loading and plotting off the main training process.
+    This keeps numpy loading and I/O off the main training thread.
     """
-    import os
-
     import numpy as np
-
-    os.environ["FG_NO_TORCH_IMPORT"] = "1"
 
     from utils import plot_generated_outputs
 
@@ -148,10 +98,27 @@ def _save_plot_task_from_npy(
         out_dir,
         save=True,
         batch_id=batch_id,
+        normalization_range=normalization_range,
     )
     return True
 
 
+# noinspection PyBroadException
+def _save_image_task(img_np: Any, out_path: str) -> bool:
+    """Internal task to save a single image in a background thread."""
+    from PIL import Image
+
+    try:
+        # Convert to uint8 for saving if not already
+        if img_np.dtype != "uint8":
+            img_np = (img_np * 255).astype("uint8")
+        Image.fromarray(img_np).save(out_path)
+        return True
+    except Exception:
+        return False
+
+
+# noinspection PyBroadException
 class BackgroundWorker:
     """Singleton manager for a process pool that offloads CPU-bound tasks.
 
@@ -162,7 +129,7 @@ class BackgroundWorker:
     - Logs exceptions raised by background tasks.
     """
 
-    _instance: BackgroundWorker | None = None
+    _instance: "BackgroundWorker | None" = None
     _instance_lock = threading.Lock()
 
     def __new__(cls, max_workers: int = 2, max_pending: int = 32) -> "BackgroundWorker":
@@ -176,7 +143,7 @@ class BackgroundWorker:
             with cls._instance_lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-        return cls._instance
+        return cast(Self, cls._instance)
 
     def __init__(self, max_workers: int = 2, max_pending: int = 32) -> None:
         """Initialize the process pool and pending-job tracking.
@@ -192,40 +159,27 @@ class BackgroundWorker:
         if getattr(self, "_initialized", False):
             return
 
-        _configure_python_executable()
-
-        ctx = mp.get_context("spawn")
-        self._executor: ProcessPoolExecutor = ProcessPoolExecutor(
-            max_workers=max_workers, mp_context=ctx
-        )
+        self._max_workers = int(max_workers)
+        # ThreadPoolExecutor: zero IPC serialization cost — threads share
+        # memory directly, so large numpy arrays are never pickled.  PIL and
+        # numpy both release the GIL, so plotting tasks run concurrently with
+        # the training loop without blocking GPU computation.
+        self._executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=max_workers)
 
         # Pending futures tracking and coordination
         self._pending: set[Future[bool]] = set()
         self._pending_cond = threading.Condition()
         self._max_pending = int(max_pending)
         self._initialized = True
-
-        # Pre-warm: spawn worker processes now so they are ready when the
-        # first real task is submitted.  Without this, the first submit()
-        # triggers a fork+reimport that takes several seconds (importing
-        # matplotlib, numpy, etc.).  The warmup task also imports the
-        # plotting dependencies so subsequent tasks start instantly.
-        # Fire-and-forget: don't block init; the worker starts in parallel
-        # with training so it's ready by the time plots are needed.
-        try:
-            self._warmup_future: Future[bool] | None = self._executor.submit(
-                _warmup_worker
-            )
-        except Exception:
-            self._warmup_future = None
+        atexit.register(self.shutdown, wait=True)
 
     def _restart_pool(self) -> None:
-        """Recreate the process pool after a BrokenProcessPool failure.
+        """Recreate the thread pool after an unexpected failure.
 
         Discards all pending futures (they are already lost) and creates a
-        fresh ProcessPoolExecutor so subsequent submissions can succeed.
+        fresh ThreadPoolExecutor so subsequent submissions can succeed.
         """
-        logger.warning("BackgroundWorker: process pool is broken — restarting pool")
+        logger.warning("BackgroundWorker: thread pool is broken — restarting pool")
         try:
             self._executor.shutdown(wait=False)
         except Exception:
@@ -234,16 +188,13 @@ class BackgroundWorker:
         with self._pending_cond:
             self._pending.clear()
             self._pending_cond.notify_all()
-        ctx = mp.get_context("spawn")
-        self._executor = ProcessPoolExecutor(max_workers=2, mp_context=ctx)
+        self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
 
     def _submit_with_retry(self, fn: Any, *args: Any) -> "Future[bool]":
-        """Submit *fn* to the pool, restarting it once on BrokenProcessPool."""
-        from concurrent.futures.process import BrokenProcessPool
-
+        """Submit *fn* to the pool, restarting it once on RuntimeError."""
         try:
             return self._executor.submit(fn, *args)
-        except BrokenProcessPool:
+        except RuntimeError:
             self._restart_pool()
             return self._executor.submit(fn, *args)
 
@@ -260,6 +211,34 @@ class BackgroundWorker:
                 self._pending.discard(fut)
                 self._pending_cond.notify_all()
 
+    def _wait_for_slot(
+        self, wait_if_full: bool, timeout: float | None
+    ) -> "Future[bool] | None":
+        """Wait until a slot is free in the pending queue (must hold _pending_cond).
+
+        Returns a completed ``Future(False)`` when the queue is full and the
+        caller should bail immediately, or ``None`` when a slot is available.
+        """
+        if self._max_pending <= 0:
+            return None
+        if not wait_if_full and len(self._pending) >= self._max_pending:
+            bail: Future[bool] = Future()
+            bail.set_result(False)
+            return bail
+        if timeout is None:
+            while len(self._pending) >= self._max_pending:
+                self._pending_cond.wait()
+        else:
+            end = time.time() + timeout
+            while len(self._pending) >= self._max_pending:
+                remaining = end - time.time()
+                if remaining <= 0:
+                    bail = Future()
+                    bail.set_result(False)
+                    return bail
+                self._pending_cond.wait(timeout=remaining)
+        return None
+
     def submit_plot_generated_outputs(
         self,
         fake: Any,
@@ -273,6 +252,7 @@ class BackgroundWorker:
         batch_id: int | None = None,
         plot_title: str = "Facies",
         cmap: str = "viridis",
+        normalization_range: tuple[float, float] = (0.0, 1.0),
     ) -> Future[bool]:
         """
         Submit a plot job to the process pool (non-blocking by default).
@@ -293,30 +273,10 @@ class BackgroundWorker:
         passing CUDA tensors directly into the executor to avoid
         pickling/serialization issues with GPU-backed storage.
         """
-        # Wait for available slot if configured
         with self._pending_cond:
-            if self._max_pending > 0:
-                if not wait_if_full and len(self._pending) >= self._max_pending:
-                    fut: Future[bool] = Future()
-                    fut.set_result(False)
-                    return fut
-
-                if timeout is None:
-                    # Wait indefinitely until there's space
-                    while len(self._pending) >= self._max_pending:
-                        self._pending_cond.wait()
-                else:
-                    import time
-
-                    # Compute deadline once and wait with the remaining time
-                    end = time.time() + timeout
-                    while len(self._pending) >= self._max_pending:
-                        remaining = end - time.time()
-                        if remaining <= 0:
-                            fut: Future[bool] = Future()
-                            fut.set_result(False)
-                            return fut
-                        self._pending_cond.wait(timeout=remaining)
+            bail = self._wait_for_slot(wait_if_full, timeout)
+            if bail is not None:
+                return bail
             fut = self._submit_with_retry(
                 _save_plot_task,
                 fake,
@@ -328,6 +288,7 @@ class BackgroundWorker:
                 int(batch_id) if batch_id is not None else None,
                 str(plot_title),
                 str(cmap),
+                normalization_range,
             )
             # Track and attach callback
             self._pending.add(fut)
@@ -344,6 +305,7 @@ class BackgroundWorker:
         masks_path: str | None = None,
         wait_if_full: bool = True,
         timeout: float | None = None,
+        normalization_range: tuple[float, float] = (0.0, 1.0),
     ) -> Future[bool]:
         """
         Submit a plot job by passing .npy paths to the process pool.
@@ -351,26 +313,9 @@ class BackgroundWorker:
         This avoids loading numpy arrays in the main training process.
         """
         with self._pending_cond:
-            if self._max_pending > 0:
-                if not wait_if_full and len(self._pending) >= self._max_pending:
-                    fut: Future[bool] = Future()
-                    fut.set_result(False)
-                    return fut
-
-                if timeout is None:
-                    while len(self._pending) >= self._max_pending:
-                        self._pending_cond.wait()
-                else:
-                    import time
-
-                    end = time.time() + timeout
-                    while len(self._pending) >= self._max_pending:
-                        remaining = end - time.time()
-                        if remaining <= 0:
-                            fut: Future[bool] = Future()
-                            fut.set_result(False)
-                            return fut
-                        self._pending_cond.wait(timeout=remaining)
+            bail = self._wait_for_slot(wait_if_full, timeout)
+            if bail is not None:
+                return bail
             fut = self._submit_with_retry(
                 _save_plot_task_from_npy,
                 str(fake_path),
@@ -379,6 +324,7 @@ class BackgroundWorker:
                 int(index),
                 str(out_dir),
                 str(masks_path) if masks_path else None,
+                normalization_range,
             )
             self._pending.add(fut)
             fut.add_done_callback(self._on_done)  # type: ignore
@@ -396,8 +342,6 @@ class BackgroundWorker:
                 while self._pending:
                     self._pending_cond.wait()
             else:
-                import time
-
                 end = time.time() + timeout
                 while self._pending and time.time() < end:
                     self._pending_cond.wait(timeout=end - time.time())
@@ -419,6 +363,24 @@ class BackgroundWorker:
         except Exception:
             logger.exception("Error shutting down BackgroundWorker")
 
+    def submit_save_image(self, img_np: Any, out_path: str) -> "Future[bool]":
+        """Submit a simple image-save job to the background worker.
+
+        Returns immediately if the queue is full (non-blocking) rather than
+        stalling the training loop.
+        """
+        with self._pending_cond:
+            # Don't block the training loop if the queue is full — skip the
+            # save instead.  This prevents DDP rank 0 from timing out while
+            # other ranks proceed to the next collective.
+            bail = self._wait_for_slot(wait_if_full=False, timeout=None)
+            if bail is not None:
+                return bail
+            fut = self._submit_with_retry(_save_image_task, img_np, str(out_path))
+            self._pending.add(fut)
+            fut.add_done_callback(self._on_done)  # type: ignore
+            return fut
+
 
 def submit_plot_generated_outputs(
     fake: Any,
@@ -430,6 +392,7 @@ def submit_plot_generated_outputs(
     batch_id: int | None = None,
     plot_title: str = "Facies",
     cmap: str = "viridis",
+    normalization_range: tuple[float, float] = (0.0, 1.0),
 ) -> Future[bool]:
     """
     Submit a plot job using the module-level BackgroundWorker.
@@ -461,4 +424,10 @@ def submit_plot_generated_outputs(
         timeout=30.0,
         plot_title=plot_title,
         cmap=cmap,
+        normalization_range=normalization_range,
     )
+
+
+def submit_save_image(img_np: Any, out_path: str) -> Future[bool]:
+    """Submit a simple image-save job using the module-level BackgroundWorker."""
+    return BackgroundWorker().submit_save_image(img_np, out_path)

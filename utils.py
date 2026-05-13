@@ -25,48 +25,96 @@ from PIL import Image, ImageDraw, ImageFont
 # ---------------------------------------------------------------------------
 
 
-def norm(x: torch.Tensor) -> torch.Tensor:
-    """Normalize tensor from [0, 1] to [-1, 1] range.
+def norm(
+    x: torch.Tensor,
+    normalization_range: tuple[float, float] = (0.0, 1.0),
+) -> torch.Tensor:
+    """Clamp tensor values to the configured normalization range.
 
     Parameters
     ----------
     x : torch.Tensor
-        Input tensor with values in [0, 1] range.
+        Input tensor.
+    normalization_range : tuple[float, float], optional
+        Inclusive output range ``(min, max)``. Defaults to ``(0.0, 1.0)``.
 
     Returns
     -------
     torch.Tensor
-        Normalized tensor with values clamped to [-1, 1].
+        Tensor with values clamped to ``normalization_range``.
     """
-    out = (x - 0.5) * 2
-    return out.clamp(-1, 1)
+    norm_min = float(normalization_range[0])
+    norm_max = float(normalization_range[1])
+    lo = min(norm_min, norm_max)
+    hi = max(norm_min, norm_max)
+    return x.clamp(lo, hi)
 
 
 def denorm(
-    tensor: torch.Tensor | NDArray[np.float32], ceiling: bool = False
+    tensor: torch.Tensor | NDArray[np.float32],
+    ceiling: bool = False,
+    normalization_range: tuple[float, float] = (0.0, 1.0),
 ) -> torch.Tensor | NDArray[np.float32]:
-    """Denormalize tensor from [-1, 1] to [0, 1] range.
+    """Clamp tensor/array values to the configured normalization range.
 
     Parameters
     ----------
     tensor : torch.Tensor | NDArray[np.float32]
-        Input tensor or array with values in [-1, 1] range.
+        Input tensor or array.
     ceiling : bool, optional
-        Whether to set all positive values to 1. Currently not implemented
-        in the numeric logic. Defaults to False.
+        Whether to binarize values after clamping. When ``True``, values
+        greater than the lower bound map to the upper bound; others map to
+        the lower bound. Defaults to False.
+    normalization_range : tuple[float, float], optional
+        Inclusive output range ``(min, max)``. Defaults to ``(0.0, 1.0)``.
 
     Returns
     -------
     torch.Tensor | NDArray[np.float32]
-        Denormalized tensor or array with values clamped to [0, 1].
+        Tensor or array with values clamped to ``normalization_range``.
     """
+    norm_min = float(normalization_range[0])
+    norm_max = float(normalization_range[1])
+    lo = min(norm_min, norm_max)
+    hi = max(norm_min, norm_max)
+
     if isinstance(tensor, torch.Tensor):
-        tensor = (tensor + 1.0) / 2.0
-        tensor = tensor.clamp(0, 1)
+        tensor = tensor.clamp(lo, hi)
     else:
-        tensor = (tensor + np.float32(1.0)) / np.float32(2.0)
-        tensor = np.clip(tensor, 0, 1).astype(np.float32, copy=False)
+        tensor = np.clip(tensor, lo, hi).astype(np.float32, copy=False)
+
+    if ceiling:
+        if isinstance(tensor, torch.Tensor):
+            tensor = torch.where(
+                tensor > lo,
+                torch.as_tensor(hi, dtype=tensor.dtype, device=tensor.device),
+                torch.as_tensor(lo, dtype=tensor.dtype, device=tensor.device),
+            )
+        else:
+            tensor = np.where(tensor > lo, hi, lo).astype(np.float32, copy=False)
+
     return tensor
+
+
+def get_padding_value(
+    normalization_range: tuple[float, ...],
+) -> float:
+    """Compute the zero-padding fallback value (midpoint) from the normalization range.
+
+    Parameters
+    ----------
+    normalization_range : tuple[float, float]
+        Inclusive output range ``(min, max)``.
+
+    Returns
+    -------
+    float
+        The midpoint of the normalization range.
+    """
+    norm_min = float(normalization_range[0])
+    norm_max = float(normalization_range[1])
+    val = (norm_min + norm_max) / 2.0
+    return val
 
 
 from models.palette import PALETTE_RGB
@@ -79,7 +127,8 @@ from models.palette import PALETTE_RGB
 # Generic type variable used for helpers that return the same type as the input
 T = TypeVar("T")
 
-from config import OUTPUTS_DIR, DomainConfig
+from config import DomainConfig
+from constants import OUTPUTS_DIR
 from enums import FaciesClass
 
 # ---------------------------------------------------------------------------
@@ -101,7 +150,7 @@ class ExtractUniqueColors:
     # Singleton instance holder
     _instance: Self | None = None
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> "ExtractUniqueColors":
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
@@ -321,8 +370,9 @@ def facies_to_rgb(
     Parameters
     ----------
     facies : torch.Tensor | np.ndarray
-        Facies data in (C, H, W) or (H, W) format.
-        If (C, H, W), an argmax(dim=0) is performed to get indices.
+        Facies data in (C, H, W), (H, W, C), or (H, W) format.
+        Multi-channel floating inputs are treated as class probabilities and
+        converted to RGB by palette blending.
     palette : list[list[float]], optional
         List of RGB triples in [0, 1] range. If None, a standard
         4-class palette (Yellow, Green, Gray, Blue) is used.
@@ -334,6 +384,7 @@ def facies_to_rgb(
     """
     if palette is None:
         palette = PALETTE_RGB
+    num_colors = len(palette)
 
     # Convert to numpy and handle dimensions
     if isinstance(facies, torch.Tensor):
@@ -342,7 +393,44 @@ def facies_to_rgb(
         facies_np = np.asarray(facies)
 
     if facies_np.ndim == 3:
-        # One-hot encoded (C, H, W) -> (H, W)
+        # Accept either CHW or HWC layouts.
+        if facies_np.shape[0] > num_colors and facies_np.shape[-1] <= num_colors:
+            facies_np = np.transpose(facies_np, (2, 0, 1))
+
+        # Ignore non-facies channels (e.g. rock-physics) when present.
+        if facies_np.shape[0] > num_colors:
+            facies_np = facies_np[:num_colors, ...]
+
+        # Probabilistic maps (float channels) are rendered by palette blending.
+        # This avoids argmax tie artifacts that can appear as all-black images
+        # when class probabilities are near-uniform at early training stages.
+        if np.issubdtype(facies_np.dtype, np.floating):
+            # If the input has exactly 3 channels and negative values, it's highly likely
+            # to be a direct RGB image in [-1, 1] (e.g. Tanh output), not a probability map.
+            if facies_np.shape[0] == 3:
+                if np.min(facies_np) < -0.1:
+                    rgb = (facies_np + 1.0) / 2.0
+                    return np.clip(rgb, 0.0, 1.0).astype(np.float32, copy=False)
+                elif np.max(facies_np) <= 1.01:
+                    # Likely already an RGB image in [0, 1] (e.g. from the dataset)
+                    return np.clip(facies_np, 0.0, 1.0).astype(np.float32, copy=False)
+
+            probs = np.clip(facies_np.astype(np.float32, copy=False), 0.0, 1.0)
+            denom = np.maximum(probs.sum(axis=0, keepdims=True), DomainConfig.EPSILON)
+            probs = probs / denom
+
+            palette_np = np.asarray(palette, dtype=np.float32)
+            # Ensure the palette size matches the number of channels to avoid tensordot crash
+            if probs.shape[0] < palette_np.shape[0]:
+                palette_np = palette_np[: probs.shape[0]]
+
+            rgb = np.tensordot(
+                np.transpose(probs, (1, 2, 0)), palette_np, axes=([2], [0])
+            )
+            rgb = np.clip(rgb, 0.0, 1.0).astype(np.float32, copy=False)
+            return np.transpose(rgb, (2, 0, 1))
+
+        # One-hot or integer channels (C, H, W) -> (H, W) via argmax.
         indices = np.argmax(facies_np, axis=0)
     elif facies_np.ndim == 2:
         # Already index map (H, W)
@@ -351,6 +439,7 @@ def facies_to_rgb(
         raise ValueError(
             f"Unsupported facies shape for RGB conversion: {facies_np.shape}"
         )
+    indices = np.clip(indices, 0, max(num_colors - 1, 0))
 
     h, w = indices.shape
     rgb = np.zeros((h, w, 3), dtype=np.float32)
@@ -361,6 +450,57 @@ def facies_to_rgb(
 
     # Return as (3, H, W) for TensorBoard/PyTorch standard
     return np.transpose(rgb, (2, 0, 1))
+
+
+def rgb_to_facies(
+    rgb: torch.Tensor | np.ndarray,
+    palette: list[list[float]] | None = None,
+) -> np.ndarray:
+    """Map a normalized RGB tensor back to discrete facies class indices.
+
+    This helper assigns each pixel of a continuous RGB image (typically in
+    the ``[-1, 1]`` range) to the closest color in the specified palette using
+    Euclidean distance.
+
+    Parameters
+    ----------
+    rgb : torch.Tensor | np.ndarray
+        RGB data in ``(C, H, W)`` or ``(H, W, C)`` format. If ``C`` is the first
+        dimension, it must be 3.
+    palette : list[list[float]], optional
+        List of RGB triples representing the class centers. If None, uses
+        :data:`PALETTE_NORMALIZED` from :mod:`models.palette`.
+
+    Returns
+    -------
+    np.ndarray
+        2D integer array of shape ``(H, W)`` containing class indices.
+    """
+    if palette is None:
+        from models.palette import PALETTE_NORMALIZED
+
+        palette = PALETTE_NORMALIZED
+
+    if isinstance(rgb, torch.Tensor):
+        rgb_np = rgb.detach().cpu().numpy()
+    else:
+        rgb_np = np.asarray(rgb)
+
+    if rgb_np.ndim != 3 or (rgb_np.shape[0] != 3 and rgb_np.shape[-1] != 3):
+        raise ValueError(f"Expected 3D RGB array, got shape: {rgb_np.shape}")
+
+    # Ensure channels last: (H, W, 3)
+    if rgb_np.shape[0] == 3 and rgb_np.shape[-1] != 3:
+        rgb_np = np.transpose(rgb_np, (1, 2, 0))
+
+    pal_arr = np.array(palette, dtype=np.float32)  # (K, 3)
+
+    # Compute squared Euclidean distance: ||x - c||^2
+    # shape: (H, W, 1, 3) - (1, 1, K, 3) -> (H, W, K, 3) -> sum -> (H, W, K)
+    diff = rgb_np[..., np.newaxis, :] - pal_arr[np.newaxis, np.newaxis, :, :]
+    dist_sq = np.sum(diff**2, axis=-1)
+
+    return np.argmin(dist_sq, axis=-1).astype(np.int32)
 
 
 def set_seed(seed: int = DomainConfig.RANDOM_SEED) -> None:
@@ -495,7 +635,9 @@ def create_dirs(path: str) -> None:
 
 
 def np2torch(
-    np_array: NDArray[np.float32], normalize: bool = False
+    np_array: NDArray[np.float32],
+    normalize: bool = False,
+    normalization_range: tuple[float, float] = (0.0, 1.0),
 ) -> torch.Tensor | NDArray[np.float32]:
     """Convert NumPy array to PyTorch tensor with optional normalization.
 
@@ -504,12 +646,17 @@ def np2torch(
     np_array : NDArray[np.float32]
         Input NumPy array to convert.
     normalize : bool, optional
-        Whether to normalize the tensor to [-1, 1] range. Defaults to False.
+        Whether to clamp the tensor to the configured normalization range.
+        Defaults to False.
+    normalization_range : tuple[float, float], optional
+        Inclusive output range ``(min, max)`` used when ``normalize`` is True.
+        Defaults to ``(0.0, 1.0)``.
 
     Returns
     -------
     torch.Tensor
-        Converted tensor, normalized to [-1, 1] range if ``normalize`` is True.
+        Converted tensor, clamped to ``normalization_range`` if
+        ``normalize`` is True.
 
     """
     # Support input layouts: (B, T, H, W, C), (B, H, W, C), (H, W, C), or (H, W) grayscale.
@@ -528,12 +675,15 @@ def np2torch(
         return arr
     tensor = torch.from_numpy(arr).float()  # type: ignore
     if normalize:
-        tensor = norm(tensor)
+        tensor = norm(tensor, normalization_range=normalization_range)
     return tensor
 
 
 def torch2np(
-    tensor: torch.Tensor, denormalize: bool = False, ceiling: bool = False
+    tensor: torch.Tensor,
+    denormalize: bool = False,
+    ceiling: bool = False,
+    normalization_range: tuple[float, float] = (0.0, 1.0),
 ) -> NDArray[np.float32]:
     """
     Convert PyTorch tensor to NumPy array with optional denormalization.
@@ -542,25 +692,37 @@ def torch2np(
       - (C, H, W)   -> (H, W, C)
       - (B, C, H, W) -> (B, H, W, C)
       - (B, T, C, H, W) -> (B, T, H, W, C)
-    Optionally denormalizes from [-1, 1] to [0, 1] range.
+    Optionally applies compatibility denormalization to ``normalization_range``.
 
     Parameters
     ----------
     tensor : torch.Tensor
         Input tensor of shape (C, H, W), (B, C, H, W), or (B, T, C, H, W).
     denormalize : bool, optional
-        If True, denormalize from [-1, 1] to [0, 1]. Defaults to False.
+        If True, apply compatibility denormalization to
+        ``normalization_range``. Defaults to False.
     ceiling : bool, optional
         If True, set positive values to 1 during denormalization (currently
         not implemented in denorm). Defaults to False.
+    normalization_range : tuple[float, float], optional
+        Inclusive output range ``(min, max)``. Defaults to ``(0.0, 1.0)``.
 
     Returns
     -------
     NDArray[np.float32]
-        NumPy array with shape (H, W, C), (B, H, W, C), or (B, T, H, W, C) and values clipped to [0, 1].
+        NumPy array with shape (H, W, C), (B, H, W, C), or
+        (B, T, H, W, C) and values clipped to ``normalization_range``.
     """
+    norm_min = float(normalization_range[0])
+    norm_max = float(normalization_range[1])
+    lo = min(norm_min, norm_max)
+    hi = max(norm_min, norm_max)
+
     if denormalize:
-        tensor = cast(torch.Tensor, denorm(tensor, ceiling))
+        tensor = cast(
+            torch.Tensor,
+            denorm(tensor, ceiling, normalization_range=normalization_range),
+        )
     np_array = tensor.detach().cpu().numpy()
     # Support 5D, 4D, and 3D tensors
     if np_array.ndim == 5:
@@ -575,7 +737,7 @@ def torch2np(
     else:
         raise ValueError(f"Unsupported tensor ndim for torch2np: {np_array.ndim}")
 
-    np_array = np.clip(np_array, 0, 1)
+    np_array = np.clip(np_array, lo, hi)
     return np_array.astype(np.float32)
 
 
@@ -583,26 +745,36 @@ def tensor2np(
     tensor: torch.Tensor,
     denormalize: bool = False,
     ceiling: bool = False,
+    normalization_range: tuple[float, float] = (0.0, 1.0),
 ) -> NDArray[np.float32]:
     """Convert PyTorch tensor  to NumPy array with optional denormalization.
 
-    Transforms tensor/array to NumPy array, optionally denormalizing from [-1, 1]
-    to [0, 1] range.
+    Transforms tensor/array to NumPy array, optionally applying
+    compatibility denormalization to ``normalization_range``.
 
     Parameters
     ----------
     tensor : torch.Tensor
         Input tensor in (B, C, H, W) format.
     denormalize : bool, optional
-        If True, denormalize from [-1, 1] to [0, 1]. Defaults to False.
+        If True, apply compatibility denormalization to
+        ``normalization_range``. Defaults to False.
     ceiling : bool, optional
         If True, set positive values to 1 during denormalization. Defaults to False.
+    normalization_range : tuple[float, float], optional
+        Inclusive output range ``(min, max)``. Defaults to ``(0.0, 1.0)``.
 
     Returns
     -------
     NDArray[np.float32]
-        NumPy array with shape (B, H, W, C) and values clipped to [0, 1].
+        NumPy array with shape (B, H, W, C) and values clipped to
+        ``normalization_range``.
     """
+    norm_min = float(normalization_range[0])
+    norm_max = float(normalization_range[1])
+    lo = min(norm_min, norm_max)
+    hi = max(norm_min, norm_max)
+
     # Check if it's a torch tensor using hasattr instead of isinstance
     # (isinstance can fail due to import/module reloading issues)
     if (
@@ -610,17 +782,25 @@ def tensor2np(
         and hasattr(tensor, "detach")
         and hasattr(tensor, "numpy")
     ):
-        return torch2np(tensor, denormalize, ceiling)
+        return torch2np(
+            tensor,
+            denormalize,
+            ceiling,
+            normalization_range=normalization_range,
+        )
     else:
         arr: np.ndarray = np.asarray(tensor).copy()
         if denormalize:
-            arr = (arr + 1.0) / 2.0
+            arr = np.asarray(
+                denorm(arr, ceiling=ceiling, normalization_range=normalization_range),
+                dtype=np.float32,
+            )
         # Auto-transpose to channels-last if it looks like (B, C, H, W)
         if arr.ndim == 4 and arr.shape[1] in [1, 3, 4, 6, 7]:
             arr = np.transpose(arr, (0, 2, 3, 1))
         elif arr.ndim == 3 and arr.shape[0] in [1, 3, 4, 6, 7]:
             arr = np.transpose(arr, (1, 2, 0))
-        return np.clip(arr, 0.0, 1.0).astype(np.float32)
+        return np.clip(arr, lo, hi).astype(np.float32)
     return np.array(tensor).astype(np.float32)
 
 
@@ -758,7 +938,9 @@ def _apply_colormap_1ch(arr2d: np.ndarray, cmap_name: str = "viridis") -> np.nda
 
 
 def plot_generated_outputs(
-    fake_facies: torch.Tensor | NDArray[np.float32] | list[torch.Tensor | NDArray[np.float32]],
+    fake_facies: (
+        torch.Tensor | NDArray[np.float32] | list[torch.Tensor | NDArray[np.float32]]
+    ),
     real_facies: torch.Tensor | NDArray[np.float32],
     stage: int,
     index: int,
@@ -770,6 +952,7 @@ def plot_generated_outputs(
     batch_id: int | None = None,
     plot_title: str = "Facies",
     cmap: str = "viridis",
+    normalization_range: tuple[float, float] = (0.0, 1.0),
 ) -> None:
     """Plot and optionally save generated facies using PIL (50-100x faster than matplotlib).
 
@@ -802,6 +985,11 @@ def plot_generated_outputs(
     if not save:
         return
 
+    norm_min = float(normalization_range[0])
+    norm_max = float(normalization_range[1])
+    norm_lo = min(norm_min, norm_max)
+    norm_hi = max(norm_min, norm_max)
+
     def _to_numpy_image(
         value: torch.Tensor | NDArray[np.float32],
         *,
@@ -810,18 +998,30 @@ def plot_generated_outputs(
     ) -> NDArray[np.float32]:
         """Convert tensor/array to float32 numpy in channels-last format."""
         if isinstance(value, torch.Tensor):
-            return tensor2np(value, denormalize=denormalize, ceiling=ceiling)
+            return tensor2np(
+                value,
+                denormalize=denormalize,
+                ceiling=ceiling,
+                normalization_range=normalization_range,
+            )
 
         arr = np.asarray(value, dtype=np.float32)
         if denormalize:
-            arr = (arr + 1.0) / 2.0
+            arr = np.asarray(
+                denorm(
+                    arr,
+                    ceiling=ceiling,
+                    normalization_range=normalization_range,
+                ),
+                dtype=np.float32,
+            )
 
         if arr.ndim == 4 and arr.shape[1] in [1, 3, 4, 6, 7]:
             arr = np.transpose(arr, (0, 2, 3, 1))
         elif arr.ndim == 3 and arr.shape[0] in [1, 3, 4, 6, 7]:
             arr = np.transpose(arr, (1, 2, 0))
 
-        return np.clip(arr, 0.0, 1.0).astype(np.float32, copy=False)
+        return np.clip(arr, norm_lo, norm_hi).astype(np.float32, copy=False)
 
     fake_facies_arr: list[list[np.ndarray]]
     num_real_facies: int
@@ -829,11 +1029,13 @@ def plot_generated_outputs(
 
     if isinstance(fake_facies, list):
         np_real_for_count = _to_numpy_image(real_facies, denormalize=False)
-        num_real_facies = int(np_real_for_count.shape[0]) if np_real_for_count.ndim >= 4 else 1
+        num_real_facies = (
+            int(np_real_for_count.shape[0]) if np_real_for_count.ndim >= 4 else 1
+        )
         fake_facies_arr = [[] for _ in range(num_real_facies)]
 
         for ff in fake_facies:
-            arr = _to_numpy_image(ff, denormalize=True)
+            arr = _to_numpy_image(ff, denormalize=False)
             if arr.ndim == 4:
                 limit = min(num_real_facies, int(arr.shape[0]))
                 for j in range(limit):
@@ -851,18 +1053,23 @@ def plot_generated_outputs(
         if num_generated_per_real <= 0:
             return
     else:
-        arr = _to_numpy_image(fake_facies, denormalize=True)
+        arr = _to_numpy_image(fake_facies, denormalize=False)
         if arr.ndim == 5:
             num_real_facies = int(arr.shape[0])
             num_generated_per_real = int(arr.shape[1])
             fake_facies_arr = [
-                [np.asarray(arr[i, j], dtype=np.float32) for j in range(num_generated_per_real)]
+                [
+                    np.asarray(arr[i, j], dtype=np.float32)
+                    for j in range(num_generated_per_real)
+                ]
                 for i in range(num_real_facies)
             ]
         elif arr.ndim == 4:
             num_real_facies = int(arr.shape[0])
             num_generated_per_real = 1
-            fake_facies_arr = [[np.asarray(arr[i], dtype=np.float32)] for i in range(num_real_facies)]
+            fake_facies_arr = [
+                [np.asarray(arr[i], dtype=np.float32)] for i in range(num_real_facies)
+            ]
         elif arr.ndim == 3:
             num_real_facies = 1
             num_generated_per_real = 1
@@ -870,10 +1077,7 @@ def plot_generated_outputs(
         else:
             raise ValueError(f"Unsupported fake_facies ndim for plotting: {arr.ndim}")
 
-    if isinstance(real_facies, torch.Tensor):
-        np_real_facies = _to_numpy_image(real_facies, denormalize=True, ceiling=True)
-    else:
-        np_real_facies = _to_numpy_image(real_facies, denormalize=False)
+    np_real_facies = _to_numpy_image(real_facies, denormalize=False)
 
     np_masks: NDArray[np.float32] | None
     if masks is not None:
@@ -1172,7 +1376,6 @@ def load_facies_for_plot(
     if num_real > 0 and arr.shape[0] > num_real:
         arr = arr[:num_real]
 
-    arr = (arr + 1.0) / 2.0
     arr = np.clip(arr, 0.0, 1.0)
     return arr.astype(np.float32)
 
