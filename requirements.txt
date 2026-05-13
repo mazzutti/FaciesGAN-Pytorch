@@ -17,4 +17,6 @@ scipy
 umap-learn
 lovely_tensors
 tqdm
-nvidia-apex
+apex
+joblib
+triton

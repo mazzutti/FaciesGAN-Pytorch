@@ -1,24 +1,22 @@
-# Environments
-.venv/
+.venv
 .env
-bin/
-obj/
-
-# IDEs
-.idea/
+.idea
 **/.DS_Store
-
-# Caches
 .cache/
 .checkpoints/
-.ruff_cache/
-.mypy_cache/
-.pytest_cache/
-**/__pycache__/
-
-# Logs & Outputs
-logs/
-outputs*/
+.ruff_cache
+.mypy_cache
+.pytest_cache
+**/__pycache__/**
+logs/**
+outputs/**
+build/
+build_dbg/
+build-asan/
+tools/
+!tools/gen_mlx_cache.py
+!faciesgan-c/tools/facies_worker.c
+scripts/
+results*/**
 **/events.out.tfevents*
 
-scripts/
