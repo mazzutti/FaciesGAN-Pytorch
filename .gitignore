@@ -10,19 +10,8 @@
 **/__pycache__/**
 logs/**
 outputs/**
-build/
-build_dbg/
-build-asan/
 tools/
-!tools/gen_mlx_cache.py
-!faciesgan-c/tools/facies_worker.c
 scripts/
 results*/**
 **/events.out.tfevents*
 
-
-# Large files
-data/facies/facies_checkpoints.ptz
-*.ptz
-*.npz
-!data/facies/facies_images.npz
