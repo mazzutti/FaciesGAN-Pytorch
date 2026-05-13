@@ -439,7 +439,7 @@ def compute_seismic_loss(
     real_seismic: torch.Tensor,
     vp_mean: torch.Tensor,
     physics_state: PhysicsState,
-    dz_pixel: torch.Tensor | None = DZ_PIXEL,
+    dz_pixel: torch.Tensor = DZ_PIXEL,
     loss_fn: LossFn = LossFn.HUBER,
 ) -> torch.Tensor:
     """Calculate Geophysical Consistency Loss (Seismic Loss)."""
@@ -545,7 +545,7 @@ def compute_rock_physics_loss(
             dz_pixel=(
                 physics_state.dz_pyramid[scale]
                 if scale in range(len(physics_state.dz_pyramid))
-                else None
+                else DZ_PIXEL
             ),
             loss_fn=LossFn.HUBER,
         )

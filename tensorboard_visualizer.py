@@ -417,7 +417,7 @@ class TensorBoardVisualizer:
         synth_mapped = self._stretch_diverging_for_display(
             synth_np,
             center=center_norm,
-            normalization_range=(norm_min, norm_max),
+            normalization_range=(norm_min.item(), norm_max.item()),
             percentile=float(self.seismic_stretch_percentile),
         )
 
