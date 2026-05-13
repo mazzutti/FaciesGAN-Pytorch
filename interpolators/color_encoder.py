@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class ColorEncoder:
-    """Manage color palette and conversions between RGB and categorical labels.
+    """Manage colors palette and conversions between RGB and categorical labels.
 
     This class extracts unique colors from input images to build a palette,
     then provides methods to convert between RGB pixel values and categorical
@@ -36,6 +36,7 @@ class ColorEncoder:
         Number of unique facies classes (colors) detected.
     device : torch.device
         Device used for tensor operations.
+    palette_tensor : torch.Tensor
         Palette as a float32 tensor on the specified device.
     """
 
@@ -60,7 +61,7 @@ class ColorEncoder:
             self.palette_tensor = torch.from_numpy(  # pyright: ignore
                 self.palette,
             ).to(self.device)
-        except Exception:
+        except (TypeError, ValueError, RuntimeError):
             # Fall back to generic constructor but force float32
             self.palette_tensor = torch.tensor(self.palette, dtype=torch.float32).to(
                 self.device
@@ -118,7 +119,7 @@ class ColorEncoder:
         # Log rounded weights for user information
         try:
             rounded = weights.cpu().numpy().round(2).astype(float).tolist()
-        except Exception:
+        except (RuntimeError, TypeError, ValueError):
             rounded = [float(x) for x in weights.detach().cpu().reshape(-1)]
         logger.info(f"Auto-calculated Class Weights: {rounded}")
 

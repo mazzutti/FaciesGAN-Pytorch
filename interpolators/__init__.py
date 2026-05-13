@@ -1,8 +1,8 @@
-"""Multi-scale interpolation package for FaciesGAN.
+"""Multiscale interpolation package for FaciesGAN.
 
 This package provides various strategies for generating multi-resolution
 pyramids from categorical (facies), continuous (seismic, rock physics),
-sparse (well locations), and binary (mask) data. All interpolators are
+sparse (well locations), and binary (mask) data. All the interpolator are
 designed to preserve physical and statistical integrity across scales.
 """
 

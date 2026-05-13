@@ -1,15 +1,15 @@
-"""Base classes and shared utilities for interpolators.
+"""Base classes and shared utilities for interpolator.
 
 This module defines :class:`BaseInterpolator`, a light-weight abstract
 base class that provides common helpers and a consistent API for
 interpolator implementations. Subclasses should implement the
-:meth:`interpolate` method for numeric data.
+:meth:`interpolate_array` method for numeric data.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from typing import Callable, cast
 
 import numpy as np
 import torch
@@ -24,7 +24,7 @@ LANCZOS_RADIUS = 3
 
 
 class BaseInterpolator:
-    """Base class providing common functionality for all interpolators."""
+    """Base class providing common functionality for all interpolator."""
 
     config: InterpolatorConfig
 
@@ -33,7 +33,7 @@ class BaseInterpolator:
         self.config = config
 
     def _normalize_data(self, data: NDArray[np.float32]) -> NDArray[np.float32]:
-        """Normalize numeric array to [0, 1] using global or local min/max."""
+        """Normalize numeric array to ``config.normalization_range``."""
         data_min = (
             self.config.data_min
             if self.config.data_min is not None
@@ -44,13 +44,16 @@ class BaseInterpolator:
             if self.config.data_max is not None
             else float(data.max())
         )
+        norm_lo = float(min(self.config.normalization_range))
+        norm_hi = float(max(self.config.normalization_range))
         if data_max > data_min:
-            normalized = (data - data_min) / (data_max - data_min)
-            return np.clip(normalized, 0.0, 1.0)
-        return np.zeros_like(data, dtype=np.float32)
+            unit = (data - data_min) / (data_max - data_min)
+            mapped = norm_lo + unit * (norm_hi - norm_lo)
+            return np.clip(mapped, norm_lo, norm_hi).astype(np.float32, copy=False)
+        return np.full_like(data, norm_lo, dtype=np.float32)
 
+    @staticmethod
     def _block_reduce(
-        self,
         data: NDArray[np.float32],
         target_h: int,
         target_w: int,
@@ -68,7 +71,7 @@ class BaseInterpolator:
         target_h, target_w : int
             Target output dimensions.
         reduction_fn : callable
-            Function that takes a 1D or 2D array and returns a scalar.
+            Function that takes a 2D channel block and returns a scalar.
 
         Returns
         -------
@@ -101,8 +104,8 @@ class BaseInterpolator:
                     result[i, j, c] = reduction_fn(block[:, :, c])
 
         if not has_channels or num_channels == 1:
-            return result[:, :, 0]
-        return result
+            return cast(NDArray[np.float32], result)[:, :, 0]
+        return cast(NDArray[np.float32], result)
 
     def _one_hot_encode(
         self, indices_tensor: torch.Tensor, actual_num_classes: int
@@ -212,7 +215,7 @@ class BaseInterpolator:
         data: NDArray[np.float32],
         resolutions: tuple[tuple[int, ...], ...],
     ) -> list[torch.Tensor]:
-        """Create a multi-scale pyramid from a raw NumPy array.
+        """Create a multiscale pyramid from a raw NumPy array.
 
         This abstract method must be implemented by subclasses.
         """

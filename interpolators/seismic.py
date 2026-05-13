@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class SeismicInterpolator(BaseInterpolator):
-    """Multi-scale seismic interpolator with Lanczos upsampling and blur.
+    """Multiscale seismic interpolator with Lanczos upsampling and blur.
 
     The finest scale uses a Lanczos resize to preserve coherent reflectors.
     Coarser scales are additionally low-pass filtered before resizing to
@@ -32,24 +32,50 @@ class SeismicInterpolator(BaseInterpolator):
         super().__init__(config)
 
     def _get_seismic_stats(self) -> tuple[float, float]:
-        """Return the seismic min/max values used for normalization."""
+        """Return the seismic min/max values used for normalization.
+
+        Returns
+        -------
+        tuple[float, float]
+            A tuple ``(min, max)`` used to normalize seismic amplitudes.
+        """
         if self.config.data_min is not None and self.config.data_max is not None:
             return float(self.config.data_min), float(self.config.data_max)
 
-        from datasets.data_files import DEFAULT_DATA_DIR
+        from constants import DEFAULT_DATA_DIR
         from datasets.utils import get_global_stats
+        from enums import StatKey
 
         stats = get_global_stats(DEFAULT_DATA_DIR).get("SEISMIC")
         if stats is not None:
-            return float(stats.min), float(stats.max)
-        return 0.0, 1.0
+            return float(stats[StatKey.MIN]), float(stats[StatKey.MAX])
+        return (
+            float(min(self.config.normalization_range)),
+            float(max(self.config.normalization_range)),
+        )
 
     def interpolate_array(
         self,
         seismic_data: NDArray[np.float32],
         resolutions: tuple[tuple[int, ...], ...],
     ) -> list[torch.Tensor]:
-        """Create a seismic pyramid from a raw NumPy array."""
+        """Create a seismic pyramid from a raw NumPy array.
+
+        Parameters
+        ----------
+        seismic_data : NDArray[np.float32]
+            Input seismic slice. May be 2-D (H, W) or 3-D (H, W, C).
+        resolutions : tuple[tuple[int, ...], ...]
+            Sequence of resolution tuples used to generate the pyramid. Each
+            resolution is a shape tuple; only the spatial H/W components are
+            used by the interpolator.
+
+        Returns
+        -------
+        list[torch.Tensor]
+            A list of float32 PyTorch tensors (one per resolution) containing
+            normalized seismic data in the configured ``normalization_range``.
+        """
         if seismic_data.ndim == 2:
             seismic_data = seismic_data[:, :, None]
         seismic_data = seismic_data.astype(np.float32)
@@ -70,14 +96,31 @@ class SeismicInterpolator(BaseInterpolator):
                 target_h,
                 target_w,
             )
-            smooth_seismic.append(torch.from_numpy(resized))  # type: ignore[arg-type]
+            smooth_seismic.append(torch.as_tensor(resized, dtype=torch.float32))
 
         return smooth_seismic
 
     def _resize_with_band_limiting(
         self, img: NDArray[np.float32], target_h: int, target_w: int
     ) -> NDArray[np.float32]:
-        """Resize seismic data with Lanczos resampling and scale-dependent blur."""
+        """Resize seismic data with Lanczos resampling and scale-dependent blur.
+
+        Parameters
+        ----------
+        img : NDArray[np.float32]
+            Input image/volume (H, W) or (H, W, C) already clipped to the
+            configured normalization range.
+        target_h : int
+            Target height in pixels.
+        target_w : int
+            Target width in pixels.
+
+        Returns
+        -------
+        NDArray[np.float32]
+            Resampled image clipped to the normalization range and converted to
+            ``np.float32``.
+        """
         src_h, src_w = img.shape[:2]
 
         # The coarser the target scale, the more aggressive the low-pass.
@@ -86,10 +129,13 @@ class SeismicInterpolator(BaseInterpolator):
         if downscale > 1.0:
             blur_radius = min(3.0, 0.45 * (downscale - 1.0) ** 1.2)
 
-        work_img = img.clip(0.0, 1.0)
+        norm_lo = float(min(self.config.normalization_range))
+        norm_hi = float(max(self.config.normalization_range))
+
+        work_img = img.clip(norm_lo, norm_hi)
         if blur_radius > 0.0:
             # Apply a gentle, scale-aware low-pass before shrinking
             work_img = self._gaussian_blur(work_img, blur_radius)
 
         resized = self._lanczos_resize(work_img, target_h, target_w)
-        return resized.clip(0.0, 1.0).astype(np.float32)
+        return resized.clip(norm_lo, norm_hi).astype(np.float32)

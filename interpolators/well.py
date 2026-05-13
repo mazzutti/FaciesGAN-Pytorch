@@ -1,7 +1,7 @@
 """Well-based interpolation utilities.
 
 This module implements :class:`WellInterpolator`, which generates
-multi-scale images by extracting vertical well traces from numeric arrays.
+multiscale images by extracting vertical well traces from numeric arrays.
 The output is suitable for tasks that require preserving vertical trace
 consistency (e.g. well logs).
 """
@@ -37,7 +37,24 @@ class WellInterpolator(BaseInterpolator):
         data_array: np.ndarray,
         resolutions: tuple[tuple[int, ...], ...],
     ) -> list[torch.Tensor]:
-        """Create multi-scale well representations from a raw NumPy array."""
+        """Create multiscale well representations from a raw NumPy array.
+
+        Parameters
+        ----------
+        data_array : np.ndarray
+            Input array containing the categorical well trace data. May be
+            2-D (H, W) or 3-D (H, W, C), in which case the first channel is
+            used.
+        resolutions : tuple[tuple[int, ...], ...]
+            Sequence of target resolution tuples. Only the spatial H/W
+            dimensions are used by this interpolator.
+
+        Returns
+        -------
+        list[torch.Tensor]
+            A list of one-hot encoded PyTorch tensors, one per requested
+            resolution, representing the well trace pyramid.
+        """
         if data_array.ndim == 3:
             data_array = data_array[:, :, 0]
         data_array = data_array.astype(np.float32, copy=False)

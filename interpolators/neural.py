@@ -1,14 +1,16 @@
-"""Custom dataset and data loader for image-based neural network training.
+"""Neural interpolation utilities and compact Residual MLP architecture.
 
-This module provides dataset and loader implementations for processing images
-with optional transformations, color encoding, and batching support.
+This module implements the ``NeuralSmoother`` renderer which evaluates a
+per-coordinate ResidualMLP to produce smoothed facies images, plus a small
+training helper and the ``ResidualMLP`` model used for coordinate-based
+interpolation. Utility helpers such as ``get_mgrid`` and a lightweight
+``FourierFeatureTransform`` are also provided.
 """
 
 import logging
-import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import IO, Any, Callable, TypeAlias, cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -17,11 +19,11 @@ from torch import nn
 
 import utils
 from apex_utils import FusedLayerNorm
+from config import DomainConfig
 from interpolators.base import BaseInterpolator
 from interpolators.color_encoder import ColorEncoder
 from interpolators.config import InterpolatorConfig
-
-FileLike: TypeAlias = str | os.PathLike[str] | IO[bytes]
+from typedefs import FileLike
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -30,10 +32,7 @@ logger = logging.getLogger(__name__)
 def _load_image(image_path: FileLike) -> np.ndarray:
     import datasets.utils as data_utils
 
-    load_image = cast(
-        Callable[[FileLike], np.ndarray], getattr(data_utils, "load_image")
-    )
-    return load_image(image_path)
+    return data_utils.load_image(image_path)
 
 
 def get_mgrid(height: int, width: int) -> torch.Tensor:
@@ -91,14 +90,15 @@ class NeuralSmoother(BaseInterpolator):
         super().__init__(config)
         # resolved device for the instance (CUDA/CPU)
         self.device: torch.device = utils.resolve_device()
-        self.num_classes: int = int(config.num_classes or 4)
+        self.num_classes: int = int(config.num_classes or DomainConfig.NUM_FACIES)
         self.model = ResidualMLP(
             num_classes=self.num_classes,
             scale=config.scale,
         ).to(self.device)
         self._load_model(model_path)
 
-    def _state_from_checkpoint(self, state: Mapping[str, Any]) -> dict[str, Any] | None:
+    @staticmethod
+    def _state_from_checkpoint(state: Mapping[str, Any]) -> dict[str, Any] | None:
         """Normalize common checkpoint shapes into a dict[str, Any].
 
         This is intentionally short and permissive: we accept Mapping checkpoints
@@ -109,7 +109,7 @@ class NeuralSmoother(BaseInterpolator):
             ms = state.get("model_state", state.get("state_dict", state))
             normalized = {str(k): v for k, v in dict(ms).items()}
             return normalized
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             return None
 
     def _compile_model(self) -> None:
@@ -117,23 +117,23 @@ class NeuralSmoother(BaseInterpolator):
         try:
             self.model = torch.compile(self.model)  # pyright: ignore
             logger.info("Model compiled with torch.compile()")
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError):
             logger.info("torch.compile() not available or failed; continuing")
 
-    def _load_model(self, model_Path: Path) -> None:
+    def _load_model(self, model_path: Path) -> None:
         """Orchestrate model compilation, optional restore, and optimizer setup.
 
         This method delegates detailed work to small helpers to keep the
         responsibilities clear and testable.
         """
         self._compile_model()
-        if model_Path.exists():
-            state = torch.load(str(model_Path), map_location=self.device)
-            ms: dict[str, Any] | None = self._state_from_checkpoint(state)
-            if ms is None:
-                raise RuntimeError(
-                    "Unable to interpret checkpoint state as model state"
-                )
+        if model_path.exists():
+            state = torch.load(
+                str(model_path), map_location=self.device, weights_only=False
+            )
+            ms: dict[str, Any] = cast(
+                dict[str, Any], self._state_from_checkpoint(state)
+            )
 
             # Normalize checkpoint keys for cases where the model was
             # compiled with torch.compile(). Compiled modules are wrapped
@@ -144,8 +144,8 @@ class NeuralSmoother(BaseInterpolator):
             model_keys = set(self.model.state_dict().keys())  # type: ignore
             ck_keys = set(ms.keys())
 
-            def any_prefixed(keys: set[str], prefix: str) -> bool:
-                return any(k.startswith(prefix) for k in keys)
+            def any_prefixed(keys: set[str], any_prefix: str) -> bool:
+                return any(k.startswith(any_prefix) for k in keys)
 
             prefix = "_orig_mod."
             # If model expects prefixed keys but checkpoint doesn't, add prefix
@@ -165,15 +165,15 @@ class NeuralSmoother(BaseInterpolator):
                 )
 
             try:
-                self.model.load_state_dict(ms)  # pyright: ignore
+                self.model.load_state_dict(ms)  # type: ignore
             except RuntimeError as exc:
                 # Fall back to non-strict load to allow minor key mismatches
                 logger.warning(
                     "Strict load_state_dict failed: %s; retrying with strict=False", exc
                 )
-                self.model.load_state_dict(ms, strict=False)  # pyright: ignore
+                self.model.load_state_dict(ms, strict=False)  # type: ignore[arg-type]
             logger.info(
-                f"Loaded model checkpoint from {model_Path}; skipping training."
+                f"Loaded model checkpoint from {model_path}; skipping training."
             )
         else:
             raise FileNotFoundError("No checkpoint found; training model from scratch.")
@@ -254,6 +254,80 @@ class NeuralSmoother(BaseInterpolator):
         torch.save({"model_state": model.state_dict()}, str(out_model_path))
         logger.info("Saved checkpoint to %s", out_model_path)
 
+    @classmethod
+    def from_state_dict(
+        cls,
+        state: Mapping[str, Any],
+        config: InterpolatorConfig,
+    ) -> "NeuralSmoother":
+        """Construct a ``NeuralSmoother`` from an in-memory state dict.
+
+        Bypasses all file I/O — useful when checkpoints are stored in a
+        consolidated archive (e.g. a ``.ptz`` bundle) rather than individual
+        per-model files on disk.
+
+        Parameters
+        ----------
+        state : Mapping[str, Any]
+            Raw checkpoint mapping as returned by ``torch.load``.  Accepted
+            formats are the same as those handled by :meth:`_load_model`:
+            ``{"model_state": …}``, ``{"state_dict": …}``, or a bare
+            name → tensor mapping.
+        config : InterpolatorConfig
+            Interpolator configuration used to size the model and grid.
+
+        Returns
+        -------
+        NeuralSmoother
+            A fully initialized instance ready for inference.
+        """
+        # Bypass __init__ to avoid requiring a model_path
+        instance: "NeuralSmoother" = cls.__new__(cls)
+        from interpolators.base import (
+            BaseInterpolator,
+        )  # avoid circular at module level
+
+        BaseInterpolator.__init__(instance, config)
+        instance.device = utils.resolve_device()
+        instance.num_classes = DomainConfig.NUM_FACIES
+        instance.model = ResidualMLP(
+            num_classes=instance.num_classes,
+            scale=config.scale,
+        ).to(instance.device)
+        instance._compile_model()
+
+        ms: dict[str, Any] | None = cls._state_from_checkpoint(state)
+        if ms is None:
+            raise RuntimeError(
+                "Unable to interpret checkpoint state as model state dict."
+            )
+
+        # Reuse the same key-normalization logic as _load_model
+        model_keys = set(instance.model.state_dict().keys())  # type: ignore
+        ck_keys = set(ms.keys())
+        prefix = "_orig_mod."
+
+        def _any_prefixed(keys: set[str], pfx: str) -> bool:
+            return any(k.startswith(pfx) for k in keys)
+
+        if _any_prefixed(model_keys, prefix) and not _any_prefixed(ck_keys, prefix):
+            ms = {f"{prefix}{k}": v for k, v in ms.items()}
+        elif _any_prefixed(ck_keys, prefix) and not _any_prefixed(model_keys, prefix):
+            ms = {
+                (k[len(prefix) :] if k.startswith(prefix) else k): v
+                for k, v in ms.items()
+            }
+
+        try:
+            instance.model.load_state_dict(ms)
+        except RuntimeError as exc:
+            logger.warning(
+                "Strict load_state_dict failed: %s; retrying with strict=False", exc
+            )
+            instance.model.load_state_dict(ms, strict=False)  # type: ignore[arg-type]
+
+        return instance
+
     def interpolate(
         self,
         npy_path: Path,
@@ -273,17 +347,18 @@ class NeuralSmoother(BaseInterpolator):
             Filesystem path to the input image file. This image is loaded to
             construct a ColorEncoder that provides the color palette for
             converting model predictions (class labels) to RGB values.
-        resolutions : list[tuple[int, ...]]
-            List of (height, width) tuples specifying the desired output
+        resolutions : tuple[tuple[int, ...], ...]
+            Sequence of (height, width) tuples specifying the desired output
             resolutions. Each resolution produces an interpolated image by
             bilinearly resampling the model's probability maps.
 
         Returns
         -------
-        list[NDArray[np.float32]]
-            A list of smoothed images as numpy arrays, one per requested resolution,
-            each with shape (H, W, 3) and dtype float32 with values in [0, 1]
-            representing RGB color intensities.
+        list[torch.Tensor]
+            A list of smoothed images as CPU ``torch.Tensor`` objects, one per
+            requested resolution. Each tensor has shape ``(H, W, 3)`` and dtype
+            ``torch.float32`` with values in ``[0, 1]`` representing RGB color
+            intensities.
 
         Notes
         -----
@@ -294,17 +369,59 @@ class NeuralSmoother(BaseInterpolator):
         - Coordinates are processed in batches of size ``self.config.chunk_size``
           to limit peak GPU/CPU memory. Increase ``chunk_size`` for better
           throughput at the cost of higher memory usage.
-                - A ColorEncoder is created from ``npy_path`` during this call and
+        - A ``ColorEncoder`` is created from ``npy_path`` during this call and
           stored in ``self.encoder`` for palette-based RGB conversion.
         """
+        return self._render(_load_image(npy_path), resolutions)
+
+    def interpolate_from_array(
+        self,
+        img_np: np.ndarray,
+        resolutions: tuple[tuple[int, ...], ...],
+    ) -> list[torch.Tensor]:
+        """Render smoothed facies images from an in-memory numpy array.
+
+        Identical to :meth:`interpolate` but accepts a pre-loaded image array
+        instead of a filesystem path, avoiding redundant disk reads when images
+        are sourced from a consolidated ``.npz`` bundle.
+
+        Parameters
+        ----------
+        img_np : np.ndarray
+            RGB image array with shape ``(H, W, 3)`` and values in ``[0, 1]``
+            (``float32``).  If the array has ``uint8`` values they will be
+            normalized automatically.
+        resolutions : tuple[tuple[int, ...], ...]
+            Sequence of scale descriptors (same format as :meth:`interpolate`).
+
+        Returns
+        -------
+        list[torch.Tensor]
+            Smoothed images at the requested resolutions, each with shape
+            ``(H, W, 3)`` and values in ``[0, 1]``.
+        """
+        # Normalize uint8 → float32 [0, 1] when needed
+        img_f32: np.ndarray
+        if img_np.dtype != np.float32 or float(img_np.max()) > 1.0:
+            img_f32 = img_np.astype(np.float32, copy=False)
+            if img_f32.max() > 1.0:
+                img_f32 = img_f32 / 255.0
+        else:
+            img_f32 = img_np
+
+        return self._render(img_f32, resolutions)
+
+    def _render(
+        self,
+        img_np: np.ndarray,
+        resolutions: tuple[tuple[int, ...], ...],
+    ) -> list[torch.Tensor]:
+        """Core rendering logic shared by ``interpolate`` and ``interpolate_from_array``."""
         logger.info("Rendering facies pyramid...")
         native_h, native_w = self.config.geometry
         upsample: int | tuple[int, int] = self.config.upsample
         if isinstance(upsample, tuple):
-            # Help static type-checkers by casting the runtime-tuple to the
-            # precise Tuple[int, int] type before indexing.
-            up_tuple = cast(tuple[int, int], upsample)
-            up_h, up_w = int(up_tuple[0]), int(up_tuple[1])
+            up_h, up_w = int(upsample[0]), int(upsample[1])  # type: ignore
         else:
             up_h = up_w = int(upsample)
         super_height: int = int(native_h * up_h)
@@ -323,7 +440,6 @@ class NeuralSmoother(BaseInterpolator):
                 logits_chunks.append(self.model(chunk))
 
             logits = torch.cat(logits_chunks, dim=0)
-
             probs = torch.softmax(logits, dim=1)
             probs = (
                 probs.reshape((super_height, super_width, probs.shape[1]))
@@ -331,13 +447,8 @@ class NeuralSmoother(BaseInterpolator):
                 .unsqueeze(0)
             )
 
-            labels = torch.argmax(probs.squeeze(0), dim=0)
-            labels = labels.to(self.device)
-            img_np = _load_image(npy_path)
-            self.encoder = ColorEncoder(img_np, device=self.device)
-            pred_rgb = self.encoder.labels_to_rgb(labels)
-            pred_rgb = pred_rgb.detach().cpu().reshape((super_height, super_width, 3))
-            palette = self.encoder.palette_tensor.to(self.device).float()
+            encoder = ColorEncoder(img_np, device=self.device)
+            palette = encoder.palette_tensor.to(self.device).float()
 
             for resolution in resolutions:
                 if self.config.channels_last:
@@ -352,13 +463,11 @@ class NeuralSmoother(BaseInterpolator):
                     align_corners=False,
                     antialias=True,
                 )
-
                 inter_probs = (
                     inter_probs.squeeze(0)
                     .permute(1, 2, 0)
                     .reshape((-1, inter_probs.shape[1]))
                 )
-
                 inter_probs = inter_probs.to(self.device)
                 pred_rgb = torch.matmul(inter_probs, palette)
                 smooth_img = (  # pyright: ignore
@@ -388,24 +497,30 @@ class FourierFeatureTransform(nn.Module):
         Frequency scaling (sigma) applied to the random projection.
     """
 
+    B: (
+        torch.Tensor
+    )  # shape (2, mapping_size) - random projection matrix stored as a buffer
+
     def __init__(self, mapping_size: int = 256, scale: float = 10.0) -> None:
         """Initialize Fourier feature projection and register buffers."""
         super().__init__()  # pyright: ignore[reportUnknownMemberType]
 
         # 'scale' is the "sigma". Higher = sharper/noisier. Lower = smoother/blurrier.
         # store as a buffer (not a trainable parameter) to avoid showing up in optimizer
-        self.B = torch.randn(2, mapping_size) * scale
-        self.register_buffer("B", self.B, persistent=True)
+        B_init = torch.randn(2, mapping_size) * scale
+        self.register_buffer("B", B_init, persistent=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply Fourier features to input coordinates.
 
         Parameters
         ----------
+        x : torch.Tensor
             Input coordinates of shape (..., 2).
 
         Returns
         -------
+        torch.Tensor
             Concatenated sin/cos feature tensor of shape (..., mapping_size*2).
         """
         # Ensure numeric constant is a Python float so the result of the
@@ -482,10 +597,12 @@ class ResidualMLP(nn.Module):
 
         Parameters
         ----------
+        coords : torch.Tensor
             Input coordinate tensor of shape (..., 2).
 
         Returns
         -------
+        torch.Tensor
             Unnormalized class logits for each input coordinate.
         """
         # Embed coordinates
