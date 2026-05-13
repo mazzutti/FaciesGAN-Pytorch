@@ -10,11 +10,12 @@ Notes
 These are plain string constants and are intended to be imported as
 required, for example::
 
-        from config import OUTPUTS_DIR, G_FILE
+        from config import DirectoryConfig, CheckpointFilenames
 
 Do not put runtime logic in this module; it only contains constants.
 """
 
+import torch
 from dataclasses import dataclass
 
 
@@ -25,7 +26,8 @@ class _DomainConfig:
     NOISE_CHANNELS: int = 3
     RANDOM_SEED: int = 42
     LOSS_SCALE_MIN: float = 1e-4
-    EPSILON: float = 1e-6
+    EPSILON: float = 1e-8
+    ZERO_SCALAR: torch.Tensor = torch.tensor(0.0)
 
 
 @dataclass(frozen=True)
@@ -36,7 +38,8 @@ class _PhysicsConfig:
     WAVELET_DT: float = 0.001
     WAVELET_LENGTH: float = 0.128
     VP_MIN: float = 2000.0
-    VELOCITY_SCALE: float = 1000.0
+    VP_MS_SCALE: float = 1000.0
+    DZ_PIXEL: torch.Tensor = torch.tensor(1.0)
 
 
 @dataclass(frozen=True)
@@ -47,13 +50,52 @@ class _LoggingConfig:
 
 
 @dataclass(frozen=True)
-class VariantConfig:
-    use_wells: bool
-    use_seismic: bool
-    use_rock_physics: bool
-    label: str
+class _CheckpointFilenames:
+    """Singleton container for standard FaciesGAN checkpoint filenames."""
+
+    EPOCH_CKPT: str = "epoch_checkpoint.pth"
+    COMPLETED_EPOCH: str = "completed_epoch.txt"
+    GENERATOR: str = "generator.pth"
+    DISCRIMINATOR: str = "discriminator.pth"
+    MASKS: str = "masks.pth"
+    REC_NOISE: str = "rec_noise.pth"
+    NOISE_AMP: str = "noise_amp.txt"
+    SHAPE: str = "shape.pth"
+    OPT_G: str = "opt_G.pth"
+    OPT_D: str = "opt_D.pth"
+    SCH_G: str = "sch_G.pth"
+    SCH_D: str = "sch_D.pth"
+    OPTIONS: str = "options.json"
+    STATS: str = "stats.json"
+    EMBEDDINGS: str = "cached_embeddings.npz"
+
+
+@dataclass(frozen=True)
+class _DirectoryConfig:
+    """Conventional directory paths for data and outputs."""
+
+    JOBLIB_CACHE: str = ".cache/joblib"
+    OUTPUTS: str = "outputs/py"
+    DATA: str = "data"
+    CACHE: str = "./.cache"
+    TENSORBOARD_LOGS: str = "tensorboard_logs"
+    CHECKPOINT: str = "outputs/py"
+    DEFAULT_DATA: str = "./data"
+
+
+@dataclass(frozen=True)
+class _ExperimentPaths:
+    """Conventional subdirectories for experiment outputs."""
+
+    FACIES: str = "real_x_generated_facies"
+    IP: str = "real_x_generated_ip"
+    IS: str = "real_x_generated_is"
+    VP_VS: str = "real_x_generated_vp_vs"
 
 
 DomainConfig = _DomainConfig()
 PhysicsConfig = _PhysicsConfig()
 LoggingConfig = _LoggingConfig()
+CheckpointFilenames = _CheckpointFilenames()
+DirectoryConfig = _DirectoryConfig()
+ExperimentPaths = _ExperimentPaths()

@@ -47,6 +47,14 @@ class FeatureKey(StrEnum):
     VPVS = "VpVs"
 
 
+class DeviceType(StrEnum):
+    """Supported torch device types."""
+
+    CUDA = "cuda"
+    CPU = "cpu"
+    MPS = "mps"
+
+
 class AmpDtype(StrEnum):
     """AMP (Automatic Mixed Precision) dtype choices."""
 
