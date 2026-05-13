@@ -1,54 +1,80 @@
-"""Model utilities and shared functions.
+from typing import Any, TYPE_CHECKING
 
-This module provides framework-specific helpers for interpolation, padding,
-and channel bookkeeping used by the generator and discriminator.
-"""
-
-from typing import Any, cast
+if TYPE_CHECKING:
+    from physics.physics import PhysicsState
 
 import torch
-import torch.nn.functional as F
+from apex.normalization import FusedLayerNorm  # type: ignore[import]
 
-from config import DomainConfig, PhysicsConfig
-from enums import FeatureKey, LossFunction
+from config import DomainConfig
+from enums import ChannelKey as ChannelKey
+from enums import LossFn as LossFn
+from enums import SplitKey as SplitKey
 from options import TrainingOptions
+from physics.seismic import resample_wavelet_to_depth, ip_to_reflectivity
 
 
 def weights_init(m: torch.nn.Module) -> None:
-    """Initialize network weights using standard GAN normal distributions.
+    """Initialize neural network layer weights using normal distributions.
 
-    - Convolutions: mean=0.0, std=0.02
-    - Normalization: mean=1.0, std=0.02, bias=0
+    Applies standard weight initialization strategies for convolutional and
+    normalization layers. Conv2d layers use N(0, 0.02), while BatchNorm2d
+    and InstanceNorm2d use N(1, 0.02) for weights and zero for biases.
+
+    Skips normalization layers without affine parameters (e.g., InstanceNorm2d
+    with affine=False).
+
+    Parameters
+    ----------
+    m : nn.Module
+        The neural network module to initialize.
     """
-    classname = m.__class__.__name__
-    if classname.find("Conv") != -1:
-        weight = getattr(m, "weight", None)
-        if isinstance(weight, torch.Tensor):
-            torch.nn.init.normal_(weight.data, 0.0, 0.02)
-    elif classname.find("BatchNorm") != -1 or classname.find("InstanceNorm") != -1:
-        weight = getattr(m, "weight", None)
-        bias = getattr(m, "bias", None)
-        if isinstance(weight, torch.Tensor):
-            torch.nn.init.normal_(weight.data, 1.0, 0.02)
-        if isinstance(bias, torch.Tensor):
-            torch.nn.init.constant_(bias.data, 0)
+    if isinstance(m, torch.nn.Conv2d):
+        m.weight.data.normal_(0.0, 0.02)
+    elif isinstance(m, (torch.nn.BatchNorm2d, torch.nn.InstanceNorm2d, FusedLayerNorm)):
+        # Only initialize if affine parameters exist
+        if getattr(m, "weight", None) is not None:
+            m.weight.data.normal_(1.0, 0.02)
+        if getattr(m, "bias", None) is not None:
+            m.bias.data.fill_(0)
 
 
 def calc_gradient_penalty(
-    netD: torch.nn.Module,
+    discriminator: torch.nn.Module,
     real_data: torch.Tensor,
     fake_data: torch.Tensor,
     LAMBDA: float,
     device: torch.device,
 ) -> torch.Tensor:
-    """Calculate WGAN-GP gradient penalty."""
-    alpha = torch.rand(1, 1, device=device).expand_as(real_data)
-    interpolates = (alpha * real_data + ((1 - alpha) * fake_data)).requires_grad_(True)
-    disc_interpolates: torch.Tensor | list[torch.Tensor] = netD(interpolates)
+    """Calculate gradient penalty for WGAN-GP training.
 
-    # Handle both single-scale and multi-scale discriminator outputs
-    if isinstance(disc_interpolates, list):
-        disc_interpolates = disc_interpolates[-1]
+    Implements the gradient penalty term used in Wasserstein GAN with
+    Gradient Penalty (WGAN-GP) to enforce the Lipschitz constraint.
+
+    Parameters
+    ----------
+    discriminator : nn.Module
+        The discriminator model.
+    real_data : torch.Tensor
+        Real data samples from the dataset.
+    fake_data : torch.Tensor
+        Generated fake data samples.
+    LAMBDA : float
+        Gradient penalty coefficient (typically 10.0).
+    device : torch.device
+        Device to perform calculations on.
+
+    Returns
+    -------
+    torch.Tensor
+        Calculated gradient penalty scalar value.
+    """
+    # Sample one alpha per batch item so every sample has its own interpolation
+    # point — required by WGAN-GP for an unbiased gradient penalty estimate.
+    batch_size = real_data.size(0)
+    alpha = torch.rand(batch_size, 1, 1, 1, device=device).expand_as(real_data)
+    interpolates = (alpha * real_data + (1 - alpha) * fake_data).requires_grad_(True)
+    disc_interpolates: torch.Tensor = discriminator(interpolates)
 
     gradients: torch.Tensor = torch.autograd.grad(
         outputs=disc_interpolates,
@@ -60,33 +86,50 @@ def calc_gradient_penalty(
         only_inputs=True,
     )[0]
 
-    # compute the L2 norm of gradients for each sample and apply the penalty
-    gradients = cast(torch.Tensor, gradients.norm(2, dim=1) - 1)  # type: ignore
-    gradient_penalty = (gradients**2).mean() * LAMBDA
+    # Compute the scale-invariant RMS gradient norm per sample.
+    # Dividing by sqrt(C*H*W) normalises the L2 norm to a per-dimension RMS,
+    # so the 1-Lipschitz target is the same regardless of spatial resolution.
+    # Without this, the aggregate L2 norm grows as O(sqrt(n_dims)), causing
+    # the GP to explode at large scales (e.g. 256×256) even when per-pixel
+    # gradients are small.
+    # Use reshape instead of view: tensor may be channels_last (non-contiguous).
+    n_dims = float(gradients.shape[1] * gradients.shape[2] * gradients.shape[3])
+    gradient_norms = gradients.reshape(batch_size, -1).norm(2, dim=1) / (n_dims**0.5) - 1  # type: ignore
+    gradient_penalty = (gradient_norms**2).mean() * LAMBDA  # type: ignore
 
-    return gradient_penalty
+    return gradient_penalty  # type: ignore
 
 
-def load(path: str, device: torch.device, as_type: type[Any] = torch.Tensor) -> Any:
-    """Load a torch or numpy file from disk and move it to the target device."""
+def load(path: str, device: torch.device) -> Any:
+    """Load a torch file from disk and move it to the target device."""
     import os
 
     if not os.path.exists(path):
         return None
-    data = torch.load(path, map_location=device)
-    return data
+    return torch.load(path, map_location=device, weights_only=False)
 
 
-def interpolate(x: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
-    """Resample tensor to target size using bilinear interpolation.
+def interpolate(tensor: torch.Tensor, size: tuple[int, ...]) -> torch.Tensor:
+    """Resize the input tensor to the given size using bilinear interpolation.
 
-    Convenience wrapper around ``F.interpolate`` with standard settings
-    for the FaciesGAN pyramid.
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        The input tensor to be resized.
+    size : tuple[int, ...]
+        The target spatial dimensions for the resized tensor (height, width).
+
+    Returns
+    -------
+    torch.Tensor
+        The resized tensor with the specified dimensions.
     """
-    return F.interpolate(x, size=size, mode="bilinear", align_corners=True)
+    return torch.nn.functional.interpolate(
+        tensor, size=size, mode="bilinear", align_corners=True
+    )
 
 
-def calculate_channels(options: TrainingOptions) -> dict[str, int]:
+def calculate_channels(options: TrainingOptions) -> dict[ChannelKey, int]:
     """Calculate input and output channel counts for models.
 
     Centralizes the logic that determines how many channels the generator
@@ -95,146 +138,78 @@ def calculate_channels(options: TrainingOptions) -> dict[str, int]:
 
     Returns
     -------
-    dict[str, int]
+    dict[ChannelKey, int]
         Dictionary with keys:
         - 'facies': Number of facies classes.
         - 'rock_physics': Number of rock physics channels (3 if enabled).
         - 'generator_out': Total channels output by the generator.
         - 'discriminator_in': Total channels input to the discriminator.
     """
-    num_facies = options.num_facies_classes
+    num_facies_channels = options.num_facies_channels
     num_rp = 0
-    if getattr(options, "use_rock_physics", False):
-        from datasets.data_files import DataFiles
+    if options.use_rock_physics:
+        from enums import DataFiles
 
         num_rp = len(DataFiles.generator_output_rock_physics())
 
-    return {
-        "facies": num_facies,
-        "rock_physics": num_rp,
-        "generator_out": num_facies + num_rp,
-        "discriminator_in": num_facies + num_rp,
-    }
+    # Total channels produced by the generator (e.g., 3 Facies + 3 Rock Physics = 6)
+    total_out: int = num_facies_channels + num_rp
 
-
-def calculate_noise_channels(options: TrainingOptions) -> int:
-    """Calculate total input noise channels for the generator.
-
-    Calculates the base noise channel count (max of noise_channels and
-    output channels) and adds extra channels for conditioning (wells,
-    seismic) when enabled.
-
-    Parameters
-    ----------
-    options : TrainingOptions
-        Training configuration containing hyperparams and feature flags.
-
-    Returns
-    -------
-    int
-        Total number of input noise channels.
-    """
-    counts = calculate_channels(options)
-    total_out = counts["generator_out"]
-
-    return (
-        max(options.noise_channels, total_out)
-        + (options.num_facies_classes if options.use_wells else 0)
+    # The noise tensor must accommodate the target output channels and any
+    # conditioning channels (wells, seismic).
+    noise_channels = (
+        max(DomainConfig.NOISE_CHANNELS, total_out)
+        + (num_facies_channels if options.use_wells else 0)
         + (1 if options.use_seismic else 0)
     )
 
-
-def total_variation_loss(img: torch.Tensor) -> torch.Tensor:
-    """
-    Compute Total Variation (TV) loss for a 4D tensor.
-
-    Args:
-        img: Tensor of shape [Batch, Canais, Profundidade, Traços]
-
-    Returns:
-        Scalar tensor representing the TV loss.
-    """
-    # Vertical differences (along depth axis)
-    tv_z = torch.abs(img[:, :, 1:, :] - img[:, :, :-1, :]).mean()
-
-    # Horizontal differences (along trace axis)
-    tv_x = torch.abs(img[:, :, :, 1:] - img[:, :, :, :-1]).mean()
-
-    return tv_z + tv_x
-
-
-class NoiseBufferManager:
-    """Manages pre-allocated noise buffers to minimize GPU allocations.
-
-    Reuses cached zero-padded buffers for batched noise generation during
-    training, eliminating thousands of small allocations per epoch.
-    """
-
-    def __init__(self, device: torch.device) -> None:
-        self.device = device
-        self.buffers: dict[tuple[int, ...], torch.Tensor] = {}
-
-    def get_buffer(
-        self,
-        key: tuple[int, ...],
-        shape: tuple[int, ...],
-    ) -> torch.Tensor:
-        """Retrieve or allocate a zeroed noise buffer for the given shape."""
-        buf = self.buffers.get(key)
-        if buf is None:
-            buf = torch.empty(
-                *shape,
-                device=self.device,
-                memory_format=torch.channels_last,
-            ).zero_()
-            self.buffers[key] = buf
-        return buf
-
-    def clear(self) -> None:
-        """Clear all cached buffers."""
-        self.buffers.clear()
-
-
-def load_framework_state_dict(
-    module: torch.nn.Module,
-    state_dict: dict[str, torch.Tensor],
-) -> None:
-    """Load a state dict into a module, handling DDP and compile prefixes.
-
-    Strips or adds the ``_orig_mod.`` prefix as needed to ensure compatibility
-    between compiled and uncompiled versions of the model.
-    """
-    from .facies_gan import unwrap_ddp
-
-    target = unwrap_ddp(module)
-    model_keys = set(target.state_dict().keys())
-    ck_keys = set(state_dict.keys())
-    prefix = "_orig_mod."
-
-    # Checkpoint has prefix but model does not → strip it
-    if any(k.startswith(prefix) for k in ck_keys) and not any(
-        k.startswith(prefix) for k in model_keys
-    ):
-        state_dict = {
-            (k[len(prefix) :] if k.startswith(prefix) else k): v
-            for k, v in state_dict.items()
-        }
-    # Model has prefix but checkpoint does not → add it
-    elif any(k.startswith(prefix) for k in model_keys) and not any(
-        k.startswith(prefix) for k in ck_keys
-    ):
-        state_dict = {f"{prefix}{k}": v for k, v in state_dict.items()}
-
-    target.load_state_dict(state_dict)
+    return {
+        ChannelKey.FACIES: num_facies_channels,
+        ChannelKey.ROCK_PHYSICS: num_rp,
+        ChannelKey.GENERATOR_OUT: total_out,
+        ChannelKey.DISCRIMINATOR_IN: total_out,
+        ChannelKey.NOISE: noise_channels,
+    }
 
 
 def generate_noise(
-    shape: tuple[int, ...],
-    num_samp: int = 1,
-    device: torch.device = torch.device("cpu"),
+    size: tuple[int, ...], device: torch.device, num_samp: int = 1, scale: float = 1.0
 ) -> torch.Tensor:
-    """Generate a batch of Gaussian noise tensors with the specified shape."""
-    return torch.randn(num_samp, *shape, device=device)
+    """Generate a random noise tensor with specified dimensions.
+
+    On CUDA the tensor is created in ``channels_last`` memory format so
+    downstream convolutions (which use ``channels_last`` weights) avoid an
+    implicit layout conversion on every forward call.
+
+    Parameters
+    ----------
+    size : tuple[int, ...]
+        Shape of the noise tensor as (channels, height, width).
+    device : torch.device
+        Device on which to generate the tensor (CPU, CUDA, or MPS).
+    num_samp : int, optional
+        Number of samples (batch size) to generate. Defaults to 1.
+    scale : float, optional
+        Scale factor applied to spatial dimensions (height, width).
+        Dimensions are divided by scale. Defaults to 1.0.
+
+    Returns
+    -------
+    torch.Tensor
+        Random tensor sampled from standard normal distribution with shape
+        (num_samp, channels, height/scale, width/scale).
+    """
+    shape = (num_samp, size[0], *[round(s / scale) for s in size[1:]])
+    if device.type == "cuda" and len(shape) == 4:
+        # Allocate directly in channels_last layout — avoids a copy
+        # compared to torch.randn(...).to(memory_format=channels_last).
+        noise = torch.empty(shape, device=device, memory_format=torch.channels_last)
+        noise.normal_()
+    else:
+        noise = torch.randn(*shape, device=device)
+    if scale != 1:
+        noise = interpolate(noise, size[1:])
+    return noise
 
 
 def split_facies_rp(
@@ -245,7 +220,7 @@ def split_facies_rp(
     has_seismic: bool = False,
     channels_last: bool = False,
 ) -> dict[str, torch.Tensor | None]:
-    """Split a multi-channel tensor into its constituent components.
+    """Split a multichannel tensor into its constituent components.
 
     Explicitly extracts components based on provided flags. The order is
     assumed to be [Facies | Rock Physics | Wells | Seismic].
@@ -269,8 +244,8 @@ def split_facies_rp(
 
     Returns
     -------
-    dict[FeatureKey, torch.Tensor | None]
-        Dictionary with keys from FeatureKey (e.g., FeatureKey.FACIES).
+    dict[str, torch.Tensor | None]
+        Dictionary with keys: 'facies', 'rock_physics', 'wells', 'seismic'.
     """
     if channels_last:
         dim = -1
@@ -288,13 +263,11 @@ def split_facies_rp(
     total_ch = tensor.shape[dim]
 
     res: dict[str, torch.Tensor | None] = {
-        FeatureKey.FACIES: None,
-        FeatureKey.ROCK_PHYSICS: None,
-        FeatureKey.WELLS: None,
-        FeatureKey.SEISMIC: None,
+        "facies": None,
+        "rock_physics": None,
+        "wells": None,
+        "seismic": None,
     }
-
-    curr = 0
 
     def _slice(start: int, length: int) -> torch.Tensor:
         if channels_last:
@@ -309,267 +282,31 @@ def split_facies_rp(
         return tensor[start : start + length, ...]
 
     # 1. Facies (always first)
-    res[FeatureKey.FACIES] = _slice(0, num_facies)
+    res["facies"] = _slice(0, num_facies)
     curr = num_facies
 
     # 2. Rock Physics (if flagged and present)
     num_rp = 0
     if has_rp:
-        from datasets.data_files import DataFiles
+        from enums import DataFiles
 
         num_rp = len(DataFiles.generator_output_rock_physics())
 
     if has_rp and total_ch >= curr + num_rp:
-        res[FeatureKey.ROCK_PHYSICS] = _slice(curr, num_rp)
+        res["rock_physics"] = _slice(curr, num_rp)
         curr += num_rp
 
     # 3. Wells (if flagged and present)
     if has_wells and total_ch >= curr + num_facies:
-        res[FeatureKey.WELLS] = _slice(curr, num_facies)
+        res["wells"] = _slice(curr, num_facies)
         curr += num_facies
 
     # 4. Seismic (if flagged and present)
     if has_seismic and total_ch >= curr + 1:
-        res[FeatureKey.SEISMIC] = _slice(curr, 1)
+        res["seismic"] = _slice(curr, 1)
         curr += 1
 
     return res
 
 
-def dice_loss(
-    inputs: torch.Tensor,
-    targets: torch.Tensor,
-    smooth: float = 1.0,
-    eps: float = DomainConfig.EPSILON,
-) -> torch.Tensor:
-    """Compute the multi-class Dice loss.
-
-    Parameters
-    ----------
-    inputs : torch.Tensor
-        Predicted probabilities or logits of shape (B, C, H, W).
-    targets : torch.Tensor
-        Ground truth one-hot encoded labels of shape (B, C, H, W).
-    smooth : float, optional
-        Smoothing factor to prevent zero division. Default is 1.0.
-    eps : float, optional
-        Small epsilon for numerical stability. Default is 1e-7.
-
-    Returns
-    -------
-    torch.Tensor
-        Scalar Dice loss.
-    """
-    # Reshape to (B, C, -1)
-    inputs = inputs.flatten(2)
-    targets = targets.flatten(2)
-
-    intersection = (inputs * targets).sum(-1)
-    cardinality = inputs.sum(-1) + targets.sum(-1)
-
-    dice_score = (2.0 * intersection + smooth) / (cardinality + smooth + eps)
-    dice_loss = 1.0 - dice_score
-
-    return dice_loss.mean()
-
-
-def masked_cross_entropy(
-    inputs: torch.Tensor,
-    targets: torch.Tensor,
-    mask: torch.Tensor,
-) -> torch.Tensor:
-    """Compute cross-entropy loss only at masked locations.
-
-    Parameters
-    ----------
-    inputs : torch.Tensor
-        Predicted logits of shape (B, C, H, W).
-    targets : torch.Tensor
-        Ground truth one-hot encoded labels of shape (B, C, H, W).
-    mask : torch.Tensor
-        Binary spatial mask of shape (B, 1, H, W).
-
-    Returns
-    -------
-    torch.Tensor
-        Scalar masked cross-entropy loss.
-    """
-    # Convert one-hot targets to class indices
-    target_indices = torch.argmax(targets, dim=1)
-
-    # Compute per-pixel loss without reduction
-    loss = F.cross_entropy(inputs, target_indices, reduction="none")
-
-    # Apply mask (mask is 1 where we have data)
-    masked_loss = loss * mask.squeeze(1)
-
-    # Average only over masked pixels
-    denom = mask.sum()
-    if denom > 0:
-        return masked_loss.sum() / denom
-    else:
-        # Return a zero scalar that preserves gradients
-        return inputs.sum() * 0.0
-
-
-def rms_normalize(x: torch.Tensor, eps: float = DomainConfig.EPSILON) -> torch.Tensor:
-    """Apply Root-Mean-Square (RMS) normalization to a tensor."""
-    return x / (torch.sqrt(torch.mean(x**2)) + eps)
-
-
-def calculate_synthetic_seismic(
-    ip_norm: torch.Tensor,
-    wavelet_t: torch.Tensor,
-    dt_wavelet: torch.Tensor,
-    dz_pixel: float | torch.Tensor,
-    vp_mean: torch.Tensor,
-    vp_min: torch.Tensor,
-    ip_min: torch.Tensor,
-    ip_max: torch.Tensor,
-    seis_min: torch.Tensor,
-    seis_max: torch.Tensor,
-    fixed_kernel_size: int = PhysicsConfig.FIXED_KERNEL_SIZE,
-) -> torch.Tensor:
-    """Perform Geophysical Modeling to produce normalized synthetic seismic.
-
-    Parameters
-    ----------
-    ip_norm : torch.Tensor
-        Normalized P-Impedance in [-1, 1] range. Shape (B, 1, Z, W).
-    wavelet_t : torch.Tensor
-        Base time-domain wavelet.
-    dt_wavelet : float
-        Time sampling interval (s).
-    dz_pixel : float or torch.Tensor
-        Depth sampling interval (m).
-    vp_mean : torch.Tensor
-        Mean velocity (m/s) used for dynamic wavelet resampling.
-    vp_min : torch.Tensor
-        Minimum velocity value for Vp clamping (m/s).
-    ip_min, ip_max : torch.Tensor
-        Min/Max values for Ip denormalization.
-    seis_min, seis_max : torch.Tensor
-        Min/Max values for Seismic normalization.
-    fixed_kernel_size : int, optional
-        Fixed size for the convolution kernel. Default is PhysicsConfig.FIXED_KERNEL_SIZE.
-
-    Returns
-    -------
-    torch.Tensor
-        Normalized synthetic seismic tensor in [-1, 1] range.
-    """
-    from physics.seismic import resample_wavelet_to_depth, torch_ip_to_reflectivity
-
-    # Ensure all stats are tensors on the correct device
-    ip_min = torch.as_tensor(ip_min, device=ip_norm.device, dtype=ip_norm.dtype)
-    ip_max = torch.as_tensor(ip_max, device=ip_norm.device, dtype=ip_norm.dtype)
-    vp_min = torch.as_tensor(vp_min, device=ip_norm.device, dtype=ip_norm.dtype)
-    dz_pixel = torch.as_tensor(dz_pixel, device=ip_norm.device, dtype=ip_norm.dtype)
-    seis_min = torch.as_tensor(seis_min, device=ip_norm.device, dtype=ip_norm.dtype)
-    seis_max = torch.as_tensor(seis_max, device=ip_norm.device, dtype=ip_norm.dtype)
-
-    # 1. Denormalize to Physical Units ([-1, 1] -> [min, max])
-    ip_phys = ((ip_norm + 1) / 2) * (ip_max - ip_min) + ip_min
-
-    # 2. Compute Reflectivity (RC)
-    rc = torch_ip_to_reflectivity(ip_phys)
-
-    # 3. Resample Wavelet to Depth (Zero-Sync approach)
-    wavelet_z = resample_wavelet_to_depth(
-        wavelet_t,
-        vp_mean,
-        dt_wavelet,
-        dz_pixel,
-        vp_min=vp_min,
-        fixed_size=fixed_kernel_size,
-    )
-
-    # 4. Synthetic Modeling (Convolution)
-    padding_z = fixed_kernel_size // 2
-    synth = F.conv2d(rc, wavelet_z, padding=(padding_z, 0))
-
-    # 5. Normalization using Dataset Statistics -> [-1, 1]
-    synth = 2.0 * (synth - seis_min) / (seis_max - seis_min + DomainConfig.EPSILON) - 1.0
-    return synth.clamp(-1.0, 1.0)
-
-
-def calculate_physics_loss(
-    gen_ip_norm: torch.Tensor,
-    real_seismic: torch.Tensor,
-    wavelet_t: torch.Tensor,
-    dt_wavelet: torch.Tensor,
-    dz_pixel: float | torch.Tensor,
-    vp_mean: torch.Tensor,
-    vp_min: torch.Tensor,
-    vp_max: torch.Tensor,
-    ip_min: torch.Tensor,
-    ip_max: torch.Tensor,
-    seis_min: torch.Tensor,
-    seis_max: torch.Tensor,
-    loss_fn: str = LossFunction.HUBER,
-    fixed_kernel_size: int = PhysicsConfig.FIXED_KERNEL_SIZE,
-) -> torch.Tensor:
-    """Calculate Geophysical Consistency Loss (Physics Loss).
-
-    Parameters
-    ----------
-    gen_ip_norm : torch.Tensor
-        Generated P-Impedance in [-1, 1] range. Shape (B, 1, Z, W).
-    real_seismic : torch.Tensor
-        Real seismic data at the current scale.
-    wavelet_t : torch.Tensor
-        Base time-domain wavelet.
-    dt_wavelet : torch.Tensor
-        Time sampling interval (s).
-    dz_pixel : float or torch.Tensor
-        Depth sampling interval (m).
-    vp_mean : torch.Tensor
-        Mean velocity (m/s) used to deform the wavelet.
-    vp_min : torch.Tensor
-        Minimum velocity value for Vp clamping (m/s).
-    vp_max : torch.Tensor
-        Maximum velocity value for Vp clamping (m/s).
-    ip_min, ip_max : torch.Tensor
-        Min/Max values for Ip denormalization.
-    seis_min, seis_max : torch.Tensor
-        Min/Max values for Seismic normalization.
-    loss_fn : str, optional
-        Loss function to use ('huber' or 'mse'). Default is 'huber'.
-    fixed_kernel_size : int, optional
-        Fixed size for the convolution kernel to avoid recompilation. Default is PhysicsConfig.FIXED_KERNEL_SIZE.
-
-    Returns
-    -------
-    torch.Tensor
-        Scalar physics loss.
-    """
-    # 1. Generate Synthetic Seismic
-    synth = calculate_synthetic_seismic(
-        gen_ip_norm,
-        wavelet_t,
-        dt_wavelet,
-        dz_pixel,
-        vp_mean,
-        vp_min,
-        ip_min,
-        ip_max,
-        seis_min,
-        seis_max,
-        fixed_kernel_size=fixed_kernel_size,
-    )
-
-    # 2. Match shapes if necessary (e.g. if seismic_pyramid has different Z)
-    if synth.shape != real_seismic.shape:
-        synth = F.interpolate(
-            synth, size=(real_seismic.shape[2], real_seismic.shape[3])
-        )
-
-    # 3. RMS Normalization for Waveform Comparison
-    synth_norm = rms_normalize(synth)
-    real_seismic_norm = rms_normalize(real_seismic)
-
-    if loss_fn == LossFunction.HUBER:
-        loss = F.huber_loss(synth_norm, real_seismic_norm)
-    else:
-        loss = F.mse_loss(synth_norm, real_seismic_norm)
-    return loss
+__all__ = ["SplitKey", "ChannelKey", "LossFn", "weights_init", "calc_gradient_penalty"]

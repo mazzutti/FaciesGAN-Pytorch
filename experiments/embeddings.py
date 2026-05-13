@@ -14,18 +14,19 @@ from umap import UMAP  # type: ignore[import]
 
 warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
 
-from datasets import TorchPyramidsDataset
-
-from .constants import EMBEDDINGS_FILE, EmbeddingMethod
-
 from dataclasses import dataclass
+
+from constants import EMBEDDINGS_FILE, EmbeddingMethod
+from datasets import PyramidsDataset
 
 # Type alias for shared embeddings: method -> (real_reduced, {variant: fake_reduced})
 _SharedEmbeddings = dict[str, tuple[np.ndarray, dict[str, np.ndarray]]]
 
+
 @dataclass
 class ExperimentCache:
     """Encapsulates cached embeddings and generated samples across all variants."""
+
     shared: _SharedEmbeddings
     all_facies: dict[str, list[np.ndarray]]
     all_mask_indexes: dict[str, torch.Tensor]
@@ -98,7 +99,7 @@ def _flatten_data(data: np.ndarray | list[np.ndarray]) -> np.ndarray:
 
 
 def prepare_features(
-    dataset: TorchPyramidsDataset,
+    dataset: PyramidsDataset,
     generated_samples: list[np.ndarray] | np.ndarray,
     rock_physics_only: bool = False,
     seismic_only: bool = False,
@@ -111,22 +112,22 @@ def prepare_features(
         arr = np.expand_dims(arr, axis=1)
 
     # 2. Extract relevant channels
-    num_facies = dataset.options.num_facies_classes
+    num_facies_channels = dataset.options.num_facies_channels
     if seismic_only:
         # Expecting (N, 1, H, W) or (N, C, H, W) - take last channel if multiple
         if arr.shape[1] > 1:
             arr = arr[:, -1:, ...]
     elif rock_physics_only:
-        # If combined [F+RP], extract Ip (at num_facies)
-        if arr.shape[1] > num_facies:
-            arr = arr[:, num_facies : num_facies + 1, ...]
+        # If combined [F+RP], extract Ip (at num_facies_channels)
+        if arr.shape[1] > num_facies_channels:
+            arr = arr[:, num_facies_channels : num_facies_channels + 1, ...]
         else:
             # Already RP-only, take Ip (first channel)
             arr = arr[:, 0:1, ...]
     else:
         # Facies: if combined, extract only facies channels
-        if arr.shape[1] > num_facies:
-            arr = arr[:, :num_facies, ...]
+        if arr.shape[1] > num_facies_channels:
+            arr = arr[:, :num_facies_channels, ...]
 
     # 3. Ensure spatial dimensions match the expected scale (robustness against mixed resolutions)
     # We use the stop_scale size as the reference
@@ -145,7 +146,7 @@ def prepare_features(
 
 def compute_shared_embeddings(
     all_generated: dict[str, list[np.ndarray]],
-    dataset: TorchPyramidsDataset,
+    dataset: PyramidsDataset,
     methods: list[str] | None = None,
     rock_physics_only: bool = False,
     seismic_only: bool = False,
