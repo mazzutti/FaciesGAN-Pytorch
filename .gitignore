@@ -20,3 +20,9 @@ scripts/
 results*/**
 **/events.out.tfevents*
 
+
+# Large files
+data/facies/facies_checkpoints.ptz
+*.ptz
+*.npz
+!data/facies/facies_images.npz
