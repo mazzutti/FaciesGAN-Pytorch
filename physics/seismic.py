@@ -317,9 +317,7 @@ def calculate_synthetic_seismic(
 
     # 4. Synthetic Modeling (Convolution)
     padding_z = physics_state.fixed_kernel_size // 2
-    # mypy/pytorch stubs can be picky about the padding type; cast to Any to avoid type errors
-    padding_arg: Any = (int(padding_z), 0)
-    synth = torch.nn.functional.conv2d(rc, wavelet_z, padding=padding_arg)
+    synth = torch.nn.functional.conv2d(rc, wavelet_z, padding=(int(padding_z), 0))
 
     # 5. Normalization using Dataset Statistics, then remap to normalization_range.
     synth = (synth - physics_state.seis_min) / (

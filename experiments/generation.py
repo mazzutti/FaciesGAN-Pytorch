@@ -5,7 +5,6 @@ import os
 import numpy as np
 import torch
 
-from constants import ZERO_SCALAR
 from enums import DataFiles
 from models.facies_gan import FaciesGAN
 from models.utils import SplitKey, split_facies_rp

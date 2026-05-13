@@ -1,7 +1,5 @@
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
-if TYPE_CHECKING:
-    from physics.physics import PhysicsState
 
 import torch
 from apex.normalization import FusedLayerNorm  # type: ignore[import]
@@ -11,7 +9,6 @@ from enums import ChannelKey as ChannelKey
 from enums import LossFn as LossFn
 from enums import SplitKey as SplitKey
 from options import TrainingOptions
-from physics.seismic import resample_wavelet_to_depth, ip_to_reflectivity
 
 
 def weights_init(m: torch.nn.Module) -> None:
