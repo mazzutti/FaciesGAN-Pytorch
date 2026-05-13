@@ -16,6 +16,7 @@ import torch.nn as nn
 import torch.utils.checkpoint as ckpt_utils
 
 from config import DomainConfig
+from enums import DeviceType
 
 from . import utils
 from .custom_layer import ConvBlock, FaciesQuantization, SPADEGenerator
@@ -75,7 +76,7 @@ class Generator(nn.Module):
         output_channels: int = 3,
         num_facies: int = DomainConfig.NUM_FACIES_CHANNELS,
         normalization_range: tuple[float, ...] = (-1.0, 1.0),
-        device: torch.device = torch.device("cpu"),
+        device: torch.device = torch.device(DeviceType.CPU),
     ) -> None:
         """Initialize the multiscale Generator.
 
@@ -285,7 +286,7 @@ class Generator(nn.Module):
                 (batch_size, channels, height, width),
                 device=device,
             )
-            if device.type == "cuda":
+            if device.type == DeviceType.CUDA:
                 out_facie = out_facie.to(memory_format=torch.channels_last)
         else:
             out_facie = in_noise

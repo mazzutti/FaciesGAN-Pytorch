@@ -5,9 +5,7 @@ import torch
 from apex.normalization import FusedLayerNorm  # type: ignore[import]
 
 from config import DomainConfig
-from enums import ChannelKey as ChannelKey
-from enums import LossFn as LossFn
-from enums import SplitKey as SplitKey
+from enums import ChannelKey, DeviceType, LossFn, SplitKey
 from options import TrainingOptions
 
 
@@ -197,7 +195,7 @@ def generate_noise(
         (num_samp, channels, height/scale, width/scale).
     """
     shape = (num_samp, size[0], *[round(s / scale) for s in size[1:]])
-    if device.type == "cuda" and len(shape) == 4:
+    if device.type == DeviceType.CUDA and len(shape) == 4:
         # Allocate directly in channels_last layout — avoids a copy
         # compared to torch.randn(...).to(memory_format=channels_last).
         noise = torch.empty(shape, device=device, memory_format=torch.channels_last)

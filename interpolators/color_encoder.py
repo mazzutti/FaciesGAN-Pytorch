@@ -11,6 +11,8 @@ import numpy as np
 import torch
 from numpy.typing import NDArray
 
+from config import DomainConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -112,8 +114,7 @@ class ColorEncoder:
         counts = torch.bincount(labels_cpu, minlength=self.num_classes).float()
         total = labels_cpu.numel()
 
-        eps = 1e-6
-        weights = total / (self.num_classes * (counts + eps))
+        weights = total / (self.num_classes * (counts + max(DomainConfig.EPSILON, 1e-5)))
         weights = weights / weights.mean()
 
         # Log rounded weights for user information

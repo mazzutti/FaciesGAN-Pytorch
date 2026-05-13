@@ -4,11 +4,7 @@ import torch
 import torch.nn as nn
 
 from config import DomainConfig, PhysicsConfig
-from constants import VP_MS_SCALE
-from datasets.utils import get_effective_global_stats
 from enums import DataFiles, StatKey
-from physics.seismic import torch_ricker_wavelet
-from utils import get_padding_value
 
 
 class PhysicsState(nn.Module):
@@ -49,6 +45,9 @@ class PhysicsState(nn.Module):
 
     def _register_physics_buffers(self, device: torch.device) -> None:
         """Pre-compute and register tensors for fast denormalization on GPU."""
+        from datasets.utils import get_effective_global_stats
+        from physics.seismic import torch_ricker_wavelet
+        from utils import get_padding_value
 
         # Load stats for Elastic Consistency Loss denormalization.
         # Keep VP/VS range consistent with dataset normalization when
@@ -180,7 +179,11 @@ class PhysicsState(nn.Module):
             s = stats[key]
 
             # Note: VP/VS in stats.json are in Km/s, convert to m/s
-            scale = VP_MS_SCALE if comp in [DataFiles.VP, DataFiles.VS] else 1.0
+            scale = (
+                PhysicsConfig.VP_MS_SCALE
+                if comp in [DataFiles.VP, DataFiles.VS]
+                else 1.0
+            )
 
             phys_min[key] = torch.tensor(
                 s[StatKey.MIN] * scale, device=device, dtype=torch.float32

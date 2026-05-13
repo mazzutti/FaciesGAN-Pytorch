@@ -15,8 +15,6 @@ from config import DomainConfig, PhysicsConfig
 
 from typing import TYPE_CHECKING
 
-from constants import DZ_PIXEL
-
 if TYPE_CHECKING:
     from physics.physics import PhysicsState
 
@@ -196,7 +194,7 @@ def ip_to_reflectivity(ip: torch.Tensor, padding_value: torch.Tensor) -> torch.T
 def resample_wavelet_to_depth(
     vp_mean: torch.Tensor,
     physics_state: "PhysicsState",
-    dz_pixel: torch.Tensor | None = DZ_PIXEL,
+    dz_pixel: torch.Tensor | None = PhysicsConfig.DZ_PIXEL,
 ) -> torch.Tensor:
     """Resample a time-domain wavelet to depth using a zero-sync grid_sample approach.
 
@@ -268,7 +266,7 @@ def resample_wavelet_to_depth(
     # Normalize energy in float32 to prevent overflow and NaN gradients.
     # Add epsilon inside sqrt to prevent instability if the wavelet is near-zero.
     w_ms = torch.sum(w_z.to(torch.float32) ** 2)
-    w_norm = torch.sqrt(w_ms + 1e-8)
+    w_norm = torch.sqrt(w_ms + DomainConfig.EPSILON)
     w_z = (w_z.to(torch.float32) / w_norm).to(dtype)  # type: ignore[assignment]
 
     # Return as (OutC, InC, H, W) -> (1, 1, fixed_size, 1)

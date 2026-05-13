@@ -42,11 +42,11 @@ class SeismicInterpolator(BaseInterpolator):
         if self.config.data_min is not None and self.config.data_max is not None:
             return float(self.config.data_min), float(self.config.data_max)
 
-        from constants import DEFAULT_DATA_DIR
+        from config import DirectoryConfig
         from datasets.utils import get_global_stats
         from enums import StatKey
 
-        stats = get_global_stats(DEFAULT_DATA_DIR).get("SEISMIC")
+        stats = get_global_stats(DirectoryConfig.DEFAULT_DATA).get("SEISMIC")
         if stats is not None:
             return float(stats[StatKey.MIN]), float(stats[StatKey.MAX])
         return (

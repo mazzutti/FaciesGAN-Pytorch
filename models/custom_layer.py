@@ -13,6 +13,8 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from enums import DeviceType
+from config import DomainConfig
 
 
 class ConvBlock(nn.Sequential):
@@ -344,7 +346,7 @@ class SPADEDiscriminator(nn.Module):
         padding_size: int,
         input_channels: int,
         minibatch_stddev_group_size: int = 4,
-        minibatch_stddev_epsilon: float = 1e-8,
+        minibatch_stddev_epsilon: float = DomainConfig.EPSILON,
     ) -> None:
         """Initialize the convolutional discriminator.
 
@@ -368,7 +370,7 @@ class SPADEDiscriminator(nn.Module):
             smaller than this value. Default is 4.
         minibatch_stddev_epsilon : float, optional
             Numerical stability constant added before the square root.
-            Default is 1e-8.
+            Default is DomainConfig.EPSILON.
         """
 
         nn.Module.__init__(self)  # type: ignore
@@ -477,7 +479,9 @@ class FaciesQuantization(nn.Module):
     pure_colors: torch.Tensor
 
     def __init__(
-        self, temperature: float = 0.5, device: torch.device = torch.device("cpu")
+        self,
+        temperature: float = 0.5,
+        device: torch.device = torch.device(DeviceType.CPU),
     ) -> None:
         """Create a ColorQuantization module.
 
