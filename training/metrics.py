@@ -10,16 +10,17 @@ or writing to external sinks.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
-from constants import DZ_PIXEL, ZERO_SCALAR
-from enums import MetricKey
+from config import DomainConfig, PhysicsConfig
+from enums import DeviceType, MetricKey
 from options import TrainingOptions
-from physics.physics import PhysicsState
-from config import DomainConfig
+
+if TYPE_CHECKING:
+    from physics.physics import PhysicsState
 
 
 @dataclass
@@ -345,7 +346,7 @@ class MetricArraySmoother:
         self.values = None
 
 
-def rms_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+def rms_normalize(x: torch.Tensor, eps: float = DomainConfig.EPSILON) -> torch.Tensor:
     """Apply Root-Mean-Square (RMS) normalization to a tensor.
 
     Computes the mean square in float32 and limits amplification to prevent
@@ -353,15 +354,8 @@ def rms_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """
     ms = torch.mean(x.to(torch.float32) ** 2)
     # ms is mean square. Add epsilon inside sqrt to prevent NaN gradients at zero.
-    denom = torch.sqrt(ms + 1e-8)
+    denom = torch.sqrt(ms + eps)
     return (x.to(torch.float32) / denom).to(x.dtype)
-
-
-import torch.nn.functional as F
-from torch.amp.autocast_mode import autocast
-import models.utils as utils
-from enums import LossFn
-from physics.seismic import calculate_synthetic_seismic
 
 
 def compute_adversarial_loss(
@@ -369,6 +363,12 @@ def compute_adversarial_loss(
 ) -> torch.Tensor:
     """Compute adversarial loss for a generated tensor at a scale."""
     return penalty * (-disc(fake).mean())
+
+
+import torch.nn.functional as F
+from torch.amp.autocast_mode import autocast
+
+from enums import LossFn
 
 
 def compute_diversity_loss(
@@ -401,8 +401,10 @@ def compute_gradient_penalty(
     device: torch.device,
 ) -> torch.Tensor:
     """Compute the gradient penalty for WGAN-GP style regularization."""
-    with autocast("cuda", enabled=False):
-        return utils.calc_gradient_penalty(
+    import models.utils as model_utils
+
+    with autocast(DeviceType.CUDA, enabled=False):
+        return model_utils.calc_gradient_penalty(
             disc,
             real.float(),
             fake.float(),
@@ -417,11 +419,11 @@ def compute_masked_loss(
     well: torch.Tensor | None,
     mask: torch.Tensor | None,
     options: TrainingOptions,
-    eps: float = 1e-7,
+    eps: float = DomainConfig.EPSILON,
 ) -> torch.Tensor:
     """Compute mask-weighted MSE between `fake` and `real`."""
     if well is None or mask is None:
-        return ZERO_SCALAR
+        return DomainConfig.ZERO_SCALAR
 
     if options.use_rock_physics:
         fc = options.num_facies_channels
@@ -439,10 +441,12 @@ def compute_seismic_loss(
     real_seismic: torch.Tensor,
     vp_mean: torch.Tensor,
     physics_state: PhysicsState,
-    dz_pixel: torch.Tensor = DZ_PIXEL,
+    dz_pixel: torch.Tensor = PhysicsConfig.DZ_PIXEL,
     loss_fn: LossFn = LossFn.HUBER,
 ) -> torch.Tensor:
     """Calculate Geophysical Consistency Loss (Seismic Loss)."""
+    from physics.seismic import calculate_synthetic_seismic
+
     synth = calculate_synthetic_seismic(
         gen_ip_norm,
         vp_mean,
@@ -476,7 +480,7 @@ def compute_seismic_loss(
 def total_variation_loss(
     rock_physics: torch.Tensor,
     facies: torch.Tensor | None = None,
-    eps: float = 1e-8,
+    eps: float = DomainConfig.EPSILON,
 ) -> torch.Tensor:
     """Compute intra-facies Total Variation (TV) loss for a 4D tensor."""
     diff_z = torch.abs(rock_physics[:, :, 1:, :] - rock_physics[:, :, :-1, :])
@@ -517,12 +521,12 @@ def compute_rock_physics_loss(
         else {}
     )
 
-    tv_loss = ZERO_SCALAR
+    tv_loss = DomainConfig.ZERO_SCALAR
     if options.tv_loss_penalty > 0:
         tv_unweighted = total_variation_loss(fake_rock_physics, fake_facies)
         tv_loss = options.tv_loss_penalty * tv_unweighted
 
-    elastic_loss = ZERO_SCALAR
+    elastic_loss = DomainConfig.ZERO_SCALAR
     if options.elastic_loss_penalty > 0:
         log_ip = torch.log(phys["Ip"] + eps)
         log_is = torch.log(phys["Is"] + eps)
@@ -532,7 +536,7 @@ def compute_rock_physics_loss(
             log_ip - log_is, log_vpvs_target
         )
 
-    seismic_loss = ZERO_SCALAR
+    seismic_loss = DomainConfig.ZERO_SCALAR
     if options.seismic_loss_penalty > 0 and seismic_pyramid.get(scale) is not None:
         vp_phys = phys["Ip"] / physics_state.rho_mean
         vp_mean = torch.mean(vp_phys).clamp(physics_state.vp_min, physics_state.vp_max)
@@ -545,7 +549,7 @@ def compute_rock_physics_loss(
             dz_pixel=(
                 physics_state.dz_pyramid[scale]
                 if scale in range(len(physics_state.dz_pyramid))
-                else DZ_PIXEL
+                else PhysicsConfig.DZ_PIXEL
             ),
             loss_fn=LossFn.HUBER,
         )

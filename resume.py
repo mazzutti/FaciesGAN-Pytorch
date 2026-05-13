@@ -21,7 +21,8 @@ from types import SimpleNamespace
 import torch
 import torch.distributed as dist
 
-from constants import G_FILE, OPT_FILE, OUTPUT_FACIES_PATH
+from config import CheckpointFilenames, ExperimentPaths
+from enums import DdpBackend, DeviceType
 from log import init_output_logging
 from options import ResumeOptions
 from training.trainer import Trainer
@@ -66,7 +67,9 @@ if __name__ == "__main__":
         raise ValueError("Number of iterations required for fine-tuning.")
 
     # Load the saved input parameter options for the trained models
-    with open(os.path.join(arguments.checkpoint_path, OPT_FILE), "r") as f:
+    with open(
+        os.path.join(arguments.checkpoint_path, CheckpointFilenames.OPTIONS), "r"
+    ) as f:
         options = json.load(f, object_hook=lambda x: SimpleNamespace(**x))
 
     options.out_path = arguments.checkpoint_path
@@ -85,9 +88,13 @@ if __name__ == "__main__":
         options.num_iter = arguments.num_iter
 
     device = torch.device(
-        f"cuda:{options.gpu_device}"
+        f"{DeviceType.CUDA}:{options.gpu_device}"
         if torch.cuda.is_available()
-        else f"mps:{options.gpu_device}" if torch.backends.mps.is_available() else "cpu"
+        else (
+            f"{DeviceType.MPS}:{options.gpu_device}"
+            if torch.backends.mps.is_available()
+            else DeviceType.CPU
+        )
     )
 
     # ── Detect distributed (torchrun) ────────────────────────────────
@@ -95,9 +102,9 @@ if __name__ == "__main__":
     distributed = local_rank >= 0
 
     if distributed:
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(backend=DdpBackend.NCCL)
         torch.cuda.set_device(local_rank)
-        device = torch.device(f"cuda:{local_rank}")
+        device = torch.device(f"{DeviceType.CUDA}:{local_rank}")
 
     trainer = Trainer(
         options,
@@ -115,12 +122,15 @@ if __name__ == "__main__":
         last_scale_path = os.path.join(arguments.checkpoint_path, str(last_scale))
 
         # If the last scale folder was created, but no models were saved, remove the folder
-        if not os.path.isfile(os.path.join(last_scale_path, G_FILE)):
+        has_ckpt = os.path.isfile(os.path.join(last_scale_path, CheckpointFilenames.GENERATOR)) or \
+                   os.path.isfile(os.path.join(last_scale_path, CheckpointFilenames.EPOCH_CKPT))
+
+        if not has_ckpt:
             for file in glob.glob(
-                os.path.join(last_scale_path, OUTPUT_FACIES_PATH, "*")
+                os.path.join(last_scale_path, ExperimentPaths.FACIES, "*")
             ):
                 os.remove(file)
-            os.removedirs(os.path.join(last_scale_path, OUTPUT_FACIES_PATH))
+            os.removedirs(os.path.join(last_scale_path, ExperimentPaths.FACIES))
             for file in glob.glob(os.path.join(last_scale_path, "*")):
                 os.remove(file)
             os.removedirs(last_scale_path)

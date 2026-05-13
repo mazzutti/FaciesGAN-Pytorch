@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import math
 import os
-import random
 import sys
 import threading
 import time
@@ -40,23 +39,12 @@ import background_workers as bw
 import log
 import utils
 from apex_utils import FusedAdam
-from constants import (
-    D_FILE,
-    EPOCH_CKPT_FILE,
-    G_FILE,
-    OPT_D_FILE,
-    OPT_G_FILE,
-    OUTPUT_FACIES_PATH,
-    OUTPUT_IP_PATH,
-    OUTPUT_IS_PATH,
-    OUTPUT_VP_VS_PATH,
-    SCH_D_FILE,
-    SCH_G_FILE,
-)
-from datasets import Batch, IDataLoader, PyramidsBatch
+from config import CheckpointFilenames, ExperimentPaths
+from typedefs import Batch, IDataLoader, PyramidsBatch, RawBatch
 from datasets.data_prefetcher import DataPrefetcher, gather_seen_indices
 from datasets.dataset import PyramidsDataset
-from enums import LrDecayUnit
+from enums import DeviceType, LrDecayUnit
+from training.checkpoint import Checkpoint, ScaleCheckpoint
 from models import utils as model_utils
 from models.facies_gan import FaciesGAN, unwrap_ddp
 from models.utils import ChannelKey
@@ -132,7 +120,7 @@ class Trainer:
         options: TrainingOptions,
         fine_tuning: bool = False,
         checkpoint_path: str = ".checkpoints",
-        device: torch.device = torch.device("cpu"),
+        device: torch.device = torch.device(DeviceType.CPU),
         distributed: bool = False,
     ) -> None:
         """Create a Trainer instance and prepare datasets, model and logging.
@@ -329,10 +317,7 @@ class Trainer:
                 # Trigger generator traces
                 self.model.generator(
                     self.model.get_pyramid_noise(
-                        max(scales),
-                        indexes,
-                        wells_pyramid,
-                        seismic_pyramid,
+                        max(scales), indexes, wells_pyramid, seismic_pyramid
                     ),
                     self.model.noise_amps,
                     stop_scale=max(scales),
@@ -366,8 +351,8 @@ class Trainer:
         if self.distributed and dist.is_initialized():
             dist.barrier()  # type: ignore
 
-    def create_dataloader(self) -> DataLoader[tuple[int, Batch] | Batch]:
-        sampler: DistributedSampler[Batch] | None = None
+    def create_dataloader(self) -> IDataLoader:
+        sampler: DistributedSampler[RawBatch] | None = None
         do_shuffle = getattr(self.options, "shuffle", True)
         shuffle = False
         if self.distributed:
@@ -383,22 +368,20 @@ class Trainer:
             shuffle = do_shuffle
 
         has_workers = self.options.num_workers > 0
-        return DataLoader[tuple[int, Batch] | Batch](
+        return DataLoader[RawBatch](
             self.dataset,
             batch_size=self.batch_size,
             shuffle=shuffle,
             sampler=sampler,
             num_workers=self.options.num_workers,
-            pin_memory=self.device.type == "cuda",
+            pin_memory=self.device.type == DeviceType.CUDA,
             persistent_workers=has_workers,
             prefetch_factor=2 if has_workers else None,
             drop_last=True,
             timeout=120 if has_workers else 0,
         )
 
-    def create_model(
-        self,
-    ) -> FaciesGAN:
+    def create_model(self) -> FaciesGAN:
         """Instantiate and return the :class:`FaciesGAN` configured
         with the trainer options and device.
 
@@ -408,10 +391,7 @@ class Trainer:
             The initialized model instance.
         """
         return FaciesGAN(
-            self.options,
-            self.channels,
-            self.device,
-            use_ddp=self.distributed,
+            self.options, self.channels, self.device, use_ddp=self.distributed
         )
 
     def generate_visualization_samples(
@@ -443,10 +423,7 @@ class Trainer:
             return tuple(
                 self.model.generate_fake(
                     self.model.get_pyramid_noise(
-                        scale,
-                        indexes,
-                        wells_pyramid,
-                        seismic_pyramid,
+                        scale, indexes, wells_pyramid, seismic_pyramid
                     ),
                     scale,
                 )
@@ -454,10 +431,7 @@ class Trainer:
             )
 
     def compute_rec_input(
-        self,
-        scale: int,
-        indexes: torch.Tensor,
-        facies_pyramid: dict[int, torch.Tensor],
+        self, scale: int, indexes: torch.Tensor, facies_pyramid: dict[int, torch.Tensor]
     ) -> torch.Tensor:
         real = facies_pyramid[scale]
         if scale == 0:
@@ -471,8 +445,7 @@ class Trainer:
             prev_facies = prev_facies[indexes]
 
         return model_utils.interpolate(
-            prev_facies,
-            cast(tuple[int, int], tuple(real.shape[2:])),
+            prev_facies, cast(tuple[int, int], tuple(real.shape[2:]))
         ).to(self.device)
 
     def _build_z_rec_for_positions(
@@ -626,11 +599,7 @@ class Trainer:
         with torch.no_grad():
             fake = self.model.generator(
                 self.model.get_pyramid_noise(
-                    scale,
-                    indexes,
-                    wells_pyramid,
-                    seismic_pyramid,
-                    rec=True,
+                    scale, indexes, wells_pyramid, seismic_pyramid, rec=True
                 ),
                 self.model.noise_amps + [0.0],
                 stop_scale=scale,
@@ -686,9 +655,11 @@ class Trainer:
             Scale index to load models for.
         """
         try:
-            generator_path = os.path.join(str(self.checkpoint_path), str(scale), G_FILE)
+            generator_path = os.path.join(
+                str(self.checkpoint_path), str(scale), CheckpointFilenames.GENERATOR
+            )
             discriminator_path = os.path.join(
-                str(self.checkpoint_path), str(scale), D_FILE
+                str(self.checkpoint_path), str(scale), CheckpointFilenames.DISCRIMINATOR
             )
 
             gen = unwrap_ddp(self.model.generator.gens[scale])
@@ -730,22 +701,30 @@ class Trainer:
         """
         try:
             generator_optimizer.load_state_dict(
-                model_utils.load(os.path.join(scale_path, OPT_G_FILE), self.device)
+                model_utils.load(
+                    os.path.join(scale_path, CheckpointFilenames.OPT_G), self.device
+                )
             )
             discriminator_optimizer.load_state_dict(
-                model_utils.load(os.path.join(scale_path, OPT_D_FILE), self.device)
+                model_utils.load(
+                    os.path.join(scale_path, CheckpointFilenames.OPT_D), self.device
+                )
             )
             generator_scheduler.load_state_dict(
-                model_utils.load(os.path.join(scale_path, SCH_G_FILE), self.device)
+                model_utils.load(
+                    os.path.join(scale_path, CheckpointFilenames.SCH_G), self.device
+                )
             )
             discriminator_scheduler.load_state_dict(
-                model_utils.load(os.path.join(scale_path, SCH_D_FILE), self.device)
+                model_utils.load(
+                    os.path.join(scale_path, CheckpointFilenames.SCH_D), self.device
+                )
             )
         except (FileNotFoundError, RuntimeError, KeyError, ValueError, OSError) as e:
             print(f"Warning: Could not load optimizers for scale {scale}: {e}")
 
     def create_batch_iterator(
-        self, loader: DataLoader[tuple[int, Batch] | Batch], scales: tuple[int, ...]
+        self, loader: IDataLoader, scales: tuple[int, ...]
     ) -> Iterator[PyramidsBatch | None]:
         prefetcher = DataPrefetcher(loader, scale_indices=scales, device=self.device)
         self._batch_prefetcher = prefetcher
@@ -803,23 +782,23 @@ class Trainer:
                 ).clamp(-1, 1)
 
             facies_tensor = generated_facies.reshape(
-                sample_count,
-                self.num_generated_per_real,
-                *generated_facies.shape[1:],
+                sample_count, self.num_generated_per_real, *generated_facies.shape[1:]
             )
             real_facies_tensor = real_facies
 
-            facies_cpu = facies_tensor.detach().to("cpu", non_blocking=True)
-            real_cpu = real_facies_tensor.detach().to("cpu", non_blocking=True)
+            facies_cpu = facies_tensor.detach().to(DeviceType.CPU, non_blocking=True)
+            real_cpu = real_facies_tensor.detach().to(DeviceType.CPU, non_blocking=True)
 
             # Synchronize with the non_blocking detach/to('cpu') transfers
             # that were initiated for facies and real.
-            if self.device.type == "cuda":
+            if self.device.type == DeviceType.CUDA:
                 torch.cuda.current_stream().synchronize()
 
             masks_cpu: torch.Tensor | None = None
             if scale in masks_pyramid:
-                masks_cpu = masks_pyramid[scale].detach().to("cpu", non_blocking=True)
+                masks_cpu = (
+                    masks_pyramid[scale].detach().to(DeviceType.CPU, non_blocking=True)
+                )
 
             res_gen = model_utils.split_facies_rp(
                 facies_cpu, num_facies_ch, has_rp=use_rock_physics
@@ -848,9 +827,7 @@ class Trainer:
 
             bw.submit_plot_generated_outputs(
                 utils.torch2np(
-                    facies_only_cpu,
-                    denormalize=True,
-                    normalization_range=norm_range,
+                    facies_only_cpu, denormalize=True, normalization_range=norm_range
                 ),
                 utils.torch2np(
                     real_facies_only_cpu,
@@ -867,9 +844,13 @@ class Trainer:
 
             if use_rock_physics and rp_cpu is not None and real_rp_cpu is not None:
                 lo, hi = min(norm_range), max(norm_range)
+                ip_path = out_dir.replace(ExperimentPaths.FACIES, ExperimentPaths.IP)
+                is_path = out_dir.replace(ExperimentPaths.FACIES, ExperimentPaths.IS)
+                vp_vs_path = out_dir.replace(
+                    ExperimentPaths.FACIES, ExperimentPaths.VP_VS
+                )
 
                 # Ip  (channel 0)
-                ip_path = out_dir.replace(OUTPUT_FACIES_PATH, OUTPUT_IP_PATH)
                 os.makedirs(ip_path, exist_ok=True)
                 bw.submit_plot_generated_outputs(
                     utils.torch2np(
@@ -892,7 +873,7 @@ class Trainer:
                 )
 
                 # Is  (channel 1)
-                is_path = out_dir.replace(OUTPUT_FACIES_PATH, OUTPUT_IS_PATH)
+                is_path = out_dir.replace(ExperimentPaths.FACIES, ExperimentPaths.IS)
                 os.makedirs(is_path, exist_ok=True)
                 bw.submit_plot_generated_outputs(
                     utils.torch2np(
@@ -915,7 +896,9 @@ class Trainer:
                 )
 
                 # Vp/Vs  (channel 2)
-                vp_vs_path = out_dir.replace(OUTPUT_FACIES_PATH, OUTPUT_VP_VS_PATH)
+                vp_vs_path = out_dir.replace(
+                    ExperimentPaths.FACIES, ExperimentPaths.VP_VS
+                )
                 os.makedirs(vp_vs_path, exist_ok=True)
                 try:
                     # Diagnostic print: numeric ranges for VP/VS (generated vs real)
@@ -1056,16 +1039,20 @@ class Trainer:
         """
         os.makedirs(scale_path, exist_ok=True)
         torch.save(
-            generator_optimizer.state_dict(), os.path.join(scale_path, OPT_G_FILE)
+            generator_optimizer.state_dict(),
+            os.path.join(scale_path, CheckpointFilenames.OPT_G),
         )
         torch.save(
-            discriminator_optimizer.state_dict(), os.path.join(scale_path, OPT_D_FILE)
+            discriminator_optimizer.state_dict(),
+            os.path.join(scale_path, CheckpointFilenames.OPT_D),
         )
         torch.save(
-            generator_scheduler.state_dict(), os.path.join(scale_path, SCH_G_FILE)
+            generator_scheduler.state_dict(),
+            os.path.join(scale_path, CheckpointFilenames.SCH_G),
         )
         torch.save(
-            discriminator_scheduler.state_dict(), os.path.join(scale_path, SCH_D_FILE)
+            discriminator_scheduler.state_dict(),
+            os.path.join(scale_path, CheckpointFilenames.SCH_D),
         )
 
     def save_epoch_checkpoint(
@@ -1088,38 +1075,41 @@ class Trainer:
         batch_id : int
             Current batch index.
         """
-        checkpoint: dict[str, object] = {
-            "epoch": epoch,
-            "batch_id": batch_id,
-            "noise_amps": list(self.model.noise_amps),
-            "disc_step_counter": self.model.disc_step_counter,
-            "extra_disc_step_counter": self.model.extra_disc_step_counter,
-        }
-        per_scale: dict[int, dict[str, object]] = {}
+        scales_info: dict[int, ScaleCheckpoint] = {}
         for s in scales:
             gen = unwrap_ddp(self.model.generator.gens[s])
             disc = unwrap_ddp(self.model.discriminator.discs[s])
-            per_scale[s] = {
-                "generator": gen.state_dict(),
-                "discriminator": disc.state_dict(),
-                "opt_g": self.generator_optimizers[s].state_dict(),
-                "opt_d": self.discriminator_optimizers[s].state_dict(),
-                "sch_g": self.generator_schedulers[s].state_dict(),
-                "sch_d": self.discriminator_schedulers[s].state_dict(),
-            }
-        checkpoint["scales"] = per_scale
+            scales_info[s] = ScaleCheckpoint(
+                generator=gen.state_dict(),
+                discriminator=disc.state_dict(),
+                opt_g=self.generator_optimizers[s].state_dict(),
+                opt_d=self.discriminator_optimizers[s].state_dict(),
+                sch_g=self.generator_schedulers[s].state_dict(),
+                sch_d=self.discriminator_schedulers[s].state_dict(),
+            )
+
+        checkpoint = Checkpoint(
+            epoch=epoch,
+            batch_id=batch_id,
+            noise_amps=list(self.model.noise_amps),
+            disc_step_counter=self.model.disc_step_counter,
+            extra_disc_step_counter=self.model.extra_disc_step_counter,
+            scales=scales_info,
+            grad_scaler_g=self.model.grad_scaler_g.state_dict(),
+            rec_noise=self.model.rec_noise,
+        )
 
         # Save into the first scale's directory (arbitrary but deterministic)
-        ckpt_path = os.path.join(scale_paths[min(scales)], EPOCH_CKPT_FILE)
+        ckpt_path = os.path.join(
+            scale_paths[min(scales)], CheckpointFilenames.EPOCH_CKPT
+        )
         os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
         # Join any in-flight save before spawning a new one so we never
         # have two concurrent writes to the same path.
         if self._ckpt_thread is not None and self._ckpt_thread.is_alive():
             self._ckpt_thread.join()
         self._ckpt_thread = threading.Thread(
-            target=torch.save,
-            args=(checkpoint, ckpt_path),
-            daemon=True,
+            target=torch.save, args=(checkpoint.to_dict(), ckpt_path), daemon=True
         )
         self._ckpt_thread.start()
         print(f"\n  Epoch checkpoint save started at epoch {epoch} (batch {batch_id})")
@@ -1130,75 +1120,28 @@ class Trainer:
         """Restore training state from a saved epoch checkpoint."""
         anchor_scale = min(scales)
         checkpoint_path = os.path.join(
-            scale_paths[anchor_scale], "epoch_checkpoint.pth"
+            scale_paths[anchor_scale], CheckpointFilenames.EPOCH_CKPT
         )
 
         if not os.path.isfile(checkpoint_path):
             return 0, 0
 
-        # Map to CPU first to avoid memory spikes on Rank 0
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        # 1. Load Checkpoint
+        ckpt = Checkpoint.load(checkpoint_path, device=DeviceType.CPU)
 
-        # 1 & 2. Restore Model Weights + Optimizer/Scheduler States
-        # New format: checkpoint["scales"][s] = {generator, discriminator, opt_g, ...}
-        # Old format: checkpoint["generator_state_dict"] / "discriminator_states" / etc.
-        if "scales" in checkpoint:
-            per_scale = cast(dict[int, dict[str, Any]], checkpoint["scales"])
-            for s in scales:
-                sd = per_scale.get(s, {})
-                if "generator" in sd:
-                    self.model.load_state_dict_compat(
-                        unwrap_ddp(self.model.generator.gens[s]),
-                        cast(dict[str, torch.Tensor], sd["generator"]),
-                    )
-                if "discriminator" in sd:
-                    self.model.load_state_dict_compat(
-                        unwrap_ddp(self.model.discriminator.discs[s]),
-                        cast(dict[str, torch.Tensor], sd["discriminator"]),
-                    )
-                if "opt_g" in sd and s in self.generator_optimizers:
-                    try:
-                        self.generator_optimizers[s].load_state_dict(sd["opt_g"])
-                    except ValueError:
-                        from tqdm import tqdm
-
-                        tqdm.write(
-                            f"  [warn] scale {s} generator optimizer state skipped "
-                            "(checkpoint format mismatch — parameter groups changed)"
-                        )
-                if "opt_d" in sd and s in self.discriminator_optimizers:
-                    self.discriminator_optimizers[s].load_state_dict(sd["opt_d"])
-                if "sch_g" in sd and s in self.generator_schedulers:
-                    self.generator_schedulers[s].load_state_dict(sd["sch_g"])
-                if "sch_d" in sd and s in self.discriminator_schedulers:
-                    self.discriminator_schedulers[s].load_state_dict(sd["sch_d"])
-        else:
-            # Legacy format saved before the per-scale refactor
-            if "generator_state_dict" in checkpoint:
-                unwrap_ddp(self.model.generator).load_state_dict(
-                    checkpoint["generator_state_dict"]
+        # 2. Restore Model Weights + Optimizer/Scheduler States
+        for s in scales:
+            if s in ckpt.scales:
+                sd = ckpt.scales[s]
+                self.model.load_state_dict_compat(
+                    unwrap_ddp(self.model.generator.gens[s]), sd.generator
                 )
-            disc_states = cast(
-                dict[int, dict[str, torch.Tensor]],
-                checkpoint.get("discriminator_states", {}),
-            )
-            for s in scales:
-                if s in disc_states:
-                    unwrap_ddp(self.model.discriminator.discs[s]).load_state_dict(
-                        disc_states[s]
-                    )
-            gen_opts = cast(dict[int, Any], checkpoint.get("generator_optimizers", {}))
-            disc_opts = cast(
-                dict[int, Any], checkpoint.get("discriminator_optimizers", {})
-            )
-            gen_schs = cast(dict[int, Any], checkpoint.get("generator_schedulers", {}))
-            disc_schs = cast(
-                dict[int, Any], checkpoint.get("discriminator_schedulers", {})
-            )
-            for s in scales:
-                if s in gen_opts:
+                self.model.load_state_dict_compat(
+                    unwrap_ddp(self.model.discriminator.discs[s]), sd.discriminator
+                )
+                if s in self.generator_optimizers:
                     try:
-                        self.generator_optimizers[s].load_state_dict(gen_opts[s])
+                        self.generator_optimizers[s].load_state_dict(sd.opt_g)
                     except ValueError:
                         from tqdm import tqdm
 
@@ -1206,12 +1149,12 @@ class Trainer:
                             f"  [warn] scale {s} generator optimizer state skipped "
                             "(checkpoint format mismatch — parameter groups changed)"
                         )
-                if s in disc_opts and s in self.discriminator_optimizers:
-                    self.discriminator_optimizers[s].load_state_dict(disc_opts[s])
-                if s in gen_schs and s in self.generator_schedulers:
-                    self.generator_schedulers[s].load_state_dict(gen_schs[s])
-                if s in disc_schs and s in self.discriminator_schedulers:
-                    self.discriminator_schedulers[s].load_state_dict(disc_schs[s])
+                if s in self.discriminator_optimizers:
+                    self.discriminator_optimizers[s].load_state_dict(sd.opt_d)
+                if s in self.generator_schedulers:
+                    self.generator_schedulers[s].load_state_dict(sd.sch_g)
+                if s in self.discriminator_schedulers:
+                    self.discriminator_schedulers[s].load_state_dict(sd.sch_d)
 
         # 2.5 Override LR if requested by launch options (handles Resume with new LR)
         for s in scales:
@@ -1241,53 +1184,42 @@ class Trainer:
                     )
 
         # 3. Restore Auxiliary Metadata
-        restored_noise_amps = cast(list[Any], checkpoint.get("noise_amps", []))
-        if restored_noise_amps:
-            self.model.noise_amps = [
-                a.to(self.device) if isinstance(a, torch.Tensor) else a
-                for a in restored_noise_amps
-            ]
+        if ckpt.noise_amps:
+            self.model.noise_amps = [a.to(self.device) for a in ckpt.noise_amps]
+        self.model.disc_step_counter = ckpt.disc_step_counter
+        self.model.extra_disc_step_counter = ckpt.extra_disc_step_counter
 
-        restored_rec_noise = cast(list[Any], checkpoint.get("rec_noise", []))
-        if restored_rec_noise:
-            self.model.rec_noise = [
-                n.to(self.device) if isinstance(n, torch.Tensor) else n
-                for n in restored_rec_noise
-            ]
+        if ckpt.rec_noise:
+            self.model.rec_noise = [n.to(self.device) for n in ckpt.rec_noise]
 
-        self.model.disc_step_counter = int(checkpoint.get("disc_step_counter", 0))
-        self.model.extra_disc_step_counter = int(
-            checkpoint.get("extra_disc_step_counter", 0)
-        )
-
-        scaler_state = checkpoint.get("grad_scaler_g")
-        scaler = self.model.grad_scaler_g
-        if scaler_state is not None and self.model.use_grad_scaler:
+        if ckpt.grad_scaler_g is not None and self.model.use_grad_scaler:
             try:
-                scaler.load_state_dict(cast(dict[str, Any], scaler_state))
+                self.model.grad_scaler_g.load_state_dict(ckpt.grad_scaler_g)
             except Exception:
                 pass
 
-        rng_state = cast(dict[str, Any], checkpoint.get("rng_state", {}))
-        if "python" in rng_state:
+        # 4. Restore RNG States
+        if "python" in ckpt.rng_state:
             try:
-                random.setstate(rng_state["python"])
+                import random
+
+                random.setstate(ckpt.rng_state["python"])
             except Exception:
                 pass
-        if "torch" in rng_state:
+        if "torch" in ckpt.rng_state:
             try:
-                torch.set_rng_state(cast(torch.Tensor, rng_state["torch"]))
+                torch.set_rng_state(cast(torch.Tensor, ckpt.rng_state["torch"]))
             except Exception:
                 pass
-        if "cuda" in rng_state and torch.cuda.is_available():
+        if DeviceType.CUDA in ckpt.rng_state and torch.cuda.is_available():
             try:
                 torch.cuda.set_rng_state_all(
-                    cast(list[torch.Tensor], rng_state["cuda"])
+                    cast(list[torch.Tensor], ckpt.rng_state[DeviceType.CUDA])
                 )
             except Exception:
                 pass
 
-        return int(checkpoint["epoch"]), int(checkpoint["batch_id"])
+        return ckpt.epoch, ckpt.batch_id
 
     def _sample_seen_batch(self) -> Batch | None:
         if not self._seen_indices_for_save:
@@ -1299,15 +1231,12 @@ class Trainer:
 
         # Single CPU transfer instead of N .item() GPU→CPU syncs.
         # Build a plain Python list of ints on CPU to avoid GPU↔CPU syncs
-        randperm_cpu = torch.randperm(len(self._seen_indices_for_save), device="cpu")[
-            :sample_count
-        ]
+        randperm_cpu = torch.randperm(
+            len(self._seen_indices_for_save), device=DeviceType.CPU
+        )[:sample_count]
         positions_cpu: list[int] = cast(list[int], randperm_cpu.tolist())  # type: ignore[assignment]
         sampled_items = [
-            cast(
-                tuple[Any, Batch],
-                self.dataset[self._seen_indices_for_save[pos]],
-            )
+            cast(tuple[Any, Batch], self.dataset[self._seen_indices_for_save[pos]])
             for pos in positions_cpu
         ]
 
@@ -1342,10 +1271,7 @@ class Trainer:
 
         return {
             idx: utils.to_device(
-                component[idx],
-                self.device,
-                channels_last=True,
-                non_blocking=True,
+                component[idx], self.device, channels_last=True, non_blocking=True
             )
             for idx in range(len(component))
         }
@@ -1421,7 +1347,11 @@ class Trainer:
             actual_batch = facies_pyramid[first_scale].shape[0] if facies_pyramid else 0
             indexes = torch.arange(
                 actual_batch,
-                device=facies_pyramid[first_scale].device if facies_pyramid else "cpu",
+                device=(
+                    facies_pyramid[first_scale].device
+                    if facies_pyramid
+                    else DeviceType.CPU
+                ),
             )
 
         if facies_pyramid is None:
@@ -1454,11 +1384,7 @@ class Trainer:
         for s in range(max_scale + 1):
             if len(self.model.rec_noise) <= s:
                 self.init_rec_noise_and_amp(
-                    s,
-                    indexes,
-                    facies_pyramid[s],
-                    wells_pyramid,
-                    seismic_pyramid,
+                    s, indexes, facies_pyramid[s], wells_pyramid, seismic_pyramid
                 )
 
         # 2. Compute reconstruction inputs for the active scales
@@ -1490,10 +1416,7 @@ class Trainer:
         _is_viz_epoch = global_step % 200 == 0 or _is_last_step
         if self._is_main_process and _is_viz_epoch:
             generated_samples = self.generate_visualization_samples(
-                scales,
-                indexes,
-                wells_pyramid,
-                seismic_pyramid,
+                scales, indexes, wells_pyramid, seismic_pyramid
             )
 
         self.handle_epoch_end(
@@ -1582,7 +1505,7 @@ class Trainer:
                 s: os.path.join(self.output_path, str(s)) for s in scales_to_train
             }
             outputs_paths: dict[int, str] = {
-                s: os.path.join(scale_paths[s], OUTPUT_FACIES_PATH)
+                s: os.path.join(scale_paths[s], ExperimentPaths.FACIES)
                 for s in scales_to_train
             }
 
@@ -1596,16 +1519,18 @@ class Trainer:
                         utils.create_dirs(outputs_paths[s])
                         # Pre-create rock-physics sub-dirs once so save_generated_outputs
                         # never needs os.makedirs on the hot visualization path.
-                        if getattr(self.options, "use_rock_physics", False):
+                        if self.options.use_rock_physics:
                             _out = outputs_paths[s]
                             utils.create_dirs(
-                                _out.replace(OUTPUT_FACIES_PATH, OUTPUT_IP_PATH)
+                                _out.replace(ExperimentPaths.FACIES, ExperimentPaths.IP)
                             )
                             utils.create_dirs(
-                                _out.replace(OUTPUT_FACIES_PATH, OUTPUT_IS_PATH)
+                                _out.replace(ExperimentPaths.FACIES, ExperimentPaths.IS)
                             )
                             utils.create_dirs(
-                                _out.replace(OUTPUT_FACIES_PATH, OUTPUT_VP_VS_PATH)
+                                _out.replace(
+                                    ExperimentPaths.FACIES, ExperimentPaths.VP_VS
+                                )
                             )
 
             if self.fine_tuning:
@@ -1626,8 +1551,7 @@ class Trainer:
             base_epoch: int = 0
 
             resume_epoch, resume_batch_id = self.load_epoch_checkpoint(
-                scales_to_train,
-                scale_paths,
+                scales_to_train, scale_paths
             )
 
             if resume_epoch > 0:
@@ -1640,10 +1564,10 @@ class Trainer:
                     )
             if resume_batch_id > 0:
                 # Optional: Verify or override base_epoch from completed_epoch.txt
-                from constants import COMPLETED_EPOCH_FILE
 
                 meta_path = os.path.join(
-                    scale_paths[min(scales_to_train)], COMPLETED_EPOCH_FILE
+                    scale_paths[min(scales_to_train)],
+                    CheckpointFilenames.COMPLETED_EPOCH,
                 )
                 if os.path.isfile(meta_path):
                     with open(meta_path) as f:
@@ -1786,20 +1710,16 @@ class Trainer:
                                 self.discriminator_schedulers[s],
                             )
                             # Record the actual last epoch completed
-                            from constants import COMPLETED_EPOCH_FILE
 
                             meta_path = os.path.join(
-                                scale_paths[s], COMPLETED_EPOCH_FILE
+                                scale_paths[s], CheckpointFilenames.COMPLETED_EPOCH
                             )
                             with open(meta_path, "w") as f:
                                 f.write(str(epoch + 1))
 
                         # Save the monolithic epoch checkpoint
                         self.save_epoch_checkpoint(
-                            scales_to_train,
-                            scale_paths,
-                            epoch + 1,
-                            0,
+                            scales_to_train, scale_paths, epoch + 1, 0
                         )
             # After processing all batches for this group, save models (rank 0 only)
             if self._is_main_process:
@@ -2039,9 +1959,7 @@ class Trainer:
         self.schedulers_step(scales, scale_metrics)
 
     def schedulers_step(
-        self,
-        scales: tuple[int, ...],
-        scale_metrics: ScaleMetrics | None = None,
+        self, scales: tuple[int, ...], scale_metrics: ScaleMetrics | None = None
     ) -> None:
         """Step the learning-rate schedulers for the provided scales.
 
@@ -2269,9 +2187,7 @@ class Trainer:
 
     @staticmethod
     def _get_metric_floats(
-        g: GeneratorMetrics,
-        d: DiscriminatorMetrics,
-        _cached: list[float] | None = None,
+        g: GeneratorMetrics, d: DiscriminatorMetrics, _cached: list[float] | None = None
     ) -> list[float]:
         """Convert metric tensors to a flat list of Python floats (single sync).
 
@@ -2345,19 +2261,11 @@ class Trainer:
             )
         for _s, _t in wells_pyramid.items():
             _dl.get().log_tensor_channel_stats(
-                f"input/wells/s{_s}",
-                "wells",
-                _t,
-                epoch,
-                expected_range=(0.0, 1.0),
+                f"input/wells/s{_s}", "wells", _t, epoch, expected_range=(0.0, 1.0)
             )
         for _s, _t in masks_pyramid.items():
             _dl.get().log_tensor_channel_stats(
-                f"input/masks/s{_s}",
-                "masks",
-                _t,
-                epoch,
-                expected_range=(0.0, 1.0),
+                f"input/masks/s{_s}", "masks", _t, epoch, expected_range=(0.0, 1.0)
             )
         for _s, _t in seismic_pyramid.items():
             norm_range: tuple[float, float] = (
@@ -2365,9 +2273,5 @@ class Trainer:
                 float(self.options.normalization_range[1]),
             )
             _dl.get().log_tensor_stats(
-                f"input/seismic/s{_s}",
-                "seismic",
-                _t,
-                epoch,
-                expected_range=norm_range,
+                f"input/seismic/s{_s}", "seismic", _t, epoch, expected_range=norm_range
             )
