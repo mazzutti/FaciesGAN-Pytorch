@@ -13,6 +13,13 @@ from scipy.signal import fftconvolve  # type: ignore[import]
 
 from config import DomainConfig, PhysicsConfig
 
+from typing import TYPE_CHECKING
+
+from constants import DZ_PIXEL
+
+if TYPE_CHECKING:
+    from physics.physics import PhysicsState
+
 
 def ricker_wavelet(
     f_peak: float, dt: float, length: float = PhysicsConfig.WAVELET_LENGTH
@@ -45,7 +52,7 @@ def ricker_wavelet(
     return term1 * term2
 
 
-def ip_to_reflectivity(ip: np.ndarray, axis: int = 0) -> np.ndarray:
+def normal_incidence_reflection(ip: np.ndarray, axis: int = 0) -> np.ndarray:
     """
     Calculate normal-incidence reflection coefficients from P-Impedance.
 
@@ -111,7 +118,7 @@ def apply_wavelet_to_ip(
         Synthetic seismogram of the same shape as IP.
     """
     # 1. Calculate reflectivity
-    rc = ip_to_reflectivity(ip, axis=axis)
+    rc = normal_incidence_reflection(ip, axis=axis)
 
     # 2. Generate wavelet
     wavelet = ricker_wavelet(f_peak, dt)
@@ -159,7 +166,7 @@ def torch_ricker_wavelet(
     return term1 * term2
 
 
-def torch_ip_to_reflectivity(ip: torch.Tensor) -> torch.Tensor:
+def ip_to_reflectivity(ip: torch.Tensor, padding_value: torch.Tensor) -> torch.Tensor:
     """
     Calculate normal-incidence reflection coefficients from P-Impedance (Torch).
 
@@ -167,6 +174,8 @@ def torch_ip_to_reflectivity(ip: torch.Tensor) -> torch.Tensor:
     ----------
     ip : torch.Tensor
         P-Impedance tensor (B, C, H, W). Assumes vertical axis is H.
+    padding_value : float
+        Value to pad the bottom of the RC tensor with.
 
     Returns
     -------
@@ -178,17 +187,16 @@ def torch_ip_to_reflectivity(ip: torch.Tensor) -> torch.Tensor:
         ip[:, :, 1:, :] + ip[:, :, :-1, :] + DomainConfig.EPSILON
     )
 
-    # Pad with a zero at the bottom to maintain shape
-    return F.pad(rc, (0, 0, 0, 1), mode="constant", value=0)
+    # Pad at the bottom to maintain shape.
+    # Broadcast the tensor to form a slice of shape (B, C, 1, W)
+    pad_slice = torch.full_like(rc[:, :, :1, :], 0.0) + padding_value
+    return torch.cat([rc, pad_slice], dim=2)
 
 
 def resample_wavelet_to_depth(
-    wavelet_t: torch.Tensor,
-    vp_mean: float | torch.Tensor,
-    dt: torch.Tensor,
-    dz_pixel: float | torch.Tensor,
-    vp_min: float | torch.Tensor = PhysicsConfig.VP_MIN,
-    fixed_size: int = PhysicsConfig.FIXED_KERNEL_SIZE,
+    vp_mean: torch.Tensor,
+    physics_state: "PhysicsState",
+    dz_pixel: torch.Tensor | None = DZ_PIXEL,
 ) -> torch.Tensor:
     """Resample a time-domain wavelet to depth using a zero-sync grid_sample approach.
 
@@ -197,42 +205,41 @@ def resample_wavelet_to_depth(
 
     Parameters
     ----------
-    wavelet_t : torch.Tensor
-        Time-domain wavelet (1D). Shape (L,).
-    vp_mean : float or torch.Tensor
+    vp_mean : torch.Tensor
         Average velocity (m/s).
-    dt : float
-        Time sampling interval (s).
-    dz_pixel : float or torch.Tensor
+    dz_pixel : torch.Tensor | None
         Depth sampling interval (m).
-    vp_min : float or torch.Tensor, optional
-        Minimum velocity to clamp vp_mean (m/s). Default is PhysicsConfig.VP_MIN.
-    fixed_size : int, optional
-        Fixed output size for the kernel buffer. Default is 256.
+    physics_state : PhysicsState
+        Object holding physical parameters and state.
 
     Returns
     -------
     torch.Tensor
         Depth-domain wavelet kernel. Shape (1, 1, fixed_size, 1).
     """
-    device = wavelet_t.device
-    dtype = wavelet_t.dtype
+    device = physics_state.wavelet_t.device
+    dtype = physics_state.wavelet_t.dtype
 
     # Ensure everything is a tensor on the correct device
-    v = torch.as_tensor(vp_mean, device=device, dtype=dtype).clamp(min=vp_min)
+    v = torch.as_tensor(vp_mean, device=device, dtype=dtype).clamp(
+        min=physics_state.vp_min
+    )
     dz = torch.as_tensor(dz_pixel, device=device, dtype=dtype)
-    wavelet_len = len(wavelet_t)
+    wavelet_len = len(physics_state.wavelet_t)
 
     # Calculate the 'zoom' factor for the grid
     # How many depth pixels would the full time-wavelet occupy?
     # target_len_z = (Vp * T_total) / (2 * dz)
-    total_time = (wavelet_len - 1) * dt
+    total_time = (wavelet_len - 1) * physics_state.wavelet_dt
     target_len_z = (v * total_time) / (2 * dz)
 
     # Create a grid of depth indices centered at zero: [- (N-1)/2, (N-1)/2]
     # We use a fixed size to avoid recompilation and syncs.
     indices = torch.linspace(
-        -(fixed_size - 1) / 2, (fixed_size - 1) / 2, steps=fixed_size, device=device
+        -(physics_state.fixed_kernel_size - 1) / 2,
+        (physics_state.fixed_kernel_size - 1) / 2,
+        steps=physics_state.fixed_kernel_size,
+        device=device,
     )
 
     # Convert depth index to normalized time coordinate for grid_sample.
@@ -243,11 +250,11 @@ def resample_wavelet_to_depth(
     # For 1D sampling from (B, C, 1, L), we use (B, 1, fixed_size, 2).
     # The x-coordinate maps to the last dimension (L).
     grid = torch.stack([grid_x, torch.zeros_like(grid_x)], dim=-1).reshape(
-        1, 1, fixed_size, 2
+        1, 1, physics_state.fixed_kernel_size, 2
     )
 
     # Input wavelet as (B, C, H, W) -> (1, 1, 1, L)
-    w_input = wavelet_t.view(1, 1, 1, -1)
+    w_input = physics_state.wavelet_t.view(1, 1, 1, -1)
 
     # Resample
     w_z: torch.Tensor = F.grid_sample(
@@ -258,8 +265,67 @@ def resample_wavelet_to_depth(
         align_corners=True,
     )
 
-    # Normalize energy
-    w_z = w_z / (torch.norm(w_z) + DomainConfig.EPSILON)  # type: ignore[assignment]
+    # Normalize energy in float32 to prevent overflow and NaN gradients.
+    # Add epsilon inside sqrt to prevent instability if the wavelet is near-zero.
+    w_ms = torch.sum(w_z.to(torch.float32) ** 2)
+    w_norm = torch.sqrt(w_ms + 1e-8)
+    w_z = (w_z.to(torch.float32) / w_norm).to(dtype)  # type: ignore[assignment]
 
     # Return as (OutC, InC, H, W) -> (1, 1, fixed_size, 1)
-    return w_z.view(1, 1, fixed_size, 1)  # type: ignore[return-value]
+    return w_z.view(1, 1, physics_state.fixed_kernel_size, 1)  # type: ignore[return-value]
+
+
+def calculate_synthetic_seismic(
+    ip_norm: torch.Tensor,
+    vp_mean: torch.Tensor,
+    dz_pixel: torch.Tensor,
+    physics_state: PhysicsState,
+) -> torch.Tensor:
+    """Perform Geophysical Modeling to produce normalized synthetic seismic.
+
+    Parameters
+    ----------
+    ip_norm : torch.Tensor
+        Normalized P-Impedance in ``norm_range``. Shape (B, 1, Z, W).
+    vp_mean : torch.Tensor
+        Mean velocity (m/s) used for dynamic wavelet resampling.
+    dz_pixel : torch.Tensor
+        Depth sampling interval (m).
+    physics_state : PhysicsState
+        Object containing all physics-related buffers and logic.
+
+    Returns
+    -------
+    torch.Tensor
+        Normalized synthetic seismic tensor in ``normalization_range``.
+    """
+
+    # 1. Denormalize IP from ``norm_range`` to physical units (e.g., GPa·m/s).
+    ip_phys = (ip_norm - physics_state.norm_min) / (
+        physics_state.norm_max - physics_state.norm_min + DomainConfig.EPSILON
+    ) * (physics_state.ip_max - physics_state.ip_min) + physics_state.ip_min
+
+    # 2. Compute Reflectivity (RC)
+    rc = ip_to_reflectivity(ip_phys, padding_value=physics_state.padding_value)
+
+    # 3. Resample Wavelet to Depth (Zero-Sync approach)
+    wavelet_z = resample_wavelet_to_depth(
+        vp_mean,
+        physics_state,
+        dz_pixel,
+    )
+
+    # 4. Synthetic Modeling (Convolution)
+    padding_z = physics_state.fixed_kernel_size // 2
+    # mypy/pytorch stubs can be picky about the padding type; cast to Any to avoid type errors
+    padding_arg: Any = (int(padding_z), 0)
+    synth = torch.nn.functional.conv2d(rc, wavelet_z, padding=padding_arg)
+
+    # 5. Normalization using Dataset Statistics, then remap to normalization_range.
+    synth = (synth - physics_state.seis_min) / (
+        physics_state.seis_max - physics_state.seis_min + DomainConfig.EPSILON
+    )
+    lo = torch.min(physics_state.norm_min, physics_state.norm_max)
+    hi = torch.max(physics_state.norm_min, physics_state.norm_max)
+    synth = synth * (hi - lo) + lo
+    return torch.clamp(synth, lo, hi)
