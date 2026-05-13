@@ -42,7 +42,7 @@ __all__ = [
 ]
 
 ZERO_SCALAR: torch.Tensor = torch.tensor(0.0)
-DZ_PIXEL: torch.Tensor = torch.tensor(5.0)
+DZ_PIXEL: torch.Tensor = torch.tensor(1.0)
 
 # Default base directory for datasets
 DEFAULT_DATA_DIR = "./data"
