@@ -42,7 +42,7 @@ class DataPrefetcher:
 
         self._stream = (
             torch.cuda.Stream(device=self.device)
-            if self.device.type == "cuda"
+            if self.device.type == torch.device("cuda").type
             else None
         )
         self.next_batch: tuple[int, Batch] | Batch | None = None
