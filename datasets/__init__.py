@@ -1,18 +1,14 @@
 """Public dataset symbols used across the project.
 
-This module exposes a small, stable public API for the `datasets` package
-so other modules can import `Batch`, the framework-specific dataset and any
-helper factories without reaching into submodules.
+This module exposes the framework-specific dataset and any helper factories.
+Common types like Batch, IDataLoader, and PyramidsBatch should be imported
+directly from `typedefs`.
 """
 
 from .dataset import PyramidsDataset
-from .pyramids_batch import Batch, IDataLoader, PyramidsBatch
 from .utils import get_global_stats
 
 __all__ = [
     "PyramidsDataset",
-    "Batch",
-    "PyramidsBatch",
-    "IDataLoader",
     "get_global_stats",
 ]

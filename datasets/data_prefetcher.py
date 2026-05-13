@@ -1,6 +1,6 @@
 """Data prefetching utility for asynchronous GPU batch preparation.
 
-This module provides the `TorchDataPrefetcher` which wraps a PyTorch `DataLoader`
+This module provides the `DataPrefetcher` which wraps a PyTorch `DataLoader`
 to overlap CPU data loading with GPU computation using a dedicated CUDA stream.
 """
 
@@ -13,7 +13,8 @@ import torch.distributed as dist
 
 import utils
 
-from .pyramids_batch import Batch, IDataLoader, PyramidsBatch
+from enums import DeviceType
+from typedefs import Batch, IDataLoader, PyramidsBatch, RawBatch
 
 
 class DataPrefetcher:
@@ -34,18 +35,18 @@ class DataPrefetcher:
         self,
         loader: IDataLoader,
         scale_indices: tuple[int, ...],
-        device: torch.device = torch.device("cpu"),
+        device: torch.device = torch.device(DeviceType.CPU),
     ) -> None:
-        self.loader: Iterator[tuple[int, Batch] | Batch] = iter(loader)
+        self.loader: Iterator[RawBatch] = iter(loader)
         self.scale_indices = scale_indices
         self.device = device
 
         self._stream = (
             torch.cuda.Stream(device=self.device)
-            if self.device.type == torch.device("cuda").type
+            if self.device.type == DeviceType.CUDA
             else None
         )
-        self.next_batch: tuple[int, Batch] | Batch | None = None
+        self.next_batch: RawBatch | None = None
         self.next_prepared: PyramidsBatch | None = None
         # List of dataset sample indices contained in the most recent batch
         # (one index per batch element). Set to None when unavailable.
@@ -60,7 +61,11 @@ class DataPrefetcher:
         return self._stream
 
     def preload(self) -> None:
-        """Preload the next batch and queue preparation on the stream."""
+        """Fetch the next raw batch from the DataLoader and queue GPU preparation.
+
+        This method triggers `prepare_batch_async` on the prefetcher's CUDA stream
+        to overlap GPU data movement with CPU computation.
+        """
         try:
             self.next_batch = next(self.loader)
         except StopIteration:
@@ -70,6 +75,7 @@ class DataPrefetcher:
 
         if self.next_batch:
             if self._stream:
+                # Run preparation on the dedicated prefetch stream
                 with torch.cuda.stream(self._stream):
                     self.next_prepared = self.prepare_batch_async(self.next_batch)
             else:
@@ -80,7 +86,7 @@ class DataPrefetcher:
     def _to_pyramid(
         self, component: tuple[torch.Tensor, ...]
     ) -> dict[int, torch.Tensor]:
-        """Move a tuple of per-scale tensors to the target device."""
+        """Move a tuple of per-scale tensors to the target device and return a dict."""
         if not component:
             return {}
         return {
@@ -108,7 +114,7 @@ class DataPrefetcher:
             return values.detach().to(self.device)
         return torch.as_tensor(values, device=self.device, dtype=torch.long)
 
-    def prepare_batch_async(self, batch: tuple[int, Batch] | Batch) -> PyramidsBatch:
+    def prepare_batch_async(self, batch: RawBatch) -> PyramidsBatch:
         """Perform batch preparation logic asynchronously.
 
         Moves facies, wells, and seismic data to the target device and
@@ -116,10 +122,11 @@ class DataPrefetcher:
 
         Parameters
         ----------
-        batch : tuple[int, Batch] | Batch
-            The raw batch from the DataLoader. It may be a ``Batch`` named
-            tuple or a ``(indices, Batch)`` pair depending on the collate
-            function.
+        batch : RawBatch
+            The raw batch from the DataLoader. It handles multiple formats:
+            - `Batch` NamedTuple
+            - `(indices, Batch)` pair
+            - Raw tuple of 4 or 5+ elements (indices + components)
 
         Returns
         -------
@@ -207,8 +214,14 @@ class DataPrefetcher:
         )
 
     def _fetch_next(self) -> PyramidsBatch | None:
-        """Return the next batch and trigger loading of the subsequent one."""
+        """Synchronize with the prefetch stream and return the prepared batch.
+
+        This method waits for the asynchronous preparation to complete on the
+        target device before returning the `PyramidsBatch` and triggering the
+        next `preload` call.
+        """
         if self._stream:
+            # Wait for the async preparation on the prefetch stream to complete
             torch.cuda.current_stream().wait_stream(self._stream)  # type: ignore
 
         batch = self.next_batch
@@ -235,7 +248,7 @@ class DataPrefetcher:
 
     def __repr__(self) -> str:
         return (
-            f"TorchDataPrefetcher(device='{self.device.type}', "
+            f"DataPrefetcher(device='{self.device.type}', "
             f"scale_indices={self.scale_indices})"
         )
 

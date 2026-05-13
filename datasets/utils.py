@@ -17,21 +17,17 @@ import torch
 from joblib import Memory  # type: ignore
 from numpy.typing import NDArray
 from PIL import Image
+from enums import DeviceType
 
-from config import DomainConfig
-from constants import DEFAULT_DATA_DIR, JOBLIB_CACHE_DIR, STATS_FILENAME, VP_MS_SCALE
+from config import (
+    DirectoryConfig,
+    CheckpointFilenames,
+    PhysicsConfig,
+    DomainConfig,
+)
 from enums import DataFiles, StatKey
-from interpolators.config import InterpolationStrategy, InterpolatorConfig
-from interpolators.neural import NeuralSmoother
-from interpolators.numeric import NumericInterpolator
-from interpolators.seismic import SeismicInterpolator
 from options import NORMALIZATION_RANGE, TrainingOptions
 from typedefs import FileLike
-
-logger = logging.getLogger(__name__)
-
-# Create a cache directory for joblib memory
-memory = Memory(JOBLIB_CACHE_DIR, verbose=0)  # type: ignore
 
 
 def generate_scales(
@@ -74,7 +70,7 @@ def generate_scales(
             raw += 1
         out_shape = [raw, raw]
 
-        num_ch = options.num_facies
+        num_ch = options.num_facies_channels
 
         if channels_last:
             shapes.append((options.batch_size, *out_shape, num_ch))
@@ -82,6 +78,12 @@ def generate_scales(
             shapes.append((options.batch_size, num_ch, *out_shape))
 
     return tuple(shapes)
+
+
+logger = logging.getLogger(__name__)
+
+# Create a cache directory for joblib memory
+memory = Memory(DirectoryConfig.JOBLIB_CACHE, verbose=0)  # type: ignore
 
 
 def load_samples(
@@ -94,14 +96,14 @@ def load_samples(
     component : DataFiles
         The data component to load (e.g., FACIES, VP, VS).
     data_dir : str, optional
-        Path to the data directory. If None, uses DEFAULT_DATA_DIR.
+        Path to the data directory. If None, uses DirectoryConfig.DEFAULT_DATA.
 
     Returns
     -------
     dict[str, NDArray[np.float32]]
         A dictionary mapping sample names (stems) to NumPy arrays.
     """
-    base_dir = Path(data_dir) if data_dir else Path(DEFAULT_DATA_DIR)
+    base_dir = Path(data_dir) if data_dir else Path(DirectoryConfig.DEFAULT_DATA)
     npz_path = base_dir / f"{component.name.lower()}.npz"
 
     if not npz_path.exists():
@@ -148,7 +150,7 @@ def get_global_stats(data_dir: str | None = None) -> dict[str, dict[str, float]]
     Parameters
     ----------
     data_dir : str, optional
-        Path to the data directory. If None, uses DEFAULT_DATA_DIR.
+        Path to the data directory. If None, uses DirectoryConfig.DEFAULT_DATA.
 
     Returns
     -------
@@ -156,8 +158,8 @@ def get_global_stats(data_dir: str | None = None) -> dict[str, dict[str, float]]
         A nested dictionary mapping component names (e.g., 'SEISMIC', 'VP') to
         dictionaries containing min, max, and mean values.
     """
-    base_dir = Path(data_dir if data_dir else DEFAULT_DATA_DIR)
-    stats_path = base_dir / STATS_FILENAME
+    base_dir = Path(data_dir if data_dir else DirectoryConfig.DEFAULT_DATA)
+    stats_path = base_dir / CheckpointFilenames.STATS
 
     if stats_path.exists():
         try:
@@ -237,9 +239,7 @@ def get_effective_global_stats(
     pmin, pmax = _compute_vp_vs_percentile_range(data_dir, low, high)
     if pmax <= pmin:
         logger.warning(
-            "Invalid robust VP/VS range [%.6f, %.6f]; using global min/max.",
-            pmin,
-            pmax,
+            "Invalid robust VP/VS range [%.6f, %.6f]; using global min/max.", pmin, pmax
         )
         return stats
 
@@ -303,12 +303,14 @@ def _derive_rock_physics_component(
     if component == DataFiles.Ip:
         if name in vp_samples and name in rho_samples:
             return np.multiply(
-                np.multiply(vp_samples[name], float(VP_MS_SCALE)), rho_samples[name]
+                np.multiply(vp_samples[name], PhysicsConfig.VP_MS_SCALE),
+                rho_samples[name],
             )
     elif component == DataFiles.Is:
         if name in vs_samples and name in rho_samples:
             return np.multiply(
-                np.multiply(vs_samples[name], float(VP_MS_SCALE)), rho_samples[name]
+                np.multiply(vs_samples[name], PhysicsConfig.VP_MS_SCALE),
+                rho_samples[name],
             )
     elif component == DataFiles.VP_VS:
         if name in vp_samples and name in vs_samples:
@@ -348,6 +350,12 @@ def _stack_and_format(
     ]
 
 
+from interpolators.config import InterpolationStrategy, InterpolatorConfig
+from interpolators.neural import NeuralSmoother
+from interpolators.numeric import NumericInterpolator
+from interpolators.seismic import SeismicInterpolator
+
+
 def _build_pyramid_batch(
     data_file: DataFiles,
     scale_list: tuple[tuple[int, ...], ...],
@@ -359,7 +367,7 @@ def _build_pyramid_batch(
     is_mask = data_file == DataFiles.MASKS
     comp_name = DataFiles.WELLS.name.lower() if is_mask else data_file.name.lower()
 
-    base_dir = Path(data_dir) if data_dir else Path(DEFAULT_DATA_DIR)
+    base_dir = Path(data_dir) if data_dir else Path(DirectoryConfig.DEFAULT_DATA)
     npz_path = base_dir / f"{comp_name}.npz"
 
     if not npz_path.exists():
@@ -427,7 +435,7 @@ def to_facies_pyramids(
         Tuple of scale descriptors produced by :func:`generate_scales`. Each
         element is a 4-tuple ``(batch, channels, height, width)``.
     data_dir : str, optional
-        Base data directory.  Defaults to :data:`DEFAULT_DATA_DIR`.
+        Base data directory.  Defaults to :data:`DirectoryConfig.DEFAULT_DATA`.
     channels_last : bool, optional
         Whether to use channels-last layout ``(N, H, W, C)`` instead of the
         default ``(N, C, H, W)``.  Defaults to ``False``.
@@ -445,7 +453,7 @@ def to_facies_pyramids(
         One tensor per scale, each with shape ``(N, C, H, W)`` (or ``(N, H, W, C)``
         when *channels_last* is ``True``) and values in *normalization_range*.
     """
-    base_dir = Path(data_dir) if data_dir else Path(DEFAULT_DATA_DIR)
+    base_dir = Path(data_dir) if data_dir else Path(DirectoryConfig.DEFAULT_DATA)
     images_path = base_dir / "facies" / "facies_images.npz"
     checkpoints_path = base_dir / "facies" / "facies_checkpoints.ptz"
 
@@ -472,7 +480,7 @@ def to_facies_pyramids(
     import torch as _torch  # local alias to keep the function import-safe under joblib
 
     all_checkpoints: dict[str, Any] = _torch.load(
-        str(checkpoints_path), map_location="cpu", weights_only=False
+        str(checkpoints_path), map_location=DeviceType.CPU, weights_only=False
     )
 
     n = len(images_f32)
@@ -581,12 +589,10 @@ def to_vp_vs_pyramids(
 
 @lru_cache(maxsize=8)
 def _compute_vp_vs_percentile_range(
-    data_dir: str | None,
-    low_percentile: float,
-    high_percentile: float,
+    data_dir: str | None, low_percentile: float, high_percentile: float
 ) -> tuple[float, float]:
     """Compute VP/VS percentile-based robust physical range."""
-    base_dir = Path(data_dir if data_dir else DEFAULT_DATA_DIR)
+    base_dir = Path(data_dir if data_dir else DirectoryConfig.DEFAULT_DATA)
     vp_vs_path = base_dir / f"{DataFiles.VP_VS.name.lower()}.npz"
 
     values: list[NDArray[np.float32]] = []
@@ -627,7 +633,7 @@ def _to_derived_pyramid(
     normalization_range: tuple[float, float] = NORMALIZATION_RANGE,
 ) -> tuple[torch.Tensor, ...]:
     """Generic helper to derive Ip, Is or Vp/Vs from Vp, Vs and Rho if missing."""
-    base_dir = Path(data_dir) if data_dir else Path(DEFAULT_DATA_DIR)
+    base_dir = Path(data_dir) if data_dir else Path(DirectoryConfig.DEFAULT_DATA)
     npz_path = base_dir / f"{component.name.lower()}.npz"
 
     if npz_path.exists():
@@ -779,7 +785,7 @@ def to_wells_pyramids(
         Tuple of scale descriptors produced by :func:`generate_scales`. Each
         element is a 4-tuple ``(batch, channels, height, width)``.
     data_dir : str, optional
-        Base data directory.  Defaults to :data:`DEFAULT_DATA_DIR`.
+        Base data directory.  Defaults to :data:`DirectoryConfig.DEFAULT_DATA`.
     channels_last : bool, optional
         Whether to use channels-last layout.  Defaults to ``False``.
     num_classes : int, optional
@@ -795,7 +801,7 @@ def to_wells_pyramids(
         and values in *normalization_range*.  Non-well columns are filled with
         ``normalization_range[0]`` (the background value).
     """
-    base_dir = Path(data_dir) if data_dir else Path(DEFAULT_DATA_DIR)
+    base_dir = Path(data_dir) if data_dir else Path(DirectoryConfig.DEFAULT_DATA)
     wells_path = base_dir / "wells.npz"
 
     if not wells_path.exists():
@@ -843,7 +849,7 @@ def to_wells_pyramids(
             well_t = facies_pyramids[scale_idx][i].clone()
 
             # Scale well column indices to target resolution
-            scaled_cols = np.unique(
+            scaled_cols: np.ndarray = np.unique(
                 np.clip((nonzero_cols * new_w / native_w).astype(int), 0, new_w - 1)
             )
 
@@ -888,7 +894,7 @@ def to_masks_pyramids(
     scale_list : tuple[tuple[int, ...], ...]
         Tuple of scale descriptors produced by :func:`generate_scales`.
     data_dir : str, optional
-        Base data directory.  Defaults to :data:`DEFAULT_DATA_DIR`.
+        Base data directory.  Defaults to :data:`DirectoryConfig.DEFAULT_DATA`.
     channels_last : bool, optional
         Whether to use channels-last layout.  Defaults to ``False``.
     num_classes : int, optional
@@ -958,9 +964,7 @@ def build_conditioning_pyramids(
             float(options.normalization_range[1]),
         )
         sp = to_seismic_pyramids(
-            scales,
-            data_dir=options.input_path,
-            normalization_range=normalization_range,
+            scales, data_dir=options.input_path, normalization_range=normalization_range
         )
         for s, se in enumerate(sp):
             if se.numel() > 0:

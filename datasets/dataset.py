@@ -18,10 +18,10 @@ from config import DomainConfig
 from options import TrainingOptions
 
 from . import utils
-from .pyramids_batch import Batch
+from typedefs import Batch, RawBatch
 
 
-class PyramidsDataset(Dataset[tuple[int, Batch] | Batch]):
+class PyramidsDataset(Dataset[RawBatch]):
     """PyTorch dataset for multiscale facies with optional conditioning.
 
     Loads precomputed multi-resolution pyramids for facies images and optional
@@ -302,7 +302,7 @@ class PyramidsDataset(Dataset[tuple[int, Batch] | Batch]):
     def __len__(self) -> int:
         return len(self.batches)
 
-    def __getitem__(self, idx: int) -> tuple[int, Batch] | Batch:
+    def __getitem__(self, idx: int) -> RawBatch:
         """Return a dataset item at the given index.
 
         Parameters
