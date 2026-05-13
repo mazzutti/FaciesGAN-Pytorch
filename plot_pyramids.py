@@ -2,14 +2,11 @@ import os
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
-import numpy as np
-import torch
 
 import utils
-from datasets.dataset import TorchPyramidsDataset
+from datasets.dataset import PyramidsDataset
 from models.palette import PALETTE_RGB
 from options import TrainingOptions
-from utils import denorm
 
 
 def main():
@@ -17,14 +14,13 @@ def main():
     opt.use_rock_physics = True
     opt.use_seismic = True
     opt.use_wells = True
-    opt.num_facies_classes = 4
-
+    opt.num_facies = 3
     # Load dataset
     print("Loading dataset...")
-    dataset = TorchPyramidsDataset(opt)
+    dataset = PyramidsDataset(opt)
 
     num_scales = len(dataset.scales)
-    num_facies = opt.num_facies_classes
+    num_facies_ch = opt.num_facies  # account for background
 
     _, axes = plt.subplots(num_scales, 6, figsize=(18, 3 * num_scales))  # type: ignore
 
@@ -42,16 +38,20 @@ def main():
         s = seismic_batch[idx].detach().cpu() if seismic_batch.shape[0] > idx else None
 
         # Split channels based on configuration
-        ip = f[num_facies] if f.shape[0] > num_facies else None
-        is_ = f[num_facies + 1] if f.shape[0] > num_facies + 1 else None
-        vpvs = f[num_facies + 2] if f.shape[0] > num_facies + 2 else None
+        ip = f[num_facies_ch] if f.shape[0] > num_facies_ch else None
+        is_ = f[num_facies_ch + 1] if f.shape[0] > num_facies_ch + 1 else None
+        vpvs = f[num_facies_ch + 2] if f.shape[0] > num_facies_ch + 2 else None
 
-        # 1. Facies (One-hot argmax for plotting)
+        # 1. Facies (RGB to discrete indices for plotting)
         ax = axes[scale, 0]
-        f_idx = torch.argmax(f[:num_facies], dim=0).numpy()
+        # Get continuous RGB and map to closest discrete palette colors
+        f_rgb = f[:num_facies_ch]
+        f_idx = utils.rgb_to_facies(f_rgb)
+
         print(
             f"Scale {scale} Facies raw range (normalized): [{f.min():.4f}, {f.max():.4f}]"
         )
+        # facies_to_rgb maps back to RGB [0,1] using PALETTE_RGB
         ax.imshow(utils.facies_to_rgb(f_idx).transpose(1, 2, 0))
         ax.set_title(f"Scale {scale} Facies")
         ax.axis("off")
@@ -62,7 +62,7 @@ def main():
             print(
                 f"Scale {scale} Ip range (normalized): [{ip.min():.4f}, {ip.max():.4f}]"
             )
-            ax.imshow(denorm(ip), cmap="magma")
+            ax.imshow(ip, cmap="magma")
         ax.set_title(f"Scale {scale} Ip")
         ax.axis("off")
 
@@ -72,7 +72,7 @@ def main():
             print(
                 f"Scale {scale} Is range (normalized): [{is_.min():.4f}, {is_.max():.4f}]"
             )
-            ax.imshow(denorm(is_), cmap="magma")
+            ax.imshow(is_, cmap="magma")
         ax.set_title(f"Scale {scale} Is")
         ax.axis("off")
 
@@ -82,7 +82,7 @@ def main():
             print(
                 f"Scale {scale} Vp/Vs range (normalized): [{vpvs.min():.4f}, {vpvs.max():.4f}]"
             )
-            ax.imshow(denorm(vpvs), cmap="viridis")
+            ax.imshow(vpvs, cmap="viridis")
         ax.set_title(f"Scale {scale} Vp/Vs")
         ax.axis("off")
 
@@ -93,16 +93,11 @@ def main():
                 f"Scale {scale} Wells raw range (normalized): [{w.min():.4f}, {w.max():.4f}]"
             )
             well_cmap = mcolors.ListedColormap(PALETTE_RGB)
-            w_denorm = denorm(w)  # (4, H, W)
-            # Collapse wells to indices
-            if isinstance(w_denorm, np.ndarray):
-                w_denorm = torch.tensor(np.asarray(w_denorm), dtype=torch.float32)
-            w_idx = torch.argmax(w_denorm, dim=0).numpy().astype(float)
-            # Mask where no well exists (sum of channels is 0 in denorm space? No, in norm space is -1)
-            # In denorm space, it's 0.
-            mask = (w_denorm.sum(dim=0) == 0).numpy()
-            w_idx[mask] = np.nan
-            ax.imshow(w_idx, cmap=well_cmap)
+            w_plot = w  # (3, H, W) RGB
+
+            # Map RGB to discrete indices (background [-1, -1, -1] automatically maps to 0 / Black)
+            w_idx = utils.rgb_to_facies(w_plot).astype(float)
+            ax.imshow(w_idx, cmap=well_cmap, vmin=0, vmax=len(PALETTE_RGB) - 1)
         ax.set_title(f"Scale {scale} Wells")
         ax.axis("off")
 

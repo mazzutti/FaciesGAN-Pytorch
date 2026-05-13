@@ -1,7 +1,7 @@
 """Resume training entrypoint.
 
 This script provides a small command-line wrapper to resume or fine-tune
-previously saved training checkpoints. It parses a few resume-related
+previously saved training checkpoints. It parses a few resume related
 arguments, restores training options from the checkpoint `options.json`,
 initializes logging, and delegates to :class:`Trainer` to continue
 training from the requested scale or checkpoint path.
@@ -21,10 +21,10 @@ from types import SimpleNamespace
 import torch
 import torch.distributed as dist
 
-from config import G_FILE, OPT_FILE, OUTPUT_FACIES_PATH
+from constants import G_FILE, OPT_FILE, OUTPUT_FACIES_PATH
 from log import init_output_logging
 from options import ResumeOptions
-from training.trainer import TorchTrainer
+from training.trainer import Trainer
 
 # from types import SimpleNamespace
 
@@ -80,13 +80,15 @@ if __name__ == "__main__":
         random.seed(options.manual_seed)
         torch.manual_seed(options.manual_seed)  # type: ignore
 
-    if arguments.fine_tuning:
+    if arguments.finetuning:
         print("Fine-Tuning: %d iter\n" % arguments.num_iter)
         options.num_iter = arguments.num_iter
 
-    import utils
-
-    device = utils.resolve_device(options.gpu_device)
+    device = torch.device(
+        f"cuda:{options.gpu_device}"
+        if torch.cuda.is_available()
+        else f"mps:{options.gpu_device}" if torch.backends.mps.is_available() else "cpu"
+    )
 
     # ── Detect distributed (torchrun) ────────────────────────────────
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -97,7 +99,7 @@ if __name__ == "__main__":
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
 
-    trainer = TorchTrainer(
+    trainer = Trainer(
         options,
         arguments.fine_tuning,
         arguments.checkpoint_path,

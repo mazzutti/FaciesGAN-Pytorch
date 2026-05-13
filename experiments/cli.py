@@ -2,8 +2,9 @@
 
 from argparse import ArgumentParser, Namespace
 
-from .constants import EmbeddingMethod, VariantConfig
 from config import PhysicsConfig
+from constants import EmbeddingMethod, VariantConfig
+from options import NORMALIZATION_RANGE
 
 
 def get_arguments() -> ArgumentParser:
@@ -66,6 +67,12 @@ def get_arguments() -> ArgumentParser:
         default=1,
         help="Interval (in epochs) between saving training state checkpoints (default: 1).",
     )
+    parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=100,
+        help="Interval (in epochs) between saving generated visualizations (default: 100).",
+    )
     parser.add_argument("--discriminator-steps", type=int, default=3)
     parser.add_argument(
         "--scale0-disc-steps-multiplier",
@@ -79,12 +86,62 @@ def get_arguments() -> ArgumentParser:
         default=1.0,
         help="Extra loss multiplier for rec and rock_physics at scale 0 (default: 1.0).",
     )
+    parser.add_argument(
+        "--scale0-padding-size",
+        type=int,
+        default=None,
+        dest="scale0_padding_size",
+        help=(
+            "Discriminator padding size override for scale 0 only. "
+            "None (default) means use --padding-size globally."
+        ),
+    )
+    parser.add_argument(
+        "--scale0-r1-gamma",
+        type=float,
+        default=0.0,
+        dest="scale0_r1_gamma",
+        help=(
+            "R1 gradient penalty weight for scale 0 discriminator. "
+            "0.0 = disabled (default). Recommended: 10.0."
+        ),
+    )
+    parser.add_argument(
+        "--scale0-disc-grad-clip",
+        type=float,
+        default=0.0,
+        dest="scale0_disc_grad_clip",
+        help=(
+            "Gradient clip norm for scale 0 discriminator parameters. "
+            "0.0 = disabled (default). Recommended: 25.0."
+        ),
+    )
+    parser.add_argument(
+        "--scale0-gp-alpha",
+        type=float,
+        default=0.0,
+        dest="scale0_gp_alpha",
+        help=(
+            "GP alpha override for scale 0 discriminator. "
+            "0.0 = use global --gradient-loss-penalty (default). "
+            "E.g. 50.0 for stronger Lipschitz pressure at scale 0."
+        ),
+    )
+    parser.add_argument(
+        "--scale0-disc-lr-factor",
+        type=float,
+        default=1.0,
+        dest="scale0_disc_lr_factor",
+        help=(
+            "Learning-rate multiplier for the scale 0 discriminator. "
+            "1.0 = same as global lr_d (default). E.g. 0.2 to slow D at s0."
+        ),
+    )
     parser.add_argument("--generator-steps", type=int, default=3)
     parser.add_argument(
-        "--facies-rec-loss-penalty",
-        "--reconstruction-loss-penalty",
+        "--rec-facies-loss-penalty",
         type=float,
-        dest="facies_rec_loss_penalty",
+        dest="rec_facies_loss_penalty",
         default=10.0,
     )
     parser.add_argument("--gamma", type=float, default=0.9)
@@ -136,12 +193,6 @@ def get_arguments() -> ArgumentParser:
         help="Number of GPUs for DDP training (default: 2).",
     )
     parser.add_argument(
-        "--start-epoch",
-        type=int,
-        default=0,
-        help="Resume training from this epoch (default: 0).",
-    )
-    parser.add_argument(
         "--no-shuffle", action="store_true", help="disable dataset shuffling"
     )
     parser.add_argument("--no-tensorboard", action="store_true")
@@ -149,6 +200,26 @@ def get_arguments() -> ArgumentParser:
         "--no-plot-outputs",
         action="store_true",
         help="Disable PNG sample plots during training.",
+    )
+    parser.add_argument(
+        "--seismic-stretch-percentile",
+        type=int,
+        choices=[95, 98, 99],
+        default=98,
+        help=(
+            "Percentile for TensorBoard seismic contrast stretch (display-only). "
+            "Allowed: 95, 98, 99 (default: 98)."
+        ),
+    )
+    parser.add_argument(
+        "--rec-skip-per-scale",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Skip rec_facies loss for scale s during the first s*N epochs in parallel "
+            "training. Default: 0 (disabled)."
+        ),
     )
     parser.add_argument(
         "--no-compile",
@@ -159,6 +230,16 @@ def get_arguments() -> ArgumentParser:
         "--compile-backend",
         action="store_true",
         help="Enable torch.compile for the generator and discriminator.",
+    )
+    parser.add_argument(
+        "--no-triton-kernels",
+        action="store_true",
+        help="Disable custom Triton kernels and use PyTorch fallbacks.",
+    )
+    parser.add_argument(
+        "--triton-kernels",
+        action="store_true",
+        help="Enable custom Triton kernels (enabled by default).",
     )
     parser.add_argument(
         "--use-wells",
@@ -175,6 +256,21 @@ def get_arguments() -> ArgumentParser:
         action="store_true",
         dest="use_rock_physics",
         help="Train with rock physics volumes (Ip, Is, Vp/Vs) as additional output channels.",
+    )
+    parser.add_argument(
+        "--vp-vs-robust-range",
+        action="store_true",
+        dest="vp_vs_robust_range",
+        help="Use percentile-based robust normalization range for VP/VS pyramids.",
+    )
+    parser.add_argument(
+        "--vp-vs-robust-percentiles",
+        type=float,
+        nargs=2,
+        metavar=("LOW", "HIGH"),
+        dest="vp_vs_robust_percentiles",
+        default=(1.0, 99.0),
+        help="Percentiles [LOW HIGH] used when --vp-vs-robust-range is enabled (default: 1 99).",
     )
     parser.add_argument(
         "--rock-physics-loss-penalty",
@@ -201,15 +297,15 @@ def get_arguments() -> ArgumentParser:
         "--elastic-loss-penalty",
         type=float,
         dest="elastic_loss_penalty",
-        default=1.0,
-        help="Scalar multiplier for the elastic-consistency loss (default: 1.0).",
+        default=0.1,
+        help="Scalar multiplier for the elastic-consistency loss (default: 0.1).",
     )
     parser.add_argument(
         "--physics-loss-penalty",
         type=float,
         dest="physics_loss_penalty",
-        default=1.0,
-        help="Scalar multiplier for the seismic physics loss (default: 1.0).",
+        default=0.1,
+        help="Scalar multiplier for the seismic physics loss (default: 0.1).",
     )
     parser.add_argument(
         "--dz-pixel",
@@ -231,6 +327,15 @@ def get_arguments() -> ArgumentParser:
         dest="wavelet_dt",
         default=PhysicsConfig.WAVELET_DT,
         help=f"Sampling interval of the wavelet in seconds (default: {PhysicsConfig.WAVELET_DT}).",
+    )
+    parser.add_argument(
+        "--normalization-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        dest="normalization_range",
+        default=NORMALIZATION_RANGE,
+        help="Normalization range [MIN MAX] used for padding midpoint defaults.",
     )
 
     # Latent space / Metrics options
@@ -285,16 +390,24 @@ def build_training_args(
         str(start_scale),
         "--checkpoint-interval",
         str(args.checkpoint_interval),
+        "--save-interval",
+        str(args.save_interval),
         "--discriminator-steps",
         str(args.discriminator_steps),
         "--scale0-disc-steps-multiplier",
         str(args.scale0_disc_steps_multiplier),
         "--scale0-loss-multiplier",
         str(args.scale0_loss_multiplier),
+        "--scale0-r1-gamma",
+        str(args.scale0_r1_gamma),
+        "--scale0-disc-grad-clip",
+        str(args.scale0_disc_grad_clip),
+        "--scale0-gp-alpha",
+        str(args.scale0_gp_alpha),
         "--generator-steps",
         str(args.generator_steps),
-        "--facies-rec-loss-penalty",
-        str(args.facies_rec_loss_penalty),
+        "--rec-facies-loss-penalty",
+        str(args.rec_facies_loss_penalty),
         "--gamma",
         str(args.gamma),
         "--lr-g",
@@ -331,10 +444,19 @@ def build_training_args(
         str(args.gradient_loss_penalty),
         "--gp-interval",
         str(args.gp_interval),
+        "--seismic-stretch-percentile",
+        str(args.seismic_stretch_percentile),
+        "--rec-skip-per-scale",
+        str(args.rec_skip_per_scale),
+        "--normalization-range",
+        str(args.normalization_range[0]),
+        str(args.normalization_range[1]),
     ]
 
     if args.manual_seed is not None:
         cmd.extend(["--manual-seed", str(args.manual_seed)])
+    if args.scale0_padding_size is not None:
+        cmd.extend(["--scale0-padding-size", str(args.scale0_padding_size)])
     if args.no_shuffle:
         cmd.append("--no-shuffle")
     if args.no_tensorboard:
@@ -345,6 +467,10 @@ def build_training_args(
         cmd.append("--no-compile")
     if args.compile_backend:
         cmd.append("--compile-backend")
+    if args.triton_kernels:
+        cmd.append("--triton-kernels")
+    if args.no_triton_kernels:
+        cmd.append("--no-triton-kernels")
 
     # Conditioning flags
     if variant.use_wells:
@@ -355,6 +481,15 @@ def build_training_args(
     # Rock physics flags
     if args.use_rock_physics:
         cmd.append("--use-rock-physics")
+        if args.vp_vs_robust_range:
+            cmd.append("--vp-vs-robust-range")
+            cmd.extend(
+                [
+                    "--vp-vs-robust-percentiles",
+                    str(args.vp_vs_robust_percentiles[0]),
+                    str(args.vp_vs_robust_percentiles[1]),
+                ]
+            )
         cmd.extend(["--rock-physics-loss-penalty", str(args.rock_physics_loss_penalty)])
         cmd.extend(
             [

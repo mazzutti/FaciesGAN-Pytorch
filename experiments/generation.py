@@ -1,15 +1,17 @@
 """Sample generation logic for experiments."""
 
 import os
-from typing import cast
 
 import numpy as np
 import torch
 
-from datasets.data_files import DataFiles
-from models.facies_gan import TorchFaciesGAN
-from models.utils import calculate_synthetic_seismic, split_facies_rp
+from constants import ZERO_SCALAR
+from enums import DataFiles
+from models.facies_gan import FaciesGAN
+from models.utils import SplitKey, split_facies_rp
 from options import TrainingOptions
+from physics.seismic import calculate_synthetic_seismic
+from training.trainer import ChannelKey
 
 
 def _generate_on_device(
@@ -19,9 +21,10 @@ def _generate_on_device(
     how_many: int,
     wells_pyramid: tuple[torch.Tensor, ...],
     seismic_pyramid: tuple[torch.Tensor, ...],
-    noise_channels: int,
+    channels: dict[ChannelKey, int],
     gen_output: str,
     start_index: int,
+    eps: float = 1e-8,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], torch.Tensor]:
     """Generate facies (and rock physics when enabled) on a single device.
 
@@ -33,11 +36,11 @@ def _generate_on_device(
     """
     import random as _rng
 
-    model = TorchFaciesGAN(options=opts, device=device, noise_channels=noise_channels)
+    model = FaciesGAN(options=opts, device=device, channels=channels)
     model.load(model_path, load_discriminator=False, load_wells=False)
 
     has_rock_physics = getattr(opts, "use_rock_physics", False)
-    facies_ch = model.num_facies_classes
+    facies_ch = model.num_facies_channels
 
     max_scale = len(model.noise_amps) - 1
     print(
@@ -64,46 +67,43 @@ def _generate_on_device(
         os.makedirs(ip_dir, exist_ok=True)
         os.makedirs(seismic_dir, exist_ok=True)
 
+    # These are constant for the entire generation run — build once outside the loop
+    well_choices = (
+        opts.wells_mask_columns
+        if hasattr(opts, "wells_mask_columns") and opts.wells_mask_columns
+        else (list(range(wells_pyramid[max_scale].shape[0])) if wells_pyramid else [0])
+    )
+    wells_dict = (
+        {i: wells_pyramid[i] for i in range(len(wells_pyramid))}
+        if wells_pyramid
+        else {}
+    )
+    seismic_dict = (
+        {i: seismic_pyramid[i] for i in range(len(seismic_pyramid))}
+        if seismic_pyramid
+        else {}
+    )
+    noise_amps = model.get_noise_amplitude(max_scale)
+
     for off in range(0, how_many, batch_size):
         chunk = min(batch_size, how_many - off)
-        # Use specific wells if provided, otherwise pick randomly from available conditioning
-        well_choices = (
-            opts.wells_mask_columns
-            if hasattr(opts, "wells_mask_columns") and opts.wells_mask_columns
-            else (
-                list(range(wells_pyramid[max_scale].shape[0])) if wells_pyramid else [0]
-            )
-        )
         mi = torch.tensor(
             [_rng.choice(well_choices) for _ in range(chunk)], device=device
         )
-        wells_dict = (
-            {i: wells_pyramid[i] for i in range(len(wells_pyramid))}
-            if wells_pyramid
-            else {}
-        )
-        seismic_dict = (
-            {i: seismic_pyramid[i] for i in range(len(seismic_pyramid))}
-            if seismic_pyramid
-            else {}
-        )
-        noises = model.get_pyramid_noise(
-            max_scale, mi, wells_dict, seismic_dict, rec=opts.rec
-        )
         with torch.no_grad():
-            for j, g in enumerate(
-                model.generator(noises, model.get_noise_amplitude(max_scale))
-            ):
+            noises = model.get_pyramid_noise(
+                max_scale, mi, wells_dict, seismic_dict, rec=opts.rec
+            )
+            for j, g in enumerate(model.generator(noises, noise_amps)):
                 # generator may be typed imprecisely; ensure we treat outputs as tensors
-                g = cast(torch.Tensor, g)
                 idx = start_index + off + j + 1
 
                 # Use unified channel splitting logic
                 split = split_facies_rp(
                     g.unsqueeze(0), num_facies=facies_ch, has_rp=has_rock_physics
                 )
-                facies_t = split["facies"]
-                rp_t = split["rock_physics"]
+                facies_t = split[SplitKey.FACIES]
+                rp_t = split[SplitKey.ROCK_PHYSICS]
 
                 # Keep one-hot probabilities for embedding analysis (high-fidelity)
                 # facies_t may be None in some configurations; skip if so
@@ -120,50 +120,46 @@ def _generate_on_device(
                     .astype(np.int64)
                 )
                 np.save(
-                    os.path.join(facies_dir, f"generated_{DataFiles.FACIES.name.lower()}_{idx}.npy"), facies_idx
+                    os.path.join(
+                        facies_dir,
+                        f"generated_{DataFiles.FACIES.name.lower()}_{idx}.npy",
+                    ),
+                    facies_idx,
                 )
 
                 if has_rock_physics and rp_t is not None:
                     # Ip is the first channel of RP
                     ip_norm = rp_t[:, 0:1, ...]
-                    # Map to [0, 1] for saving as IP array (Legacy behavior)
-                    ip_arr = (ip_norm.squeeze(0).squeeze(0).cpu().numpy() + 1.0) / 2.0
-                    ip_arr = np.clip(ip_arr, 0.0, 1.0).astype(np.float32)
+                    ip_arr = ip_norm.squeeze(0).squeeze(0).cpu().numpy()
+                    norm_min = float(opts.normalization_range[0])
+                    norm_max = float(opts.normalization_range[1])
+                    ip_arr = np.clip(
+                        ip_arr,
+                        min(norm_min, norm_max),
+                        max(norm_min, norm_max),
+                    ).astype(np.float32)
 
                     # Unified Seismic Modeling (Matches Trainer)
                     # Use model buffers for physics parameters
-                    rho_mean = cast(torch.Tensor, model.rho_mean)
-                    vp_min = cast(torch.Tensor, model.vp_min)
-                    vp_max = cast(torch.Tensor, model.vp_max)
-                    ip_max = cast(torch.Tensor, model.ip_max)
-                    ip_min = cast(torch.Tensor, model.ip_min)
-                    seis_min = cast(torch.Tensor, model.seis_min)
-                    seis_max = cast(torch.Tensor, model.seis_max)
+                    p_state = model.physics_state
+                    rho_mean = p_state.rho_mean
+                    vp_min = p_state.vp_min
+                    vp_max = p_state.vp_max
+                    ip_max = p_state.ip_max
+                    ip_min = p_state.ip_min
 
                     # Dynamic Vp estimation (Matches Trainer)
-                    ip_phys: torch.Tensor = ((ip_norm + 1) / 2) * (
-                        ip_max - ip_min
-                    ) + ip_min
+                    ip_phys: torch.Tensor = (ip_norm - norm_min) / (
+                        norm_max - norm_min + eps
+                    ) * (ip_max - ip_min) + ip_min
                     vp_phys = ip_phys / rho_mean
                     vp_mean = torch.mean(vp_phys).clamp(vp_min, vp_max)
 
-                    # Ensure wavelet dt is a tensor to match calculate_synthetic_seismic signature
-                    wavelet_dt_t = torch.tensor(
-                        opts.wavelet_dt,
-                        device=ip_norm.device,
-                        dtype=ip_norm.dtype,
-                    )
                     synth = calculate_synthetic_seismic(
                         ip_norm,
-                        model.wavelet_t,
-                        wavelet_dt_t,
-                        cast(torch.Tensor, model.dz_pyramid)[max_scale],
                         vp_mean,
-                        vp_min,
-                        ip_min,
-                        ip_max,
-                        seis_min,
-                        seis_max,
+                        p_state.dz_pyramid[max_scale],
+                        p_state,
                     )
                     syn_seismic = (
                         synth.squeeze(0).squeeze(0).cpu().numpy().astype(np.float32)
@@ -172,9 +168,17 @@ def _generate_on_device(
                     all_ip.append(ip_arr)
                     all_seismic.append(syn_seismic)
 
-                    np.save(os.path.join(ip_dir, f"generated_{DataFiles.Ip.name.lower()}_{idx}.npy"), ip_arr)
                     np.save(
-                        os.path.join(seismic_dir, f"generated_{DataFiles.SEISMIC.name.lower()}_{idx}.npy"),
+                        os.path.join(
+                            ip_dir, f"generated_{DataFiles.Ip.name.lower()}_{idx}.npy"
+                        ),
+                        ip_arr,
+                    )
+                    np.save(
+                        os.path.join(
+                            seismic_dir,
+                            f"generated_{DataFiles.SEISMIC.name.lower()}_{idx}.npy",
+                        ),
                         syn_seismic,
                     )
         all_mi.append(mi.cpu())
@@ -190,7 +194,7 @@ def generate_variant(
     device: torch.device,
     wells_pyramid: tuple[torch.Tensor, ...],
     seismic_pyramid: tuple[torch.Tensor, ...],
-    noise_channels: int,
+    channels: dict[ChannelKey, int],
     gen_output: str,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], torch.Tensor]:
     """Load a trained model and generate facies (and rock physics) samples.
@@ -233,7 +237,7 @@ def generate_variant(
                         count,
                         wells_pyramid,
                         seismic_pyramid,
-                        noise_channels,
+                        channels,
                         gen_output,
                         start,
                     )
@@ -259,7 +263,7 @@ def generate_variant(
             how_many,
             wells_pyramid,
             seismic_pyramid,
-            noise_channels,
+            channels,
             gen_output,
             0,
         )

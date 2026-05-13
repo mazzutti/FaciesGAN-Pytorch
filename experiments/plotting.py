@@ -8,15 +8,16 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 
 import utils
-
-from datasets.data_files import DataFiles
-from .constants import ExperimentVariant
+from constants import ExperimentVariant
+from enums import DataFiles
 
 
 def setup_imshow_for_kind(ax: Axes, img: np.ndarray, data_kind: str):
     """Helper to configure imshow with correct colormap and settings."""
     cmap = (
-        "RdBu" if data_kind == DataFiles.SEISMIC.name.lower() else ("viridis" if data_kind == DataFiles.Ip.name.lower() else None)
+        "RdBu"
+        if data_kind == DataFiles.SEISMIC.name.lower()
+        else ("viridis" if data_kind == DataFiles.Ip.name.lower() else None)
     )
     return ax.imshow(img, cmap=cmap, interpolation="nearest", aspect="auto")  # type: ignore
 
@@ -37,13 +38,28 @@ def get_gen_output_dir(base_output: str, variant_name: str) -> str:
 
 
 def facies_to_rgb_img(img_arr: np.ndarray | None) -> np.ndarray | None:
-    """Convert facies categorical/one-hot indices to RGB (H, W, 3)."""
+    """Convert facies categorical/one-hot indices to RGB (H, W, 3).
+
+    Handles both channels-first ``(C, H, W)`` (PyTorch / generator output)
+    and channels-last ``(H, W, C)`` (from ``torch2np`` / real data) layouts.
+    ``utils.facies_to_rgb`` expects ``(C, H, W)``.
+    """
     if img_arr is None:
         return None
-    if img_arr.ndim == 2:  # Categorical
+    if img_arr.ndim == 2:  # Categorical (H, W)
         return utils.facies_to_rgb(img_arr).transpose(1, 2, 0)
-    if img_arr.shape[-1] > 3:  # One-hot
-        return utils.facies_to_rgb(np.transpose(img_arr, (2, 0, 1))).transpose(1, 2, 0)
+    if img_arr.ndim == 3:
+        # Distinguish layout by comparing first vs last dim:
+        # channels-first (C, H, W): shape[0] is small (num_classes), shape[-1] is large (W)
+        # channels-last  (H, W, C): shape[0] is large (H), shape[-1] is small (num_classes)
+        if img_arr.shape[0] < img_arr.shape[-1]:
+            # Already (C, H, W)
+            return utils.facies_to_rgb(img_arr).transpose(1, 2, 0)
+        else:
+            # (H, W, C) — transpose to (C, H, W) first
+            return utils.facies_to_rgb(np.transpose(img_arr, (2, 0, 1))).transpose(
+                1, 2, 0
+            )
     return img_arr
 
 

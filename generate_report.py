@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -10,9 +11,15 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.image import imread
 
 # Use relative imports if needed, but since this is usually run as a script:
-from config import DATA_DIR, OUTPUTS_DIR
+from constants import DATA_DIR, OUTPUTS_DIR
 
-from experiments.constants import ExperimentVariant
+VARIANTS = ["wells_seismic", "wells_only", "seismic_only", "unconditional"]
+VARIANT_LABELS = {
+    "wells_seismic": "Wells + Seismic",
+    "wells_only": "Wells Only",
+    "seismic_only": "Seismic Only",
+    "unconditional": "Unconditional",
+}
 EMBEDDING_METHODS = ["mds", "umap", "isomap", "tsne"]
 EMBEDDING_LABELS = {"mds": "MDS", "umap": "UMAP", "isomap": "Isomap", "tsne": "t-SNE"}
 EPOCHS_MILESTONES = [100, 200, 300, 400, 500]
@@ -25,7 +32,7 @@ KEY_HPARAMS = [
     ("batch_size", "Batch size"),
     ("lr_g", "Generator LR"),
     ("lr_d", "Discriminator LR"),
-    ("reconstruction_loss_penalty", "Reconstruction weight (α)"),
+    ("rec_facies_loss_penalty", "Reconstruction weight (α)"),
     ("diversity_loss_penalty", "Diversity loss weight"),
     ("discriminator_steps", "Discriminator steps"),
     ("generator_steps", "Generator steps"),
@@ -61,7 +68,7 @@ def _add_title_page(pdf: PdfPages) -> None:
         color="gray",
     )
 
-    variant_text = "Variants: " + " · ".join([v.value.label for v in ExperimentVariant])
+    variant_text = "Variants: " + " · ".join(VARIANT_LABELS.values())
     fig.text(0.5, 0.35, variant_text, ha="center", va="center", fontsize=12)  # type: ignore
 
     pdf.savefig(fig)  # type: ignore
@@ -71,8 +78,7 @@ def _add_title_page(pdf: PdfPages) -> None:
 def _add_hyperparams_page(pdf: PdfPages, outputs_dir: Path) -> None:
     """One page with a table comparing hyperparameters across variants."""
     configs: dict[str, dict[str, float]] = {}
-    for variant in ExperimentVariant:
-        v = variant.id
+    for v in VARIANTS:
         opts_path = outputs_dir / v / "options.json"
         if opts_path.exists():
             with open(opts_path) as f:
@@ -85,12 +91,11 @@ def _add_hyperparams_page(pdf: PdfPages, outputs_dir: Path) -> None:
     ax.axis("off")
     fig.suptitle("Training Hyperparameters", fontsize=18, fontweight="bold", y=0.95)  # type: ignore
 
-    col_labels = ["Parameter"] + [v.value.label for v in ExperimentVariant if v.id in configs]
+    col_labels = ["Parameter"] + [VARIANT_LABELS[v] for v in VARIANTS if v in configs]
     rows: list[list[str]] = []
     for key, label in KEY_HPARAMS:
         row = [label]
-        for variant in ExperimentVariant:
-            v = variant.id
+        for v in VARIANTS:
             if v in configs:
                 val = configs[v].get(key, "—")
                 row.append(str(val))
@@ -124,19 +129,54 @@ def _add_hyperparams_page(pdf: PdfPages, outputs_dir: Path) -> None:
 
 def _add_seismic_data_page(pdf: PdfPages, data_dir: Path) -> None:
     """2x3 grid showing seismic data examples."""
+    images: list[np.ndarray] = []
+    titles: list[str] = []
+
+    # Legacy path: pre-rendered seismic PNGs.
     seismic_dir = data_dir / "seismic"
     seismic_files = sorted(seismic_dir.glob("xz_crossline_*.png"))
-    if not seismic_files:
-        return
-
-    images = []
-    titles = []
-    # Pick 6 evenly spaced images
-    indices = [int(i * (len(seismic_files) - 1) / 5) for i in range(6)]
-    for i in indices:
-        img_path = seismic_files[i]
-        images.append(imread(str(img_path)))  # type: ignore
-        titles.append(img_path.stem)  # type: ignore
+    if seismic_files:
+        # Pick 6 evenly spaced images
+        indices = [int(i * (len(seismic_files) - 1) / 5) for i in range(6)]
+        for i in indices:
+            img_path = seismic_files[i]
+            images.append(imread(str(img_path)))  # type: ignore
+            titles.append(img_path.stem)  # type: ignore
+    else:
+        # Current data layout: seismic stored in NPZ file.
+        seismic_npz = data_dir / "seismic.npz"
+        if seismic_npz.exists():
+            try:
+                with np.load(seismic_npz) as data:
+                    keys = sorted(data.files)
+                    if keys:
+                        n_examples = min(6, len(keys))
+                        if n_examples == 1:
+                            idxs = [0]
+                        else:
+                            idxs = [
+                                int(i * (len(keys) - 1) / (n_examples - 1))
+                                for i in range(n_examples)
+                            ]
+                        seen: set[int] = set()
+                        for i in idxs:
+                            if i in seen:
+                                continue
+                            seen.add(i)
+                            key = keys[i]
+                            arr = np.asarray(data[key]).squeeze()
+                            if arr.ndim == 3:
+                                # Accept CHW or HWC and extract first channel.
+                                if arr.shape[0] <= 4 and arr.shape[0] < arr.shape[-1]:
+                                    arr = arr[0]
+                                else:
+                                    arr = arr[..., 0]
+                            if arr.ndim != 2:
+                                continue
+                            images.append(arr)
+                            titles.append(key)
+            except Exception:
+                return
 
     if not images:
         return
@@ -207,10 +247,10 @@ def _add_image_page(
 def _add_training_progression_page(
     pdf: PdfPages,
     outputs_dir: Path,
-    variant: ExperimentVariant,
+    variant: str,
 ) -> None:
     """Show training sample progression at the final scale across epochs."""
-    sample_dir = outputs_dir / variant.id / str(FINAL_SCALE) / "real_x_generated_facies"
+    sample_dir = outputs_dir / variant / str(FINAL_SCALE) / "real_x_generated_facies"
     images = []
     epoch_labels = []
     for epoch in TRAINING_EPOCHS:
@@ -227,7 +267,7 @@ def _add_training_progression_page(
         _add_image_page(
             pdf,
             None,
-            f"{variant.value.label} — {label} (Scale {FINAL_SCALE})",
+            f"{VARIANT_LABELS[variant]} — {label} (Scale {FINAL_SCALE})",
             img_array=img,  # type: ignore
         )
 
@@ -337,8 +377,8 @@ def generate_report(
         _add_hyperparams_page(pdf, outputs_dir)
 
         # --- Per-variant sections ---
-        for variant in ExperimentVariant:
-            label = variant.value.label
+        for variant in VARIANTS:
+            label = VARIANT_LABELS[variant]
             _add_section_divider(
                 pdf,
                 label,
@@ -351,7 +391,7 @@ def generate_report(
             # Per-variant embedding comparison plots
             for method in EMBEDDING_METHODS:
                 img_path = (
-                    outputs_dir / variant.id / "generated" / f"{method}_comparison.png"
+                    outputs_dir / variant / "generated" / f"{method}_comparison.png"
                 )
                 _add_image_page(
                     pdf,

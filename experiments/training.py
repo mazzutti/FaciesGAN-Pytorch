@@ -4,25 +4,39 @@ import os
 import subprocess
 import sys
 
+from constants import AMP_FILE, COMPLETED_EPOCH_FILE, EPOCH_CKPT_FILE, G_FILE
+
+
+def _has_resumable_scale_artifacts(variant_output: str, scale: int) -> bool:
+    """Return True if a scale has real resume artifacts, not just an empty folder."""
+    scale_dir = os.path.join(variant_output, str(scale))
+    if not os.path.isdir(scale_dir):
+        return False
+
+    required_any = (
+        AMP_FILE,
+        G_FILE,
+        EPOCH_CKPT_FILE,
+        COMPLETED_EPOCH_FILE,
+    )
+    return any(os.path.isfile(os.path.join(scale_dir, f)) for f in required_any)
+
 
 def find_last_completed_scale(variant_output: str) -> int:
-    """Check how many scale checkpoints already exist in the variant folder."""
+    """Return the highest scale index with resumable checkpoint artifacts."""
     last_done = -1
-    # We look for scale folders like "0", "1", "2", etc.
-    # Note: scale folders are created by the trainer.
     for i in range(20):
-        scale_dir = os.path.join(variant_output, str(i))
-        if os.path.isdir(scale_dir):
+        if _has_resumable_scale_artifacts(variant_output, i):
             last_done = i
         else:
+            # Stop at the first missing/non-resumable scale to preserve
+            # contiguous scale progression assumptions.
             break
     return last_done
 
 
 def read_completed_epochs(variant_output: str, scale: int) -> int:
     """Read the number of completed epochs for a specific scale from disk."""
-    from config import COMPLETED_EPOCH_FILE
-
     path = os.path.join(variant_output, str(scale), COMPLETED_EPOCH_FILE)
     if os.path.isfile(path):
         try:
@@ -48,6 +62,6 @@ def train_variant(args: list[str], nproc: int) -> None:
     # We don't use shell=True for security and argument handling.
     result = subprocess.run(cmd, check=False)
     if result.returncode != 0:
-        print(f"\nVariant training failed with exit code {result.returncode}")
-        # We don't exit(1) immediately to allow the loop to try other variants
-        # if the user wants, but usually, a DDP failure is fatal for the session.
+        raise RuntimeError(
+            f"Variant training failed with exit code {result.returncode}: {' '.join(cmd)}"
+        )

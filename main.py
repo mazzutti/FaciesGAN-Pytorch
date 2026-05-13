@@ -8,16 +8,22 @@ scales can be trained simultaneously for faster overall training.
 import atexit
 import json
 import os
-import random
 import signal
+import warnings
 from argparse import ArgumentParser
 from datetime import datetime
 
 # Suppress torch.compile symbolic-shape C++ warnings (pow_by_natural etc.)
 # Must be set before importing torch.  Apex AMP (O1) is compatible with
 # torch.compile; Apex issues its own diagnostics separately.
-os.environ.setdefault("TORCH_LOGS", "-dynamo")
+os.environ.setdefault("TORCH_LOGS", "-dynamo,-inductor")
 os.environ.setdefault("TORCHDYNAMO_VERBOSE", "0")
+os.environ.setdefault("TRITON_VERBOSE", "0")
+os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "0")
+os.environ.setdefault("TORCH_COMPILE_DEBUG", "0")
+os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "16")
+os.environ.setdefault("TORCHINDUCTOR_AUTOTUNE_NUM_CHOICES_DISPLAYED", "0")
+os.environ.setdefault("TORCHINDUCTOR_MAX_AUTOTUNE_REPORT_CHOICES_STATS", "0")
 os.environ.setdefault(
     "PYTORCH_CUDA_ALLOC_CONF",
     "expandable_segments:True,max_split_size_mb:128",
@@ -39,8 +45,8 @@ os.environ.setdefault(
 # ---------------------------------------------------------------------------
 def _silence_resource_tracker() -> None:
     try:
-        from multiprocessing.resource_tracker import (
-            _resource_tracker,  # type: ignore[attr-defined]; type: ignore[import-untyped]
+        from multiprocessing.resource_tracker import (  # isort: skip
+            _resource_tracker,  # type: ignore[attr-defined]
         )
 
         if _resource_tracker._pid is not None:  # type: ignore[union-attr]
@@ -56,13 +62,40 @@ def _silence_resource_tracker() -> None:
 
 atexit.register(_silence_resource_tracker)
 
+import logging
+
 import torch
 import torch.distributed as dist
 from dateutil import tz  # type: ignore[import-untyped]
 
-from config import OPT_FILE, PhysicsConfig
+# Suppress torch.compile autotuning and Triton verbose output at the logger level
+logging.getLogger("torch._dynamo").setLevel(logging.WARNING)
+logging.getLogger("torch._functorch").setLevel(logging.WARNING)
+logging.getLogger("torch._inductor").setLevel(logging.WARNING)
+logging.getLogger("torch._inductor.select_algorithm").setLevel(logging.CRITICAL)
+logging.getLogger("torch._inductor.autotune_process").setLevel(logging.WARNING)
+logging.getLogger("torch.utils._sympy.interp").setLevel(logging.WARNING)
+logging.getLogger("triton").setLevel(logging.WARNING)
+logging.getLogger("torch.cuda").setLevel(logging.WARNING)
+
+# Silence known non-actionable compile warnings.
+warnings.filterwarnings("ignore", message=".*pow_by_natural.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+warnings.filterwarnings("ignore", message=".*save_cache_artifacts.*", category=Warning)
+
+# Only call set_logs when TORCH_LOGS env var is not already set,
+# otherwise PyTorch ignores the call and emits a warning.
+if "TORCH_LOGS" not in os.environ:
+    try:
+        torch._logging.set_logs(dynamo=logging.ERROR)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+import utils
+from constants import OPT_FILE, OUTPUTS_DIR
+from enums import AmpDtype, DdpBackend
 from log import init_output_logging
-from options import TrainingOptions
+from options import NORMALIZATION_RANGE, LrDecayUnit, TrainingOptions
 from training import Trainer
 
 
@@ -83,9 +116,7 @@ def get_arguments() -> ArgumentParser:
 
     # load, input, save configurations:
     parser.add_argument("--manual-seed", type=int, help="manual seed")
-    parser.add_argument(
-        "--output-path", help="output folder path", default="resuslts/py/"
-    )
+    parser.add_argument("--output-path", help="output folder path", default=OUTPUTS_DIR)
     parser.add_argument(
         "--output-fullpath",
         help="Set exact output path (overrides automatic timestamp prefix).",
@@ -99,19 +130,11 @@ def get_arguments() -> ArgumentParser:
         default=0,
     )
     parser.add_argument(
-        "--start-epoch",
+        "--num-facies",
         type=int,
-        help="epoch to resume training from within the current scale group (default: 0)",
-        default=0,
-    )
-    parser.add_argument(
-        "--num-facies-classes",
-        "--facies-channels",
-        "--num-img-channels",
-        type=int,
-        dest="num_facies_classes",
+        dest="num_facies",
         help="number of one-hot encoded facies classes (channels)",
-        default=4,
+        default=3,
     )
     parser.add_argument(
         "--noise-channels",
@@ -139,21 +162,36 @@ def get_arguments() -> ArgumentParser:
     # networks hyperparameters:
     parser.add_argument(
         "--num-features",
+        dest="num_feature",
         type=int,
         help="initial number of features in each layer",
         default=32,
     )
     parser.add_argument(
         "--min-num-features",
+        dest="min_num_feature",
         type=int,
         help="minimal number of features in each layer",
         default=32,
     )
     parser.add_argument("--kernel-size", type=int, help="kernel size", default=3)
     parser.add_argument(
-        "--num-layers", type=int, help="number of layers in each scale", default=5
+        "--num-layers",
+        dest="num_layer",
+        type=int,
+        help="number of layers in each scale",
+        default=5,
     )
-    parser.add_argument("--stride", help="stride", default=1)
+    parser.add_argument("--stride", type=int, help="stride", default=1)
+    parser.add_argument(
+        "--normalization-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        dest="normalization_range",
+        help="Normalization range [MIN MAX] used to derive default padding midpoint.",
+        default=NORMALIZATION_RANGE,
+    )
     parser.add_argument("--padding-size", type=int, help="net pad size", default=0)
 
     # pyramid parameters:
@@ -164,7 +202,7 @@ def get_arguments() -> ArgumentParser:
         "--min-noise-amp",
         type=float,
         help="minimum noise amplitude floor for diversity",
-        default=0.5,
+        default=0.1,
     )
     parser.add_argument(
         "--scale0-noise-amp",
@@ -211,8 +249,8 @@ def get_arguments() -> ArgumentParser:
     parser.add_argument(
         "--lr-decay-unit",
         type=str,
-        choices=["epoch", "step", "batch"],
-        default="epoch",
+        choices=[u.value for u in LrDecayUnit],
+        default=LrDecayUnit.EPOCH,
         help="unit for --lr-decay: 'epoch' decays per-batch epoch count (reset each batch), "
         "'step' decays by global optimisation step across all batches, "
         "'batch' decays once every N dataset batches (schedulers accumulate across batches, default: epoch)",
@@ -263,16 +301,74 @@ def get_arguments() -> ArgumentParser:
         help="Extra loss multiplier applied to rec and rock physics losses at scale 0 (default: 1.0).",
     )
     parser.add_argument(
+        "--scale0-padding-size",
+        type=int,
+        default=None,
+        dest="scale0_padding_size",
+        help=(
+            "Discriminator padding size override for scale 0 only. "
+            "None (default) means use --padding-size globally. "
+            "Set to 1 to give scale 0 full-resolution D output (12x12 "
+            "vs 2x2 with padding=0), fixing WGAN-GP undercoverage."
+        ),
+    )
+    parser.add_argument(
+        "--scale0-r1-gamma",
+        type=float,
+        default=0.0,
+        dest="scale0_r1_gamma",
+        help=(
+            "R1 gradient penalty weight for scale 0 discriminator "
+            "(Mescheder et al. 2018). Penalises ||∇D(real)||² at real "
+            "samples. 0.0 = disabled (default). Recommended: 10.0."
+        ),
+    )
+    parser.add_argument(
+        "--scale0-disc-grad-clip",
+        type=float,
+        default=0.0,
+        dest="scale0_disc_grad_clip",
+        help=(
+            "Gradient clip norm for scale 0 discriminator parameters. "
+            "Applied after backward() but before optimizer.step(), "
+            "independently of WGAN-GP. 0.0 = disabled (default). "
+            "Recommended: 25.0 to tame s0 exploding gradients."
+        ),
+    )
+    parser.add_argument(
+        "--scale0-gp-alpha",
+        type=float,
+        default=0.0,
+        dest="scale0_gp_alpha",
+        help=(
+            "Gradient penalty alpha override for scale 0 discriminator. "
+            "0.0 = use global --gradient-loss-penalty (default). "
+            "Set > 0 to apply a higher GP weight at scale 0, "
+            "e.g. 50.0 to suppress s0 Lipschitz violations."
+        ),
+    )
+    parser.add_argument(
+        "--scale0-disc-lr-factor",
+        type=float,
+        default=1.0,
+        dest="scale0_disc_lr_factor",
+        help=(
+            "Learning-rate multiplier for the scale 0 discriminator. "
+            "1.0 = same as global --lr-d (default). "
+            "Set < 1 to slow down D at s0 so G can keep up, "
+            "e.g. 0.2 when Wasserstein distance at s0 grows unboundedly."
+        ),
+    )
+    parser.add_argument(
         "--gradient-loss-penalty",
         type=float,
         help="gradient penalty weight",
-        default=0.1,
+        default=10.0,
     )
     parser.add_argument(
-        "--facies-rec-loss-penalty",
-        "--reconstruction-loss-penalty",
+        "--rec-facies-loss-penalty",
         type=float,
-        dest="facies_rec_loss_penalty",
+        dest="rec_facies_loss_penalty",
         help="reconstruction loss weight",
         default=10,
     )
@@ -296,6 +392,7 @@ def get_arguments() -> ArgumentParser:
     parser.add_argument(
         "--diversity-loss-penalty",
         type=float,
+        dest="diversity_loss_penalty",
         help="additional scalar multiplier applied to the generator diversity loss (default: 1.0)",
         default=1.0,
     )
@@ -310,7 +407,6 @@ def get_arguments() -> ArgumentParser:
     )
     parser.add_argument(
         "--checkpoint-interval",
-        "--checkpoint_interval",
         type=int,
         help="Interval (in epochs) between saving training state checkpoints for resume (default: 1).",
         default=1,
@@ -377,14 +473,27 @@ def get_arguments() -> ArgumentParser:
 
     parser.add_argument(
         "--use-rock-physics",
-        "--use-rock_physics",
         action="store_true",
         dest="use_rock_physics",
         help="Train with rock physics volumes (Ip, Is, Vp/Vs) as additional output channels.",
     )
     parser.add_argument(
+        "--vp-vs-robust-range",
+        action="store_true",
+        dest="vp_vs_robust_range",
+        help="Use percentile-based robust normalization range for VP/VS pyramids.",
+    )
+    parser.add_argument(
+        "--vp-vs-robust-percentiles",
+        type=float,
+        nargs=2,
+        metavar=("LOW", "HIGH"),
+        dest="vp_vs_robust_percentiles",
+        default=(1.0, 99.0),
+        help="Percentiles [LOW HIGH] used when --vp-vs-robust-range is enabled (default: 1 99).",
+    )
+    parser.add_argument(
         "--rock-physics-loss-penalty",
-        "--rock_physics-loss-penalty",
         type=float,
         dest="rock_physics_loss_penalty",
         default=1.0,
@@ -408,15 +517,15 @@ def get_arguments() -> ArgumentParser:
         "--elastic-loss-penalty",
         type=float,
         dest="elastic_loss_penalty",
-        default=1.0,
-        help="Scalar multiplier for the elastic-consistency loss (default: 1.0).",
+        default=0.1,
+        help="Scalar multiplier for the elastic-consistency loss (default: 0.1).",
     )
     parser.add_argument(
         "--physics-loss-penalty",
         type=float,
         dest="physics_loss_penalty",
-        default=1.0,
-        help="Scalar multiplier for the seismic physics loss (default: 1.0).",
+        default=0.1,
+        help="Scalar multiplier for the seismic physics loss (default: 0.1).",
     )
     parser.add_argument(
         "--dz-pixel",
@@ -429,15 +538,15 @@ def get_arguments() -> ArgumentParser:
         "--wavelet-f-peak",
         type=float,
         dest="wavelet_f_peak",
-        default=PhysicsConfig.WAVELET_F_PEAK,
-        help=f"Peak frequency of the Ricker wavelet in Hz (default: {PhysicsConfig.WAVELET_F_PEAK}).",
+        default=8.0,
+        help="Peak frequency of the Ricker wavelet in Hz (default: 8.0).",
     )
     parser.add_argument(
         "--wavelet-dt",
         type=float,
         dest="wavelet_dt",
-        default=PhysicsConfig.WAVELET_DT,
-        help=f"Wavelet sampling interval in seconds (default: {PhysicsConfig.WAVELET_DT}).",
+        default=0.001,
+        help="Wavelet sampling interval in seconds (default: 0.001).",
     )
 
     parser.add_argument(
@@ -455,7 +564,27 @@ def get_arguments() -> ArgumentParser:
         action="store_true",
         help="disable generated output visualizations (facies and rock physics) during training",
     )
-
+    parser.add_argument(
+        "--seismic-stretch-percentile",
+        type=int,
+        choices=[95, 98, 99],
+        default=98,
+        help=(
+            "Percentile for TensorBoard seismic contrast stretch (display-only). "
+            "Allowed: 95, 98, 99 (default: 98)."
+        ),
+    )
+    parser.add_argument(
+        "--rec-skip-per-scale",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "In parallel multi-scale training, skip the rec_facies loss for scale s "
+            "during the first s*N epochs. Gives lower scales time to stabilize before "
+            "higher scales depend on their outputs. Default: 0 (disabled)."
+        ),
+    )
     parser.add_argument(
         "--no-compile",
         action="store_true",
@@ -484,8 +613,8 @@ def get_arguments() -> ArgumentParser:
     parser.add_argument(
         "--amp-dtype",
         type=str,
-        choices=["fp16", "bf16"],
-        default="bf16",
+        choices=[u.value for u in AmpDtype],
+        default=AmpDtype.BF16,
         help=(
             "AMP compute dtype for CUDA autocast. "
             "Use bf16 on Ampere+ for improved stability/perf tradeoff."
@@ -585,8 +714,7 @@ def main() -> None:
             options.gradient_checkpointing = False
 
     if options.manual_seed is not None:
-        random.seed(options.manual_seed)
-        torch.manual_seed(options.manual_seed)  # type: ignore
+        utils.set_seed(options.manual_seed)
 
     # ── Detect distributed (torchrun) ────────────────────────────────
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -609,26 +737,24 @@ def main() -> None:
         # rather than hanging the whole job.
         os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
 
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        device_id = (
-            torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else None
-        )
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Distributed training requires CUDA. No CUDA devices found."
+            )
+        device_id = torch.device(f"cuda:{local_rank}")
         # Use a 5-minute timeout so a DDP desync surfaces as an error
         # instead of hanging silently for the default 30 minutes.
         from datetime import timedelta
 
         dist.init_process_group(
-            backend=backend,
+            backend=DdpBackend.NCCL,
             device_id=device_id,
             timeout=timedelta(minutes=15),
         )
         rank = dist.get_rank()
-        if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
-            torch.cuda.set_per_process_memory_fraction(0.90)  # type: ignore
-            device = torch.device(f"cuda:{local_rank}")
-        else:
-            device = torch.device("cpu")
+        torch.cuda.set_device(local_rank)
+        torch.cuda.set_per_process_memory_fraction(0.90)  # type: ignore
+        device = torch.device(f"cuda:{local_rank}")
         # Keep model initialisation deterministic (same weights on every rank);
         # the DistributedSampler gives each rank different data.
         if options.manual_seed is not None:
@@ -659,7 +785,7 @@ def main() -> None:
     )
 
     if is_main:
-        os.makedirs(options.output_path, exist_ok=True)
+        utils.create_dirs(options.output_path)
 
         # Save the input parameters options
         with open(os.path.join(options.output_path, OPT_FILE), "w") as file:
@@ -667,11 +793,17 @@ def main() -> None:
 
         init_output_logging(os.path.join(options.output_path, "log.txt"))
 
+    logging.basicConfig(
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        level=logging.WARNING,  # root stays at WARNING to suppress filelock/inductor spam
+        force=True,  # override any handlers already installed by torchrun/PyTorch
+    )
+
     # Synchronise so non-zero ranks wait for rank 0 to create output dir
     if distributed:
         dist.barrier()  # type: ignore[arg-type]
     if not is_main:
-        os.makedirs(options.output_path, exist_ok=True)
+        utils.create_dirs(options.output_path)
 
     if is_main:
         print("\n" + "=" * 60)
@@ -709,26 +841,6 @@ def main() -> None:
             except Exception:
                 pass
 
-            # Silence harmless torch.compile symbolic-shape warnings.
-
-            # The pow_by_natural warnings come from torch.utils._sympy.interp
-            # logger at WARNING level during shape guard compilation.
-            import logging
-            import warnings
-
-            logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
-            logging.getLogger("torch._functorch").setLevel(logging.ERROR)
-            logging.getLogger("torch._inductor").setLevel(logging.ERROR)
-            logging.getLogger("torch.utils._sympy.interp").setLevel(logging.ERROR)
-            warnings.filterwarnings("ignore", message=".*pow_by_natural.*")
-            warnings.filterwarnings("ignore", category=UserWarning, module="torch")
-            # Only call set_logs when TORCH_LOGS env var is not already set,
-            # otherwise PyTorch ignores the call and emits a warning.
-            if "TORCH_LOGS" not in os.environ:
-                try:
-                    torch._logging.set_logs(dynamo=logging.ERROR)  # type: ignore[attr-defined]
-                except Exception:
-                    pass
     except Exception:
         # If backend tuning isn't supported on this build, continue without failing
         pass
@@ -743,6 +855,18 @@ def main() -> None:
     trainer = Trainer(options, device=device, distributed=distributed)
     if is_main:
         print("Using Torch backend for training.")
+
+    # Load previously saved Inductor cache artifacts to skip recompilation.
+    if getattr(options, "compile_backend", False):
+        try:
+            cache_path = os.path.join(options.output_path, "inductor_cache.bin")
+            if os.path.isfile(cache_path):
+                torch.compiler.load_cache_artifacts(cache_path)  # type: ignore[attr-defined]
+                if is_main:
+                    print(f"Loaded Inductor cache from: {cache_path}")
+        except Exception as e:
+            if is_main:
+                print(f"Warning: could not load inductor cache artifacts: {e}")
 
     # Resume from checkpoint when starting from a non-zero scale
     if options.start_scale > 0:
@@ -807,7 +931,7 @@ def main() -> None:
                 alloc = torch.cuda.memory_allocated(dev) / (1024**3)
                 reserved = torch.cuda.memory_reserved(dev) / (1024**3)
                 peak = torch.cuda.max_memory_allocated(dev) / (1024**3)
-                total = torch.cuda.get_device_properties(dev).total_mem / (1024**3)  # type: ignore
+                total = torch.cuda.get_device_properties(dev).total_memory / (1024**3)  # type: ignore
                 print(
                     f"{rank_label}CUDA memory: "
                     f"alloc={alloc:.2f}G  reserved={reserved:.2f}G  "
@@ -937,6 +1061,17 @@ def main() -> None:
         print("\n" + "=" * 60)
         print("TRAINING COMPLETED SUCCESSFULLY")
         print("=" * 60 + "\n")
+
+    # Persist torch.compile Inductor cache artifacts so the next run skips
+    # recompilation.  Only rank 0 writes; only when compile was active.
+    if is_main and getattr(options, "compile_backend", False):
+        try:
+            torch.compiler.save_cache_artifacts()
+        except Exception as e:
+            print(
+                f"Warning: could not save inductor cache artifacts: {e}",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":
