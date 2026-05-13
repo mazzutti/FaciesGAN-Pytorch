@@ -64,8 +64,8 @@
 				},
 				"background": {
 					"activeOnStart": true,
-					"beginsPattern": ".",
-					"endsPattern": "TensorBoard is ready"
+					"beginsPattern": "TensorBoard launching...",
+					"endsPattern": "TensorBoard .* at http://"
 				}
 			},
 			"presentation": {

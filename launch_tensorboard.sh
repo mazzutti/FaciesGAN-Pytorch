@@ -4,7 +4,7 @@
 # Usage: ./launch_tensorboard.sh [logdir] [port]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOGDIR="${1:-$SCRIPT_DIR/outputs}"
+LOGDIR="${1:-$SCRIPT_DIR/outputs/experiments}"
 PORT="${2:-6006}"
 
 if [[ ! -d "$LOGDIR" ]]; then
@@ -18,7 +18,7 @@ pgrep -f bin/tensorboard | while read pid; do
 done
 sleep 0.5
 
-echo "TensorBoard is ready"
+echo "TensorBoard launching..."
 echo "   Log directory: $LOGDIR"
 echo "   Port: $PORT"
 echo "   URL: http://localhost:$PORT"

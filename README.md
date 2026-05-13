@@ -1,630 +1,435 @@
-# FaciesGAN
+# FaciesGAN: Conditional SinGAN for Transversal Geological Facies Prediction
 
-> **Multi-Scale Generative Adversarial Network for Physics-Informed Geological Facies Prediction**
+## 📌 Overview
+This repository implements FaciesGAN to generate transversal geological facies realizations, conditioned on well log data. The model learns geological patterns from an input training set and generates high-resolution facies images that honor well constraints using a multi-scale progressive GAN architecture.
 
-FaciesGAN is a research-grade deep learning framework that synthesizes high-resolution 2D geological facies realizations conditioned on well-log data and seismic rock-physics attributes. It is built on a pure-PyTorch, numeric-only pipeline, supports multi-GPU distributed training (DDP/NVLink), and ships with a complete ablation-study experiment runner.
+## ✨ Key Features
+* **Multi-scale Progressive Training**: FaciesGAN architecture with pyramid-based learning from coarse to fine scales
+* **Parallel Multi-Scale Training**: Train multiple pyramid scales simultaneously to reduce wall-clock time
+* **Well Conditioning**: Incorporates well log data as constraints to ensure geological realism
+* **Neural Interpolation**: Advanced interpolators (nearest, neural, well-based) for smooth multi-scale representations
+* **Color Palette Encoding**: Efficient RGB-to-label conversion for categorical facies data
+* **Cached Pyramid Generation**: Performance-optimized with joblib caching for faster training
+* **Type-Safe Codebase**: Full type hints with Pylance strict mode for enhanced code quality
+* **Flexible Data Management**: Centralized file handling through DataFiles enum
 
----
-
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Key Features](#key-features)
-3. [Architecture](#architecture)
-4. [Repository Layout](#repository-layout)
-5. [Installation](#installation)
-6. [Data Preparation](#data-preparation)
-7. [Training](#training)
-   - [Single-GPU](#single-gpu-training)
-   - [Multi-GPU (DDP)](#multi-gpu-ddp-training)
-   - [Resuming & Fine-Tuning](#resuming--fine-tuning)
-   - [Full Training Options Reference](#full-training-options-reference)
-8. [Monitoring with TensorBoard](#monitoring-with-tensorboard)
-9. [Generating Realizations](#generating-realizations)
-10. [Reproducing the Experiments](#reproducing-the-experiments)
-    - [Conditioning Ablation Suite](#conditioning-ablation-suite)
-    - [Experiment Options Reference](#experiment-options-reference)
-11. [Output Structure](#output-structure)
-12. [Performance Tips](#performance-tips)
-13. [Citation](#citation)
-14. [License](#license)
-
----
-
-## Overview
-
-FaciesGAN learns the spatial statistics of geological facies from training images and generates new, statistically consistent realizations at multiple resolutions. The model operates on a **multi-scale pyramid** of numeric (`.npz`) data instead of raw images, enabling:
-
-* Lossless, quantization-free representation of discrete facies classes and continuous physical properties.
-* Physics-informed training with seismic rock-physics constraints (Acoustic Impedance **Ip**, Shear Impedance **Is**, Vp/Vs ratio).
-* Well-log conditioning that spatially constrains the generator to honor borehole observations.
-
----
-
-## Key Features
-
-| Feature | Description |
-|---|---|
-| **Numeric-Only Pipeline** | All I/O uses `.npz` tensors — no PNG round-trips or quantization artifacts |
-| **Multi-Scale Progressive Growth** | Coarse-to-fine pyramid training from 12 px up to 1024 px |
-| **Parallel Scale Groups** | Train multiple pyramid scales simultaneously for faster convergence |
-| **SPADE Conditioning** | Spatially-Adaptive Denormalization injects well-log and rock-physics constraints |
-| **One-Hot Facies Encoding** | Sharp class boundaries and correct categorical distributions |
-| **Rock-Physics Branch** | Generator predicts Ip, Is, Vp/Vs channels alongside facies |
-| **Physics Loss** | Synthetic seismic forward-modeling loss (Ricker wavelet convolution) |
-| **DDP / NVLink Support** | Full `torchrun` multi-GPU training with NCCL |
-| **`torch.compile` Support** | Inductor backend for Ampere+ GPU acceleration |
-| **AMP Training** | Mixed-precision with `bf16`/`fp16` autocast |
-| **Gradient Checkpointing** | Reduces peak VRAM at the cost of ~30 % extra compute |
-| **TensorBoard Logging** | Per-scale loss curves, facies grids, and rock-physics visualizations |
-| **Ablation Runner** | Automated 4-variant conditioning experiment with embedding analysis |
-
----
-
-## Architecture
-
-```
-                        Noise (z)
-                           │
-                    ┌──────▼──────┐
-  Wells Pyramid ───►│             │
-                    │  Generator  │◄──── SPADE Normalization
-Seismic Pyramid ───►│  (Multi-    │      (wells + rock-physics)
-                    │   Scale)    │
-                    └──────┬──────┘
-                           │
-              ┌────────────┴───────────────┐
-              │                            │
-       Facies Output               Rock-Physics Output
-     (one-hot, C classes)         (Ip  │  Is  │  Vp/Vs)
-              │                            │
-       ┌──────▼──────┐             ┌──────▼──────┐
-       │ PatchGAN    │             │  Physics    │
-       │ Discrimin.  │             │  Loss (SEG) │
-       └─────────────┘             └─────────────┘
-```
+## 🏗️ Architecture Components
 
 ### Core Modules
+* **`models/`** - Model code. The project uses a framework-agnostic base plus framework-specific
+    implementations under `models/torch/` (PyTorch).
+    - `models/facies_gan.py` - Unified `FaciesGAN` class containing GAN architecture and training logic.
+    - `models/torch/` - PyTorch adapter implementations: `generator.py`, `discriminator.py`,
+        `facies_gan.py`, and helper `types.py`
+    - Custom layers and utilities are colocated with the framework adapter to keep
+        framework-specific logic separated from the core orchestration.
+* **`interpolators/`** - Multi-scale interpolation strategies:
+  - `BaseInterpolator`: Common functionality for all interpolators
+  - `NearestInterpolator`: Fast nearest-neighbor interpolation
+  - `NeuralSmoother`: Neural network-based smooth interpolation
+  - `WellInterpolator`: Well-conditioned interpolation
+* **`color_encoder.py`** - Palette-based RGB ↔ label conversion
+* **`gen_pyramids.py`** - Cached pyramid generation utilities
+* **`ops.py`** - Core operations: image loading, noise generation, device management
+* **`data_files.py`** - Centralized data path management via DataFiles enum
 
-| Module | Description |
-|---|---|
-| `models/facies_gan.py` | GAN orchestration, noise amplitude scheduling, multi-scale forward pass |
-| `models/generator.py` | Multi-scale SPADE generator |
-| `models/discriminator.py` | Multi-scale PatchGAN discriminator |
-| `models/custom_layer.py` | ConvBlocks, SPADE, Minibatch StdDev |
-| `models/base.py` | Loss functions: WGAN-GP, Dice, Well, TV, Elastic, Physics |
-| `training/trainer.py` | Parallel group trainer — coordinates scale groups and DDP ranks |
-| `datasets/dataset.py` | `TorchPyramidsDataset` — multi-scale numeric pyramid loader |
-| `datasets/data_prefetcher.py` | Non-blocking GPU data prefetcher |
-| `interpolators/` | Nearest (categorical), rock-physics (Lanczos + Backus), neural smoother |
-| `physics/` | Ricker wavelet synthesis, rock-physics forward model |
-| `tensorboard_visualizer.py` | Async background plotter for TensorBoard |
-| `experiments/` | 4-variant ablation runner with manifold embedding analysis |
-
----
-
-## Repository Layout
-
+### Data Structure
 ```
 FaciesGAN/
-├── data/                        # Training data (npz)
-│   ├── facies.npz               # Categorical facies (N, H, W)
-│   ├── wells.npz                # Well-log conditioning masks
-│   ├── vp.npz                   # P-wave velocity volume
-│   ├── vs.npz                   # S-wave velocity volume
-│   ├── rho.npz                  # Density volume
-│   ├── seismic.npz              # Observed seismic volume
-│   └── stats.json               # Per-channel normalization statistics
-│
-├── models/                      # PyTorch model definitions
-├── datasets/                    # Data loading & prefetching
-├── training/                    # Trainer & DDP orchestration
-├── interpolators/               # Multi-scale resampling strategies
-├── physics/                     # Seismic forward-modeling
-├── experiments/                 # Ablation runner & plotting
-│
-├── main.py                      # ★ Training entry point
-├── resume.py                    # Resume / fine-tune from checkpoint
-├── gen_facies.py                # ★ Post-training generation script
-├── generate_report.py           # Report generation helper
-├── plot_pyramids.py             # Pyramid visualization utility
-├── options.py                   # TrainingOptions & ResumeOptions dataclasses
-├── config.py                    # Global constants (paths, filenames)
-├── tensorboard_visualizer.py    # Async TensorBoard helper
-├── background_workers.py        # Thread-pool plot submission
-├── launch_tensorboard.sh        # TensorBoard launcher script
-├── requirements.txt             # Runtime dependencies
-└── requirements-dev.txt         # Development / lint dependencies
-```
+├── data/
+│   ├── facies/              # Facies images (.png) and tensors (.pt)
+│   ├── wells/               # Well log data and mapping (.npz)
+│   └── seismic/             # Seismic images (.png)
+├── interpolators/
+│   ├── base.py              # Base interpolator class
+│   ├── config.py            # Interpolator configuration
+│   ├── nearest.py           # Nearest-neighbor interpolator
+│   ├── neural.py            # Neural network interpolator
+│   └── well.py              # Well-conditioned interpolator
+├── models/
+│   ├── facies_gan.py        # Unified FaciesGAN implementation (PyTorch)
+│   ├── generator.py         # Multi-scale generator (PyTorch)
+│   ├── discriminator.py     # Multi-scale discriminator (PyTorch)
+│   ├── custom_layer.py      # Custom layers for SinGAN architecture
+│   └── utils.py             # Model-specific utilities and helpers
+├── results/                 # Training outputs and generated facies
+├── train.py                 # Training script
+├── gen_facies.py            # Facies generation script
+├── main.py                  # Main entry point
+├── dataset.py               # Dataset loading and preprocessing
+├── color_encoder.py         # Color palette encoder
+├── gen_pyramids.py          # Pyramid generation with caching
+├── ops.py                   # Utility operations
+├── data_files.py            # File path management
+├── options.py               # Training and generation options
+└── requirements.txt         # Python dependencies
+````
 
----
-
-## Installation
+## 🚀 Installation
 
 ### Prerequisites
-
-* **Python** ≥ 3.10
-* **PyTorch** ≥ 2.0 with CUDA support
-* **NVIDIA GPU** — 12 GB VRAM minimum; 24 GB+ recommended for parallel-scale training
+* Python 3.10+
+* PyTorch with CUDA/MPS support (for GPU acceleration)
+* 8GB+ GPU memory recommended for training
 
 ### Setup
-
-```bash
+```sh
 git clone https://github.com/mazzutti/FaciesGAN.git
 cd FaciesGAN
-
-# Create a virtual environment (recommended)
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install runtime dependencies
 pip install -r requirements.txt
-
-# (Optional) Install development / type-checking tools
-pip install -r requirements-dev.txt
 ```
 
-> **Note on NVIDIA Apex**: `requirements.txt` lists `nvidia-apex`. If your environment does not support it, remove the line and training will fall back to native PyTorch AMP. Apex is used only for additional optimizer fused kernels.
-
----
-
-## Data Preparation
-
-FaciesGAN expects data in the `data/` directory as compressed NumPy archives. The expected files and shapes are:
-
-| File | Shape | Description |
-|---|---|---|
-| `facies.npz` | `(N, H, W)` uint8 | Integer class labels (0 … C-1) |
-| `wells.npz` | `(N, C, H, W)` float32 | One-hot well-log conditioning masks |
-| `vp.npz` | `(N, H, W)` float32 | P-wave velocity (m/s) |
-| `vs.npz` | `(N, H, W)` float32 | S-wave velocity (m/s) |
-| `rho.npz` | `(N, H, W)` float32 | Density (kg/m³) |
-| `seismic.npz` | `(N, H, W)` float32 | Observed seismic amplitude |
-| `stats.json` | — | Per-channel mean/std used for normalization |
-
-The default facies class mapping (editable in `models/palette.py`) is:
-
-| Class ID | Lithofacies | Colour |
-|---|---|---|
-| 0 | Floodplain | Light green |
-| 1 | Point bar | Yellow |
-| 2 | Channel | Blue |
-| 3 | Boundary | Dark gray |
-
-Set `--num-facies-classes` to match the number of classes in your dataset.
-
----
-
-## Training
-
-### Single-GPU Training
-
-```bash
-python3 main.py \
-    --input-path data \
-    --output-path outputs/py \
-    --num-train-pyramids 200 \
-    --batch-size 40 \
-    --num-iter 2000 \
-    --num-parallel-scales 7 \
-    --num-facies-classes 4 \
-    --use-wells \
-    --use-seismic \
-    --use-rock-physics
+### Development Setup
+For contributing and development:
+```sh
+pip install -r requirements-dev.txt  # Includes black, flake8, mypy, etc.
 ```
 
-The script automatically detects the GPU via `--gpu-device` (default: 0) and creates a timestamped output directory under `--output-path`.
+## 🎯 Quick Start
 
-### Multi-GPU (DDP) Training
-
-Use `torchrun` for distributed training across multiple GPUs on the same node:
-
-```bash
-# 2-GPU training with NVLink
-NCCL_P2P_LEVEL=NVL \
-NCCL_ALGO=Ring \
-NCCL_PROTO=Simple \
-OMP_NUM_THREADS=4 \
-torchrun --nproc_per_node=2 main.py \
-    --input-path data \
-    --output-path outputs/py \
-    --num-train-pyramids 200 \
-    --batch-size 40 \
-    --num-workers 4 \
-    --num-iter 2000 \
-    --num-parallel-scales 7 \
-    --use-wells \
-    --use-seismic \
-    --use-rock-physics \
-    2>&1 | tee outputs/train.log
+### Training FaciesGAN
+Train the model on your facies dataset with multi-scale progressive learning:
+```sh
+python main.py --input_path data --num_iter 40 --batch_size 200 \
+    --save_interval 10 --num_train_facies 200 --gpu_device 0 \
+    --min_size 16 --max_size 128 --stop_scale 8 --num_parallel_scales 2
 ```
 
-> **Tip**: Visualization and checkpoint writes happen only on **rank 0**. All other ranks participate in collective operations but produce no I/O.
+### Smoke test (one-iteration run)
+Run a short smoke test to validate the environment and the recent refactors:
+```sh
+./.venv/bin/python main.py --input-path data --output-path results/ \\
+    --num-train-pyramids 1 --num-iter 1 --num-parallel-scales 7 \\
+    --no-tensorboard --use-wells --use-seismic
+```
+This is the exact command used during development for a quick end-to-end sanity check.
 
-### Resuming & Fine-Tuning
+### Performance Profiling
 
-To resume an interrupted training run from the last saved checkpoint:
+Enable PyTorch profiler with the `--use-profiler` flag to analyze performance bottlenecks.
+The profiling behavior depends on your hardware backend:
 
-```bash
-python3 resume.py \
-    --checkpoint-path outputs/py/2025_04_26_10_30_00 \
-    --num-parallel-scales 7
+#### CUDA/CPU Profiling
+Exports a Chrome trace to `<output_path>/profiler_trace.json` that can be viewed at `chrome://tracing`:
+
+```sh
+# Profile CUDA training with parallel scales
+python main.py --input_path data --num_iter 100 --batch_size 200 \
+    --num_train_pyramids 50 --gpu_device 0 --stop_scale 6 \
+    --num_parallel_scales 2 --use-profiler
+
+# After training completes, open chrome://tracing and load profiler_trace.json
 ```
 
-To fine-tune a fully trained model with additional iterations:
+#### MPS (Apple Silicon) Profiling
+Uses `torch.mps.profiler` to generate OS Signpost traces for Xcode Instruments:
 
-```bash
-python3 resume.py \
-    --fine-tuning \
-    --checkpoint-path outputs/2025_04_26_10_30_00 \
-    --num-iter 500 \
-    --start-scale 4
+```sh
+# Profile MPS training (automatically opens Instruments after completion)
+python main.py --input_path data --num_iter 100 --batch_size 200 \
+    --num_train_pyramids 50 --stop_scale 6 \
+    --num_parallel_scales 2 --use-profiler
 ```
 
-The resume script reads the original `options.json` saved in the checkpoint directory, so all original hyperparameters are preserved automatically.
+**Workflow for MPS profiling:**
+1. Open Xcode Instruments before training
+2. Select the "Logging" instrument
+3. Click the record button
+4. Run your training command with `--use-profiler`
+5. View detailed signpost intervals showing MPS kernel execution in the Instruments timeline
 
-### Full Training Options Reference
+**Note**: The script will automatically attempt to open Instruments after profiling, but traces
+must be captured during execution. Launch Instruments and start recording before running training.
 
-#### Data & I/O
+**Key Training Parameters:**
+**Key Training Parameters:**
+- `--min_size`: Starting resolution for coarse scale (int, default: 16)
+- `--max_size`: Final high-resolution output (int, default: 128)
+- `--stop_scale`: Number of scales in the pyramid (int, default: 8)
+- `--num_train_pyramids`: Number of pyramid groups sampled per training step (int, default: 1)
+- `--num_train_facies`: Number of facies images to use for training (int, default: 200)
+- `--batch_size`: Batch size for training (int, default: 200)
+- `--num_iter`: Training iterations per scale (int, default: 40)
+- `--save_interval`: Save checkpoint every N iterations (int, default: 10)
+- `--num_parallel_scales`: Number of scales trained in parallel per group (int, default: 2)
+- `--well-loss-penalty`: Multiplier applied to well-conditioning loss (float, default: 10.0)
+- `--lr_g`, `--lr_d`: Learning rates for generator and discriminator (float, default: 0.0005)
+- `--alpha`: Reconstruction loss weight (float, default: 100)
+- `--beta`: Well conditioning weight (float, default: 0.1)
+- `--gpu_device`: GPU device index or identifier (int, default: 0). If not available, CPU or MPS backends are used when supported.
+- `--use-profiler`: Enable PyTorch profiler (flag). Produces Chrome traces on CUDA/CPU and OS Signpost traces for MPS.
+- `--no-tensorboard`: Disable TensorBoard logging (flag)
+- `--use-wells`, `--use-seismic`: Enable conditioning on well and seismic data respectively (flags)
 
-| Flag | Default | Description |
-|---|---|---|
-| `--input-path` | `data` | **Required.** Path to dataset root directory |
-| `--output-path` | `outputs/py` | Base output directory (a timestamp subfolder is created automatically) |
-| `--output-fullpath` | `None` | Override the full output path (no timestamp added) |
-| `--num-facies-classes` | `4` | Number of discrete facies classes (one-hot channels) |
-| `--noise-channels` | `3` | Number of noise channels injected per scale |
-| `--crop-size` | `256` | Spatial crop size used during training |
-| `--num-train-pyramids` | `200` | Number of training pyramid samples |
-| `--num-workers` | `auto` | DataLoader workers (default: `min(4, cpu_count//2)`) |
-| `--regen-npy-gz` | `False` | Force regeneration of cached pyramid files |
-| `--manual-seed` | `None` | Fixed random seed for reproducibility |
-| `--no-shuffle` | — | Disable dataset shuffling |
+## Exact defaults
 
-#### Model Architecture
+The authoritative defaults live in [options.py](options.py). Below are the most commonly-used defaults copied from that file for quick reference; use the linked file for the full list and authoritative source of truth.
 
-| Flag | Default | Description |
-|---|---|---|
-| `--num-features` | `32` | Base feature count in the first network layer |
-| `--min-num-features` | `32` | Minimum feature count across all layers |
-| `--kernel-size` | `3` | Convolution kernel size |
-| `--num-layers` | `5` | Number of layers per scale block |
-| `--stride` | `1` | Convolution stride |
-| `--padding-size` | `0` | Convolution padding size |
+- `alpha`: 10
+- `batch_size`: 1
+- `lr_g`, `lr_d`: 5e-05
+- `min_size`: 12
+- `max_size`: 1024
+- `stop_scale`: 6
+- `num_iter`: 2000
+- `num_train_pyramids`: 200
+- `num_parallel_scales`: 2
+- `save_interval`: 100
+- `output_path`: results
+- `gpu_device`: 0
+- `use_wells`: False
+- `use_seismic`: False
+- `well_loss_penalty`: 10.0
 
-#### Pyramid & Scale
+See [options.py](options.py) for the complete `TrainingOptions` defaults and per-field documentation.
 
-| Flag | Default | Description |
-|---|---|---|
-| `--stop-scale` | `6` | Final scale index (number of pyramid levels - 1) |
-| `--start-scale` | `0` | Scale to start/resume training from |
-| `--start-epoch` | `0` | Epoch to resume from within the current scale group |
-| `--min-size` | `12` | Minimum spatial size at the coarsest pyramid scale |
-| `--max-size` | `1024` | Maximum spatial size |
-| `--num-parallel-scales` | `2` | Number of scales trained simultaneously |
+Below is the complete `TrainingOptions` field list and defaults (authoritative source: [options.py](options.py)).
 
-#### Optimization
+- `alpha` (int): 10
+- `batch_size` (int): 1
+- `beta1` (float): 0.5
+- `crop_size` (int): 256
+- `discriminator_steps` (int): 3
+- `num_img_channels` (int): 3
+- `gamma` (float): 0.9
+- `generator_steps` (int): 3
+- `gpu_device` (int): 0
+- `img_color_range` (tuple[int,int]): (0, 255)
+- `input_path` (str): "data"
+- `kernel_size` (int): 3
+- `lambda_grad` (float): 0.1
+- `lr_d` (float): 5e-05
+- `lr_decay` (int): 1000
+- `lr_g` (float): 5e-05
+- `manual_seed` (int | None): None
+- `max_size` (int): 1024
+- `min_num_feature` (int): 32
+- `min_size` (int): 12
+- `noise_amp` (float): 0.1
+- `min_noise_amp` (float): 0.1
+- `scale0_noise_amp` (float): 1.0
+- `well_loss_penalty` (float): 10.0
+- `lambda_diversity` (float): 1.0
+- `num_diversity_samples` (int): 3
+- `num_feature` (int): 32
+- `num_generated_per_real` (int): 5
+- `num_iter` (int): 2000
+- `num_layer` (int): 5
+- `noise_channels` (int): 3
+- `num_real_facies` (int): 5
+- `num_train_pyramids` (int): 200
+- `num_parallel_scales` (int): 2
+- `num_workers` (int): 4
+- `output_path` (str): "results"
+- `padding_size` (int): 0
+- `regen_npy_gz` (bool): False
+- `save_interval` (int): 100
+- `start_scale` (int): 0
+- `stride` (int): 1
+- `stop_scale` (int): 6
+- `use_cpu` (bool): False
+- `use_wells` (bool): False
+- `use_seismic` (bool): False
+- `wells_mask_columns` (tuple[int, ...]): ()
+- `enable_tensorboard` (bool): True
+- `enable_plot_facies` (bool): True
 
-| Flag | Default | Description |
-|---|---|---|
-| `--num-iter` | `2000` | Optimization steps (full dataset passes) per scale |
-| `--batch-size` | `1` | Per-GPU batch size |
-| `--lr-g` | `5e-4` | Generator learning rate |
-| `--lr-d` | `5e-4` | Discriminator learning rate |
-| `--beta1` | `0.5` | Adam β₁ |
-| `--gamma` | `0.9` | Discriminator StepLR decay factor |
-| `--lr-decay` | `1000` | Epochs between discriminator LR decay steps |
-| `--lr-decay-unit` | `epoch` | LR decay unit: `epoch`, `step`, or `batch` |
-| `--lr-patience` | `400` | Generator ReduceLROnPlateau patience |
-| `--lr-min` | `1e-4` | Minimum generator LR |
-| `--lr-smoothing-alpha` | `0.95` | EMA factor for generator loss fed to scheduler |
-| `--lr-g-factor` | `0.8` | Generator LR reduction factor on plateau |
-| `--generator-steps` | `3` | Generator inner steps per iteration |
-| `--discriminator-steps` | `3` | Discriminator inner steps per iteration |
-| `--scale0-disc-steps-multiplier` | `1` | Extra D-steps multiplier at scale 0 |
-| `--grad-clip-norm` | `1.0` | Max gradient norm for generator clipping (0 = disabled) |
-| `--gp-interval` | `16` | Lazy gradient-penalty interval (StyleGAN2 style) |
+If you rely on these defaults programmatically, prefer importing `TrainingOptions` from `options.py` to ensure you always have the authoritative values.
 
-#### Loss Weights
-
-| Flag | Default | Description |
-|---|---|---|
-| `--facies-rec-loss-penalty` | `10.0` | Facies reconstruction (Dice) loss weight |
-| `--well-loss-penalty` | `10.0` | Well-log conditioning loss weight |
-| `--gradient-loss-penalty` | `0.1` | Discriminator gradient-penalty weight |
-| `--adversarial-loss-penalty` | `1.0` | Generator adversarial loss weight |
-| `--diversity-loss-penalty` | `1.0` | Generator diversity loss weight |
-| `--num-diversity-samples` | `3` | Noise samples per G-step for diversity loss |
-| `--rec-rock-physics-loss-penalty` | `1.0` | Rock-physics reconstruction loss weight |
-| `--tv-loss-penalty` | `1.0` | Total-variation smoothness loss weight (rock physics) |
-| `--elastic-loss-penalty` | `1.0` | Elastic consistency loss weight (Ip/Is vs Vp/Vs) |
-| `--physics-loss-penalty` | `1.0` | Seismic physics loss weight (forward model MSE) |
-| `--scale0-loss-multiplier` | `1.0` | Extra loss multiplier for scale 0 |
-
-#### Conditioning
-
-| Flag | Description |
-|---|---|
-| `--use-wells` | Enable well-log conditioning |
-| `--use-seismic` | Enable seismic data loading |
-| `--use-rock-physics` | Enable rock-physics branch (Ip, Is, Vp/Vs outputs + losses) |
-| `--wells-mask-columns` | Explicit well column indices to use (space-separated integers) |
-
-#### Seismic / Rock-Physics Physics
-
-| Flag | Default | Description |
-|---|---|---|
-| `--dz-pixel` | `5.0` | Vertical resolution in metres per pixel |
-| `--wavelet-f-peak` | `8.0` | Ricker wavelet peak frequency (Hz) |
-| `--wavelet-dt` | `0.001` | Wavelet sampling interval (s) |
-
-#### Hardware & Performance
-
-| Flag | Default | Description |
-|---|---|---|
-| `--gpu-device` | `0` | GPU device ID (single-GPU mode) |
-| `--use-cpu` | — | Force CPU training |
-| `--amp-dtype` | `bf16` | AMP compute dtype: `bf16` (Ampere+) or `fp16` |
-| `--compile-backend` | — | Enable `torch.compile` (Inductor) |
-| `--no-compile` | — | Disable `torch.compile` even on Ampere+ |
-| `--gradient-checkpoint` | — | Activation checkpointing (~30 % slower, lower peak VRAM) |
-| `--use-profiler` | — | Export a Chrome trace via PyTorch Profiler |
-
-#### Logging & Output
-
-| Flag | Default | Description |
-|---|---|---|
-| `--save-interval` | `100` | Epochs between saving generated output grids |
-| `--checkpoint-interval` | `1` | Epochs between saving training-state checkpoints |
-| `--num-real-facies` | `5` | Real facies rows in the output grid |
-| `--num-generated-per-real` | `5` | Generated columns per real facies in the grid |
-| `--no-tensorboard` | — | Disable TensorBoard logging |
-| `--no-plot-outputs` | — | Disable PNG sample plots during training |
-
----
-
-## Monitoring with TensorBoard
-
-A convenience launcher script is provided that kills any previous instance and starts TensorBoard pointing at `outputs/`:
-
-```bash
-# Default: logdir=outputs/, port=6006
-./launch_tensorboard.sh
-
-# Custom logdir and port
-./launch_tensorboard.sh outputs/py/my_run 6007
+### Generating New Facies
+Generate new facies realizations from trained models:
+```sh
+python gen_facies.py --how_many 500 \
+    --model_path results/2025_03_25_08_28_23_facies_gan \
+    --out_path results/generated --plot_well_mask --wells 8
 ```
 
-Then open **http://localhost:6006** in your browser.
+**Generation Options:**
+* `--how_many`: Number of facies realizations to generate
+* `--model_path`: Path to trained model checkpoint
+* `--plot_well_mask`: Visualize well constraints
+* `--wells`: Number of wells to condition on
 
-TensorBoard tracks:
+## 🔬 Technical Details
 
-* **Losses** — Discriminator, Generator, Reconstruction, Well, Rock-Physics, Physics (per scale)
-* **Facies grids** — Real vs. generated facies at each scale
-* **Rock-physics grids** — Ip, Is, Vp/Vs per scale
-* **Seismic diagnostic** — Synthetic vs. real seismic at each scale
-* **Learning rates** — Generator and discriminator LR per scale
+### Multi-Scale Pyramid Architecture
+FaciesGAN employs a progressive training strategy across multiple scales:
 
----
+1. **Pyramid Generation**: Input facies images are interpolated to multiple resolutions using neural smoothers
+2. **Progressive Training**: Start from coarse scale, progressively add finer scales
+3. **Scale-Specific Networks**: Each scale has its own generator and discriminator
+4. **Cached Processing**: Pyramid generation is cached using joblib for efficiency
 
-## Generating Realizations
+### Interpolation Strategies
+Three interpolation methods for multi-scale representations:
 
-After training, generate new conditional realizations with `gen_facies.py`:
+* **Nearest Interpolator**: Fast baseline using nearest-neighbor resampling
+* **Neural Smoother**: Learned interpolation with neural networks for smooth transitions
+* **Well Interpolator**: Incorporates well log constraints during interpolation
 
-```bash
-# Basic: generate 500 realizations
-python3 gen_facies.py \
-    --how_many 500 \
-    --model_path outputs/py/2025_04_26_10_30_00 \
-    --out_path outputs/generated
+### Color Encoding
+The `ColorEncoder` class manages palette-based conversions:
+* Extracts unique colors from RGB facies images
+* Maps RGB pixels to categorical label indices
+* Supports MPS/CUDA devices with proper dtype handling
+* Enables efficient categorical cross-entropy loss
 
-# With well-mask overlay
-python3 gen_facies.py \
-    --how_many 200 \
-    --model_path outputs/py/2025_04_26_10_30_00 \
-    --plot_well_mask
+### Data Management
+The `DataFiles` enum centralizes all data paths:
+```python
+from data_files import DataFiles
 
-# Compare real vs. generated (3 variants per real, 5 real images)
-python3 gen_facies.py \
-    --how_many 1 \
-    --model_path outputs/py/2025_04_26_10_30_00 \
-    --comparison_plots \
-    --num_generated 3 \
-    --num_real 5
+# Access data paths consistently
+facies_path = DataFiles.FACIES.as_data_path()
+wells_path = DataFiles.WELLS.as_data_path()
 ```
 
-### Manifold / Latent Space Analysis
+Supports configurable patterns for:
+* Image files: `*.png`
+* Model checkpoints: `*.pt`
+* Mapping files: `*.npz`
 
-Visualize the distributional match between real and generated facies in latent space:
+## 📊 Dataset Format
 
-```bash
-python3 gen_facies.py \
-    --how_many 500 \
-    --model_path outputs/py/2025_04_26_10_30_00 \
-    --plot_mds \
-    --plot_umap \
-    --plot_isomap \
-    --plot_tsne
+### Input Data Structure
+```
+data/
+├── facies/
+│   ├── xz_crossline_000.png    # Facies images (RGB)
+│   ├── xz_crossline_000.pt     # NeuralSmoother models (optional)
+│   └── ...
+├── wells/
+│   ├── xz_crossline_000.png    # Well log visualizations
+│   ├── wells_maping.npz        # Well position mapping
+│   └── ...
+└── seismic/
+    ├── xz_crossline_000.png    # Seismic data (optional)
+    └── ...
 ```
 
-### `gen_facies.py` Options Reference
+### Data Requirements
+* **Facies Images**: RGB PNG images with distinct colors for each facies class
+* **Well Data**: Binary masks or labeled images showing well locations
+* **Consistent Naming**: Files should follow `xz_crossline_XXX.png` pattern
+* **Color Palette**: Each unique RGB value represents one facies class
 
-| Flag | Description |
-|---|---|
-| `--how_many` | **Required.** Number of realizations to generate |
-| `--model_path` | **Required.** Path to trained model checkpoint directory |
-| `--out_path` | Output directory (default: same as `--model_path`) |
-| `--rec` | Generate reconstruction sample (same size as training image) |
-| `--gpu_device` | GPU device ID (default: 0) |
-| `--use_gpu` | Explicitly enable GPU |
-| `--wells` | Well indices for conditioning (default: 0–199) |
-| `--plot_well_mask` | Overlay well mask on generated facies plots |
-| `--comparison_plots` | Generate real-vs-generated comparison grids |
-| `--num_generated` | Variants per real facies in comparison grids (default: 3) |
-| `--num_real` | Real facies rows in comparison grids (default: 5) |
-| `--plot_scale` | Pyramid scale for comparison plots (default: finest) |
-| `--plot_mds` | Save MDS embedding plot |
-| `--plot_umap` | Save UMAP embedding plot |
-| `--plot_isomap` | Save Isomap embedding plot |
-| `--plot_tsne` | Save t-SNE embedding plot |
+## 🛠️ Advanced Usage
 
-Generated realizations are saved as `.tif` files in `<out_path>/generated/`.
+### Custom Training Configuration
+Create custom training configurations by modifying `options.py`:
 
----
+```python
+from options import TrainingOptions
 
-## Reproducing the Experiments
-
-The `experiments/` package provides a fully automated conditioning-ablation suite that trains **four model variants** and produces comparison grids plus manifold embedding plots for all of them.
-
-### Conditioning Ablation Suite
-
-The ablation varies the **conditioning inputs** (Wells and Seismic) while keeping the **Rock-Physics output branch** (Ip, Is, Vp/Vs) always enabled — it is a network output, not a conditioning signal.
-
-| Variant | Wells *(input)* | Seismic *(input)* | Rock-Physics *(output)* |
-|---|:---:|:---:|:---:|
-| `wells_seismic` | ✅ | ✅ | ✅ |
-| `wells_only` | ✅ | ❌ | ✅ |
-| `seismic_only` | ❌ | ✅ | ✅ |
-| `unconditional` | ❌ | ❌ | ✅ |
-
-> **Note**: Rock-Physics (Ip, Is, Vp/Vs) is always predicted as an **output** of the generator alongside the facies classes. Enabling `--use-rock-physics` activates the physics-informed loss terms that supervise these output channels during training.
-
-#### Full Experiment (Train + Generate + Embed)
-
-```bash
-python3 -m experiments \
-    --input-path data \
-    --output-path outputs/experiments \
-    --num-iter 2000 \
-    --num-train-pyramids 200 \
-    --batch-size 50 \
-    --num-parallel-scales 7 \
-    --stop-scale 6 \
-    --nproc-per-node 2 \
-    --how-many 2000 \
-    --use-rock-physics \
-    --embedding-methods isomap mds tsne umap \
-    --embedding-data facies rock_physics
+opts = TrainingOptions(
+    min_size=12,          # Starting resolution
+    max_size=256,         # Final resolution
+    stop_scale=10,        # Number of pyramid scales
+    num_iter=50,          # Iterations per scale
+    batch_size=100,       # Batch size
+    lr_g=0.0005,          # Generator learning rate
+    lr_d=0.0005,          # Discriminator learning rate
+    alpha=100,            # Reconstruction loss weight
+    beta=0.1,             # Well conditioning weight
+)
 ```
 
-Each variant is trained in sequence using `torchrun` internally. The runner **automatically resumes** if a variant was partially trained — no manual intervention needed.
+### Using Different Interpolators
+Switch between interpolation methods:
 
-#### Generation Only (Models Already Trained)
+```python
+from interpolators.config import InterpolatorConfig
+from interpolators.nearest import NearestInterpolator
+from interpolators.neural import NeuralSmoother
 
-```bash
-python3 -m experiments \
-    --input-path data \
-    --output-path outputs/experiments \
-    --skip-training \
-    --model-paths \
-        outputs/experiments/wells_seismic \
-        outputs/experiments/wells_only \
-        outputs/experiments/seismic_only \
-        outputs/experiments/unconditional \
-    --how-many 2000 \
-    --embedding-methods isomap mds tsne umap
+# Fast nearest-neighbor interpolation
+nearest = NearestInterpolator(InterpolatorConfig())
+
+# Neural network-based smooth interpolation
+neural = NeuralSmoother(model_path, InterpolatorConfig())
+
+# Generate pyramids
+pyramid = neural.interpolate(image_path, scale_list)
 ```
 
-#### Disable Embedding Computation
+### Caching and Performance
+Pyramid generation is automatically cached using joblib:
 
-```bash
-python3 -m experiments \
-    --input-path data \
-    --output-path outputs/experiments \
-    --no-embeddings \
-    --skip-training \
-    --model-paths ...
+```python
+from gen_pyramids import to_facies_pyramids, to_wells_pyramids
+
+# First call computes and caches
+pyramids = to_facies_pyramids(scale_list)  # Slow
+
+# Subsequent calls use cache
+pyramids = to_facies_pyramids(scale_list)  # Fast!
 ```
 
-### Experiment Options Reference
-
-| Flag | Default | Description |
-|---|---|---|
-| `--input-path` | — | **Required.** Dataset root directory |
-| `--output-path` | `outputs/experiments` | Base output directory for all variants |
-| `--how-many` | `2000` | Realizations to generate per variant |
-| `--skip-training` | — | Skip training; use existing model paths |
-| `--model-paths` | — | 4 model paths (requires `--skip-training`) |
-| `--nproc-per-node` | `2` | GPUs for DDP per variant training |
-| `--num-iter` | `2000` | Training iterations per scale |
-| `--num-train-pyramids` | `10` | Training pyramids per variant |
-| `--batch-size` | `50` | Per-GPU batch size |
-| `--num-parallel-scales` | `7` | Parallel scales per variant |
-| `--stop-scale` | `6` | Final scale index |
-| `--use-rock-physics` | — | Enable rock-physics branch for all variants |
-| `--embedding-methods` | all 4 | Manifold methods: `isomap mds tsne umap` |
-| `--embedding-data` | `facies rock_physics` | Data types for embedding plots |
-| `--embedding-per-facies` | — | Plot separate embeddings per conditioning crossline |
-| `--no-embeddings` | — | Skip all latent-space visualization |
-| `--manual-seed` | `None` | Fixed seed for reproducibility |
-| `--gpu-device` | `0` | Primary GPU |
-| `--compile-backend` | — | Enable `torch.compile` for variant training |
-| `--no-compile` | — | Disable `torch.compile` for variant training |
-| `--checkpoint-interval` | `1` | Checkpoint save interval (epochs) |
-
-All other training hyper-parameters (`--lr-g`, `--lr-d`, `--gamma`, `--discriminator-steps`, etc.) are forwarded unchanged to each `main.py` invocation.
-
----
-
-## Output Structure
-
-A training run produces the following layout:
-
-```
-outputs/py/<timestamp>/
-├── options.json                  # All training options (used by resume / gen_facies)
-├── log.txt                       # Full training log
-│
-├── 0/                            # Scale 0 (coarsest)
-│   ├── generator.pth             # Trained generator weights
-│   ├── discriminator.pth         # Trained discriminator weights
-│   ├── noise_amp.txt             # Noise amplitude for this scale
-│   ├── shape.pth                 # Spatial shape descriptor
-│   ├── rec_noise.pth             # Reconstruction noise
-│   ├── masks.pth                 # Well-log masks
-│   ├── epoch_checkpoint.pth      # Resumable optimizer/scheduler state
-│   ├── completed_epoch.txt       # Last completed epoch marker
-│   └── real_x_generated_facies/  # PNG grids (real vs. generated)
-│       └── gen_0_<epoch>.png
-│
-├── 1/ … 6/                       # Scales 1–6 (same structure)
-│
-└── runs/                         # TensorBoard event files
-    └── faciesgan/
-        └── events.out.tfevents.*
+Cache is stored in `.cache/` directory. Clear it to force recomputation:
+```sh
+rm -rf .cache/
 ```
 
----
+## 🔍 Code Quality
 
-## Performance Tips
+### Type Safety
+The codebase uses strict type checking with Pylance:
+* Full type hints throughout
+* Strict mode enabled in VS Code workspace
+* Type stubs for external libraries (`types-requirements.txt`)
 
-* **Ampere+ GPUs (RTX 3090, A100, H100)**: Enable `bf16` (default) and `--compile-backend` for the best throughput.
-* **Memory-constrained GPUs (≤ 12 GB)**: Use `--gradient-checkpoint` to reduce peak VRAM. This disables `torch.compile` automatically.
-* **Large datasets**: Increase `--num-workers` (up to `cpu_count // 2`) and use `--batch-size` ≥ 8 for better GPU utilization.
-* **DDP NVLink**: Set `NCCL_P2P_LEVEL=NVL NCCL_ALGO=Ring NCCL_PROTO=Simple` for optimal inter-GPU bandwidth.
-* **Reproducibility**: Pass `--manual-seed <int>` to fix all random seeds.
+### Linting and Formatting
+Development tools configured:
+* **Black**: Code formatting
+* **Flake8**: Linting (with E501 line length relaxed)
+* **MyPy**: Static type checking
+* **Ruff**: Fast Python linter
 
----
-
-## Citation
-
-If you use FaciesGAN in your research, please cite:
-
-```bibtex
-@misc{mazzutti2025faciesgan,
-  title   = {FaciesGAN: A Physics-Informed Multi-Scale GAN for Geological Facies Modeling},
-  author  = {Mazzutti, Alessandro},
-  year    = {2025},
-  note    = {Postdoctoral research, Geological Modeling and Generative AI}
-}
+Run quality checks:
+```sh
+black .
+flake8 .
+mypy .
 ```
 
----
+## 📈 Recent Improvements
 
-## License
+### Version 2.0 Updates (December 2025)
+* ✅ **Interpolator Architecture**: Refactored with base class and multiple implementations
+* ✅ **ColorEncoder**: Efficient palette-based RGB conversion with device support
+* ✅ **Pyramid Caching**: Added joblib-based caching for 10x faster repeated training
+* ✅ **C API Clarification**: C-side trainer API now uses the canonical header `trainning/mlx_trainer_api.h` and `MLXTrainer_*` symbols; the older `c_trainer_api.h` wrapper was removed.
+* ✅ **DataFiles Enum**: Centralized file path management
+* ✅ **Type Safety**: Complete type hints with Pylance strict mode
+* ✅ **Dataset Restructure**: Organized data into facies/wells/seismic directories
+* ✅ **Documentation**: Comprehensive docstrings for all modules
+* ✅ **Code Quality**: Black formatting, Flake8 linting, MyPy type checking
+* ✅ **Parallel Trainer**: New `Trainer` supports training multiple scales in parallel
+    (use `--num_parallel_scales` to control group size). Each group consumes a
+    single batch of pyramids and trains its scales concurrently.
+* ✅ **TensorBoard Logging**: Training writes a global log directory under
+    ``<output_path>/tensorboard_logs`` and also creates a per-scale
+    SummaryWriter inside each scale folder (``<output_path>/<scale>/``) for
+    easier per-scale inspection.
+* ✅ **Performance Profiling**: Added `--use-profiler` flag with backend-specific
+    profiling support: Chrome traces for CUDA/CPU, OS Signpost traces for MPS
+    with automatic Xcode Instruments integration.
 
-This project is licensed under the terms of the [MIT License](LICENSE.md).
+- ✅ **Well-conditioning parameter**: Added `--well-loss-penalty` (float, default
+    10.0) to control the multiplier applied to well-conditioning loss terms during
+    training. Set this flag to adjust how strongly generated facies honor well
+    constraints.
 
----
+**Implementation notes & small tips**
+- `models/facies_gan.py` now contains the unified PyTorch-specific implementation.
+- `load_amp` support for scale amplitude files was added to `models/facies_gan.py` so
+    pyramid amplitude files (`*.pth`) are loaded automatically during resume.
+- Weight initialization: you can initialize model weights on CPU and then call
+    `model.to(device)`. This reduces unnecessary GPU memory use during init. If
+    a specific init requires device tensors, create them on the target device.
 
-*Developed as part of Postdoctoral research on Geological Modeling and Generative AI.*
+### Breaking Changes
+* `generate.py` renamed to `gen_facies.py`
+* Data directory structure changed to `data/{facies,wells,seismic}/`
+* Import paths updated for interpolators package
+* New DataFiles enum for consistent path access
