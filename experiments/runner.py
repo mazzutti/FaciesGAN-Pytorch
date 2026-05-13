@@ -8,19 +8,20 @@ import numpy as np
 import torch
 
 import utils
-from constants import AMP_FILE, ExperimentVariant
+from config import CheckpointFilenames
 from datasets.dataset import PyramidsDataset
 from datasets.utils import build_conditioning_pyramids
 from log import format_time
 from main import get_arguments as get_main_arguments
 from options import TrainingOptions
+from enums import ExperimentVariant
 
 from .cli import build_training_args, get_arguments
 from .embeddings import (
     ExperimentCache,
     compute_shared_embeddings,
     load_shared_embeddings,
-    save_shared_embeddings,
+    save_shared_embeddings
 )
 from .generation import generate_variant
 from .plotting import plot_method_all_variants, plot_sample_grid
@@ -37,9 +38,9 @@ class PlotData:
 
 
 def _has_loadable_scale(model_path: str, max_scan: int = 64) -> bool:
-    """Return True when at least one scale folder contains AMP_FILE."""
+    """Return True when at least one scale folder contains CheckpointFilenames.NOISE_AMP."""
     for scale in range(max_scan):
-        amp_path = os.path.join(model_path, str(scale), AMP_FILE)
+        amp_path = os.path.join(model_path, str(scale), CheckpointFilenames.NOISE_AMP)
         if os.path.isfile(amp_path):
             return True
     return False
@@ -70,7 +71,7 @@ def main() -> None:
                 parser.error(f"Model path does not exist: {path}")
             if not _has_loadable_scale(path):
                 parser.error(
-                    f"Model path has no loadable scale checkpoints (missing {AMP_FILE}): {path}"
+                    f"Model path has no loadable scale checkpoints (missing {CheckpointFilenames.NOISE_AMP}): {path}"
                 )
             model_paths[ev.id] = path
         print("Skipping training, using provided model paths.")
@@ -240,8 +241,8 @@ def main() -> None:
                 wells_pyramid=tuple(wells_pyramid.values()),
                 seismic_pyramid=tuple(seismic_pyramid.values()),
                 channels=channels,
-                gen_output=gen_output,
-            )
+                gen_output=gen_output
+)
             all_facies[name] = variant_facies
             if variant_ip:
                 all_ip[name] = variant_ip
@@ -255,8 +256,8 @@ def main() -> None:
             print(
                 f"\nComputing shared embeddings "
                 f"({', '.join(m.upper() for m in emb_methods)}) ...",
-                flush=True,
-            )
+                flush=True
+)
             shared = compute_shared_embeddings(
                 all_facies, _dataset, methods=emb_methods
             )
@@ -268,11 +269,11 @@ def main() -> None:
                     all_facies=all_facies,
                     all_mask_indexes=all_mask_indexes,
                     all_ip=all_ip,
-                    all_seismic=all_seismic,
-                ),
+                    all_seismic=all_seismic
+),
                 base_output,
-                args.num_iter,
-            )
+                args.num_iter
+)
         else:
             shared = {}
 
@@ -295,13 +296,13 @@ def main() -> None:
     real_tensor, _, _, real_seismic_tensor = _dataset.get_scale_data(-1)
     norm_range: tuple[float, float] = (
         float(_base_opts.normalization_range[0]),
-        float(_base_opts.normalization_range[1]),
-    )
+        float(_base_opts.normalization_range[1])
+)
     real_full_np = _utils.torch2np(
         real_tensor,
         denormalize=True,
-        normalization_range=norm_range,
-    )
+        normalization_range=norm_range
+)
     facies_ch = _base_opts.num_facies_channels
 
     # Define kinds to plot
@@ -315,8 +316,8 @@ def main() -> None:
                 np.transpose(real_seismic_tensor.cpu().numpy(), (0, 2, 3, 1))
                 if all_seismic
                 else None
-            ),
-        ),
+            )
+),
     ]
 
     for p in plots:
@@ -336,12 +337,12 @@ def main() -> None:
             "facies": (all_facies, {"rock_physics_only": False, "seismic_only": False}),
             "rock_physics": (
                 all_ip,
-                {"rock_physics_only": True, "seismic_only": False},
-            ),
+                {"rock_physics_only": True, "seismic_only": False}
+),
             "seismic": (
                 all_seismic,
-                {"rock_physics_only": False, "seismic_only": True},
-            ),
+                {"rock_physics_only": False, "seismic_only": True}
+),
         }
 
         for kind in emb_data_kinds:
@@ -370,8 +371,8 @@ def main() -> None:
                     args.num_iter,
                     plot_kind,
                     all_mask_indexes=all_mask_indexes,
-                    embedding_per_facies=args.embedding_per_facies,
-                )
+                    embedding_per_facies=args.embedding_per_facies
+)
 
     total_elapsed = format_time(int(time.time() - total_start))
     print(f"\n{'=' * 70}")

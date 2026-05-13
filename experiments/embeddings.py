@@ -12,11 +12,13 @@ from scipy.sparse import SparseEfficiencyWarning  # type: ignore[import]
 from sklearn.manifold import MDS, TSNE, Isomap
 from umap import UMAP  # type: ignore[import]
 
+from config import CheckpointFilenames  # type: ignore[import]
+
 warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
 
 from dataclasses import dataclass
 
-from constants import EMBEDDINGS_FILE, EmbeddingMethod
+from enums import EmbeddingMethod
 from datasets import PyramidsDataset
 
 # Type alias for shared embeddings: method -> (real_reduced, {variant: fake_reduced})
@@ -36,7 +38,7 @@ class ExperimentCache:
 
 def load_shared_embeddings(base_output: str, num_iter: int) -> ExperimentCache | None:
     """Load cached embeddings and samples from disk if they exist."""
-    path = os.path.join(base_output, EMBEDDINGS_FILE)
+    path = os.path.join(base_output, CheckpointFilenames.EMBEDDINGS)
     if not os.path.isfile(path):
         return None
 
@@ -80,7 +82,7 @@ def save_shared_embeddings(
     num_iter: int,
 ) -> None:
     """Cache embeddings and generated samples to disk."""
-    path = os.path.join(base_output, EMBEDDINGS_FILE)
+    path = os.path.join(base_output, CheckpointFilenames.EMBEDDINGS)
     np.savez_compressed(
         path,
         shared=np.array(cache.shared, dtype=object),

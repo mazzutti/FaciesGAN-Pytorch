@@ -27,8 +27,8 @@ from sklearn.metrics import euclidean_distances  # type: ignore
 from umap import UMAP  # type: ignore
 
 import utils
+from config import CheckpointFilenames, DomainConfig
 from background_workers import submit_plot_generated_outputs
-from constants import OPT_FILE
 from datasets.dataset import PyramidsDataset
 from log import format_time
 from models import FaciesGAN
@@ -262,7 +262,7 @@ def plot_mds(
     mds = MDS(
         n_components=2,
         max_iter=3000,
-        eps=1e-9,
+        eps=DomainConfig.EPSILON,
         random_state=np.random.RandomState(seed=3),
         metric="precomputed",
         n_init=4,
@@ -573,12 +573,12 @@ if __name__ == "__main__":
 
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{arguments.gpu_device}")
-    elif torch.backends.mps.is_available():
-        device = torch.device(f"mps:{arguments.gpu_device}")
     else:
         device = torch.device(f"cpu:{arguments.gpu_device}")
 
-    with open(os.path.join(arguments.model_path, OPT_FILE), "r") as f:
+    with open(
+        os.path.join(arguments.model_path, CheckpointFilenames.OPTIONS), "r"
+    ) as f:
         json_data = json.load(f)
 
     # Build a proper TrainingOptions from the saved JSON and CLI overrides,

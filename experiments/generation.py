@@ -5,6 +5,7 @@ import os
 import numpy as np
 import torch
 
+from config import DomainConfig
 from enums import DataFiles
 from models.facies_gan import FaciesGAN
 from models.utils import SplitKey, split_facies_rp
@@ -23,7 +24,7 @@ def _generate_on_device(
     channels: dict[ChannelKey, int],
     gen_output: str,
     start_index: int,
-    eps: float = 1e-8,
+    eps: float = DomainConfig.EPSILON,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], torch.Tensor]:
     """Generate facies (and rock physics when enabled) on a single device.
 

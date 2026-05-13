@@ -8,7 +8,7 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 
 import utils
-from constants import ExperimentVariant
+from enums import ExperimentVariant
 from enums import DataFiles
 
 

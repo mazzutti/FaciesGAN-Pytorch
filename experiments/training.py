@@ -4,7 +4,8 @@ import os
 import subprocess
 import sys
 
-from constants import AMP_FILE, COMPLETED_EPOCH_FILE, EPOCH_CKPT_FILE, G_FILE
+# Removed legacy constants import
+from config import CheckpointFilenames
 
 
 def _has_resumable_scale_artifacts(variant_output: str, scale: int) -> bool:
@@ -14,11 +15,11 @@ def _has_resumable_scale_artifacts(variant_output: str, scale: int) -> bool:
         return False
 
     required_any = (
-        AMP_FILE,
-        G_FILE,
-        EPOCH_CKPT_FILE,
-        COMPLETED_EPOCH_FILE,
-    )
+        CheckpointFilenames.NOISE_AMP,
+        CheckpointFilenames.GENERATOR,
+        CheckpointFilenames.EPOCH_CKPT,
+        CheckpointFilenames.COMPLETED_EPOCH
+)
     return any(os.path.isfile(os.path.join(scale_dir, f)) for f in required_any)
 
 
@@ -37,7 +38,7 @@ def find_last_completed_scale(variant_output: str) -> int:
 
 def read_completed_epochs(variant_output: str, scale: int) -> int:
     """Read the number of completed epochs for a specific scale from disk."""
-    path = os.path.join(variant_output, str(scale), COMPLETED_EPOCH_FILE)
+    path = os.path.join(variant_output, str(scale), CheckpointFilenames.COMPLETED_EPOCH)
     if os.path.isfile(path):
         try:
             with open(path, "r") as f:

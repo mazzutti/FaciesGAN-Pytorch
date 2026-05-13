@@ -11,7 +11,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.image import imread
 
 # Use relative imports if needed, but since this is usually run as a script:
-from constants import DATA_DIR, OUTPUTS_DIR
+from config import DirectoryConfig
 
 VARIANTS = ["wells_seismic", "wells_only", "seismic_only", "unconditional"]
 VARIANT_LABELS = {
@@ -352,12 +352,12 @@ def generate_report(
     output: str | None = None,
 ) -> str:
     if outputs_dir is None:
-        outputs_dir = Path(OUTPUTS_DIR)
+        outputs_dir = Path(DirectoryConfig.OUTPUTS)
     else:
         outputs_dir = Path(outputs_dir)
 
     if data_dir is None:
-        data_dir = Path(DATA_DIR)
+        data_dir = Path(DirectoryConfig.DATA)
     else:
         data_dir = Path(data_dir)
 
@@ -420,13 +420,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--outputs-dir",
         type=Path,
-        default=OUTPUTS_DIR,
+        default=DirectoryConfig.OUTPUTS,
         help="Path to the directory containing experiment outputs.",
     )
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=DATA_DIR,
+        default=DirectoryConfig.DATA,
         help="Path to the directory containing input data.",
     )
     parser.add_argument(

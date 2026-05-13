@@ -3,7 +3,7 @@
 from argparse import ArgumentParser, Namespace
 
 from config import PhysicsConfig
-from constants import EmbeddingMethod, VariantConfig
+from enums import EmbeddingMethod, VariantConfig
 from options import NORMALIZATION_RANGE
 
 
