@@ -348,6 +348,7 @@ from interpolators.config import InterpolationStrategy, InterpolatorConfig
 from interpolators.neural import NeuralSmoother
 from interpolators.numeric import NumericInterpolator
 from interpolators.seismic import SeismicInterpolator
+from interpolators.well import WellInterpolator
 
 
 def _build_pyramid_batch(
@@ -767,17 +768,15 @@ def to_wells_pyramids(
 ) -> tuple[torch.Tensor, ...]:
     """Generate multiscale RGB pyramid tensors for well location data.
 
-    Reuses the cached output of :func:`to_facies_pyramids` as the color source.
-    For each sample the facies tensor is cloned and all non-well columns are
-    zeroed out, so well RGB values are **exactly** consistent with the neural-
-    smoothed facies output at every scale.  Background pixels (columns without
-    a well trace) are set to the minimum of *normalization_range*.
+    Uses :class:`~interpolators.well.WellInterpolator` with Majority Vote (Mode
+    Pooling) to downsample vertical well traces. The categorical labels are
+    mapped to a standard RGB palette and normalized to *normalization_range*.
+    Non-well columns are filled with ``normalization_range[0]``.
 
     Parameters
     ----------
     scale_list : tuple[tuple[int, ...], ...]
-        Tuple of scale descriptors produced by :func:`generate_scales`. Each
-        element is a 4-tuple ``(batch, channels, height, width)``.
+        Tuple of scale descriptors produced by :func:`generate_scales`.
     data_dir : str, optional
         Base data directory.  Defaults to :data:`DirectoryConfig.DEFAULT_DATA`.
     channels_last : bool, optional
@@ -785,52 +784,52 @@ def to_wells_pyramids(
     num_classes : int, optional
         Number of facies classes.  Defaults to :class:`DomainConfig.NUM_FACIES`.
     normalization_range : tuple[float, float], optional
-        Target value range; forwarded to :func:`to_facies_pyramids` so both
-        pyramids share the same scale.  Defaults to :data:`NORMALIZATION_RANGE`.
+        Target value range. Defaults to :data:`NORMALIZATION_RANGE`.
 
     Returns
     -------
     tuple[torch.Tensor, ...]
         One tensor per scale with shape ``(N, C, H, W)`` or ``(N, H, W, C)``
-        and values in *normalization_range*.  Non-well columns are filled with
-        ``normalization_range[0]`` (the background value).
+        and values in *normalization_range*.
     """
     base_dir = Path(data_dir) if data_dir else Path(DirectoryConfig.DEFAULT_DATA)
     wells_path = base_dir / "wells.npz"
 
     if not wells_path.exists():
         logger.warning("Wells file %s not found. Returning empty pyramids.", wells_path)
-        return tuple(
-            _empty_pyramid_tensor(scale, channels_last) for scale in scale_list
-        )
+        return tuple(_empty_pyramid_tensor(scale, channels_last) for scale in scale_list)
 
-    # Reuse cached facies pyramids — no recomputation if already built
-    facies_pyramids = to_facies_pyramids(
-        scale_list, data_dir, channels_last, num_classes, normalization_range
-    )
-    if not facies_pyramids or facies_pyramids[0].numel() == 0:
-        return tuple(
-            _empty_pyramid_tensor(scale, channels_last) for scale in scale_list
-        )
+    # Standard RGB palette for facies classes (0:Black, 1:Red, 2:Blue, 3:Green)
+    # Scaled to [0, 1] for processing.
+    palette = torch.tensor(
+        [
+            [0, 0, 0],  # 0: Floodplain
+            [255, 0, 0],  # 1: Point bar
+            [0, 0, 255],  # 2: Channel
+            [0, 255, 0],  # 3: Boundary
+        ],
+        dtype=torch.float32,
+    ) / 255.0
 
-    # Background fill value — min of normalization_range (e.g. -1 or 0)
-    bg_value = float(normalization_range[0])
-
-    # Well class labels — {xz_crossline_NNN: (H_native, W_native) int64}
     wells_data = dict(np.load(str(wells_path)))
-    n = facies_pyramids[0].shape[0]
+
+    config = InterpolatorConfig(channels_last=channels_last, num_classes=num_classes)
+    interpolator = WellInterpolator(config)
 
     pyramids_list: list[list[torch.Tensor]] = [[] for _ in range(len(scale_list))]
 
-    for i, key in enumerate(sorted(wells_data.keys())):
-        if i >= n:
-            break
+    norm_min, norm_max = float(normalization_range[0]), float(normalization_range[1])
+    norm_scale = norm_max - norm_min
+    norm_shift = norm_min
 
-        well_labels: np.ndarray = wells_data[key].astype(np.int64)  # (H, W)
-        native_w = well_labels.shape[1]
-
-        # Well columns at native resolution (any non-zero label in that column)
+    for _, key in enumerate(sorted(wells_data.keys())):
+        well_labels = wells_data[key]
+        # Identify original well columns to mask out background later
+        # (Assuming 0 is the background facies but can still be part of a well)
         nonzero_cols = np.where(well_labels.any(axis=0))[0]
+
+        # Generate categorical label pyramid (H, W)
+        pyramid = interpolator.interpolate_array(well_labels, scale_list)
 
         for scale_idx, resolution in enumerate(scale_list):
             if channels_last:
@@ -838,33 +837,34 @@ def to_wells_pyramids(
             else:
                 _, _, _, new_w = resolution
 
-            # Clone facies tensor for this sample at this scale
-            # Shape: (C, H, W) or (H, W, C)
-            well_t = facies_pyramids[scale_idx][i].clone()
+            # labels is (H, W)
+            labels = pyramid[scale_idx]
 
-            # Scale well column indices to target resolution
-            scaled_cols: np.ndarray = np.unique(
-                np.clip((nonzero_cols * new_w / native_w).astype(int), 0, new_w - 1)
-            )
+            # 2. Map labels to RGB (H, W, 3)
+            # Ensure palette is on the same device
+            rgb = palette[labels.clamp(0, palette.size(0) - 1)].to(labels.device)
 
-            # Build boolean column mask (True = well column)
-            col_mask = np.zeros(new_w, dtype=bool)
+            # 3. Mask non-well columns (Zero RGB = Black)
+            well_width = float(well_labels.shape[1])
+            scaled_indices = (nonzero_cols.astype(np.float32) * new_w / well_width).astype(np.int32)
+            scaled_cols = np.unique(np.clip(scaled_indices, 0, new_w - 1))
+            col_mask = torch.zeros(new_w, dtype=torch.bool, device=labels.device)
             col_mask[scaled_cols] = True
-            non_well = ~col_mask  # columns to zero out
+            rgb[:, ~col_mask, :] = 0.0
 
-            if channels_last:
-                well_t[:, non_well, :] = bg_value  # (H, W, C)
-            else:
-                well_t[:, :, non_well] = bg_value  # (C, H, W)
+            # 4. Normalize to [-1, 1] (or target normalization_range)
+            # Black (0, 0, 0) becomes (-1, -1, -1)
+            rgb = rgb * norm_scale + norm_shift
 
-            pyramids_list[scale_idx].append(well_t)
+            # 5. Permute if not channels_last
+            if not channels_last:
+                rgb = rgb.permute(2, 0, 1)
+
+            pyramids_list[scale_idx].append(rgb)
 
     if not pyramids_list[0]:
-        return tuple(
-            _empty_pyramid_tensor(scale, channels_last) for scale in scale_list
-        )
+        return tuple(_empty_pyramid_tensor(scale, channels_last) for scale in scale_list)
 
-    # Tensors are already in final layout — stack directly
     return tuple(torch.stack(pyramid, dim=0) for pyramid in pyramids_list)
 
 

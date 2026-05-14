@@ -55,11 +55,13 @@ class WellInterpolator(BaseInterpolator):
             A list of one-hot encoded PyTorch tensors, one per requested
             resolution, representing the well trace pyramid.
         """
+        import torch.nn.functional as F
+
         if data_array.ndim == 3:
             data_array = data_array[:, :, 0]
         data_array = data_array.astype(np.float32, copy=False)
 
-        height, width = data_array.shape
+        _, width = data_array.shape
         nonzero_cols = np.where(data_array.any(axis=0))[0]
 
         global_max_class = int(data_array.max())
@@ -79,13 +81,37 @@ class WellInterpolator(BaseInterpolator):
                 scaled_col = int(well_col * new_w / width)
                 scaled_col = min(new_w - 1, max(0, scaled_col))
 
-                # Downsample the vertical trace using nearest neighbor
-                step = height / new_h
-                indices = np.minimum((np.arange(new_h) * step).astype(int), height - 1)
-                output[:, scaled_col] = data_array[indices, well_col]
+                # Extract the vertical trace (H,)
+                trace = data_array[:, well_col]
 
+                # --- Majority Vote (Mode Pooling) Downsampling ---
+                # Step 1: Convert to PyTorch long tensor
+                trace_tensor: torch.Tensor = torch.from_numpy(  # type: ignore
+                    trace.astype(np.int64)
+                ).long()
+
+                # Step 2: One-hot encode the 1D trace
+                trace_one_hot = F.one_hot(
+                    trace_tensor, num_classes=actual_num_classes
+                ).float()
+
+                # Step 3: Permute for 1D pooling: (Length, Channels) -> (1, Channels, Length)
+                trace_one_hot = trace_one_hot.permute(1, 0).unsqueeze(0)
+
+                # Step 4: Adaptive Average Pool to get the volumetric proportion of each facies
+                pooled_proportions = F.adaptive_avg_pool1d(
+                    trace_one_hot, output_size=new_h
+                )
+
+                # Step 5: Argmax to select the dominant facies (Majority Vote)
+                pooled_labels = torch.argmax(pooled_proportions.squeeze(0), dim=0)
+
+                # Insert the pooled trace into the output array
+                output[:, scaled_col] = pooled_labels.cpu().numpy()
+
+            # Return the label indices directly (LongTensor)
+            # Downstream consumers (e.g. datasets/utils.py) will map these to RGB.
             indices_tensor = torch.as_tensor(output, dtype=torch.long)
-            one_hot = self._one_hot_encode(indices_tensor, actual_num_classes)
-            pyramid.append(one_hot)
+            pyramid.append(indices_tensor)
 
         return pyramid

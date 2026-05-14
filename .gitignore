@@ -13,6 +13,7 @@ logs/**
 outputs/**
 tools/
 scripts/
+scratch/
 results*/**
 **/events.out.tfevents*
 

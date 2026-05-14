@@ -44,9 +44,9 @@ class MaskInterpolator(WellInterpolator):
         pyramid: list[torch.Tensor] = []
 
         for well_tensor in well_pyramid:
-            # well_tensor is (H, W, C) from WellInterpolator._one_hot_encode
-            # Filter classes 1: and exclude background class 0
-            mask = well_tensor[..., 1:].any(dim=-1).int()  # (H, W)
+            # well_tensor is now a LongTensor of labels (H, W) from WellInterpolator
+            # Facies labels are 1, 2, 3... while 0 is the background.
+            mask = (well_tensor > 0).int()
 
             if self.config.channels_last:
                 # NHWC: (H, W, 1)

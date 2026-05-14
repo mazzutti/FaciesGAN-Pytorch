@@ -343,17 +343,17 @@ class ExperimentOptions(TrainingOptions):
         skip_training: bool = False,
         model_paths: list[str] | None = None,
         nproc_per_node: int = 2,
-        embedding_methods: list[str] = (
+        embedding_methods: list[str] = [
             EmbeddingMethod.ISOMAP,
             EmbeddingMethod.MDS,
             EmbeddingMethod.TSNE,
             EmbeddingMethod.UMAP,
-        ),
-        embedding_data: list[str] = (
+        ],
+        embedding_data: list[str] = [
             FeatureKey.FACIES,
             FeatureKey.ROCK_PHYSICS,
             FeatureKey.SEISMIC,
-        ),
+        ],
         embedding_per_facies: bool = False,
         no_embeddings: bool = False,
         **kwargs: Any,
