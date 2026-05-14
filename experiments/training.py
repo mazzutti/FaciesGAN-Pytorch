@@ -18,8 +18,8 @@ def _has_resumable_scale_artifacts(variant_output: str, scale: int) -> bool:
         CheckpointFilenames.NOISE_AMP,
         CheckpointFilenames.GENERATOR,
         CheckpointFilenames.EPOCH_CKPT,
-        CheckpointFilenames.COMPLETED_EPOCH
-)
+        CheckpointFilenames.COMPLETED_EPOCH,
+    )
     return any(os.path.isfile(os.path.join(scale_dir, f)) for f in required_any)
 
 

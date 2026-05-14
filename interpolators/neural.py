@@ -17,9 +17,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-import utils
 from apex_utils import FusedLayerNorm
 from config import DomainConfig
+from device import device_manager
 from interpolators.base import BaseInterpolator
 from interpolators.color_encoder import ColorEncoder
 from interpolators.config import InterpolatorConfig
@@ -89,7 +89,7 @@ class NeuralSmoother(BaseInterpolator):
         """
         super().__init__(config)
         # resolved device for the instance (CUDA/CPU)
-        self.device: torch.device = utils.resolve_device()
+        self.device: torch.device = device_manager.device
         self.num_classes: int = int(config.num_classes or DomainConfig.NUM_FACIES)
         self.model = ResidualMLP(
             num_classes=self.num_classes,
@@ -211,7 +211,7 @@ class NeuralSmoother(BaseInterpolator):
         if config is None:
             config = InterpolatorConfig()
 
-        device = utils.resolve_device()
+        device = device_manager.device
         model = ResidualMLP(
             num_classes=config.num_classes,
             scale=config.scale,
@@ -220,7 +220,7 @@ class NeuralSmoother(BaseInterpolator):
         native_h, native_w = config.geometry
 
         img_np = _load_image(image_path)  # (H, W, 3) float32 [0,1]
-        encoder = ColorEncoder(img_np, device=device)
+        encoder = ColorEncoder(img_np)
 
         # Build coordinate grid for the native resolution
         coords = get_mgrid(height=native_h, width=native_w).to(device)  # (H*W, 2)
@@ -288,7 +288,7 @@ class NeuralSmoother(BaseInterpolator):
         )  # avoid circular at module level
 
         BaseInterpolator.__init__(instance, config)
-        instance.device = utils.resolve_device()
+        instance.device = device_manager.device
         instance.num_classes = DomainConfig.NUM_FACIES
         instance.model = ResidualMLP(
             num_classes=instance.num_classes,
@@ -447,7 +447,7 @@ class NeuralSmoother(BaseInterpolator):
                 .unsqueeze(0)
             )
 
-            encoder = ColorEncoder(img_np, device=self.device)
+            encoder = ColorEncoder(img_np)
             palette = encoder.palette_tensor.to(self.device).float()
 
             for resolution in resolutions:

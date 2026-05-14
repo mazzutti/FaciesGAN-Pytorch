@@ -1,1 +1,1 @@
-"""FaciesGAN Experiments Module."""
+"""Experiments module initialization."""

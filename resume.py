@@ -15,14 +15,10 @@ import argparse
 import glob
 import json
 import os
-import random
 from types import SimpleNamespace
 
-import torch
-import torch.distributed as dist
-
 from config import CheckpointFilenames, ExperimentPaths
-from enums import DdpBackend, DeviceType
+from device import device_manager
 from log import init_output_logging
 from options import ResumeOptions
 from training.trainer import Trainer
@@ -79,39 +75,21 @@ if __name__ == "__main__":
 
     init_output_logging(os.path.join(options.out_path, "log.txt"))
 
-    if options.manual_seed is not None:
-        random.seed(options.manual_seed)
-        torch.manual_seed(options.manual_seed)  # type: ignore
-
     if arguments.finetuning:
         print("Fine-Tuning: %d iter\n" % arguments.num_iter)
         options.num_iter = arguments.num_iter
 
-    device = torch.device(
-        f"{DeviceType.CUDA}:{options.gpu_device}"
-        if torch.cuda.is_available()
-        else (
-            f"{DeviceType.MPS}:{options.gpu_device}"
-            if torch.backends.mps.is_available()
-            else DeviceType.CPU
-        )
+    # Global device initialization using DeviceManager singleton
+    device_manager.initialize(
+        gpu_id=options.gpu_device,
+        use_cpu=getattr(options, "use_cpu", False),
+        manual_seed=options.manual_seed,
     )
-
-    # ── Detect distributed (torchrun) ────────────────────────────────
-    local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    distributed = local_rank >= 0
-
-    if distributed:
-        dist.init_process_group(backend=DdpBackend.NCCL)
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f"{DeviceType.CUDA}:{local_rank}")
 
     trainer = Trainer(
         options,
         arguments.fine_tuning,
         arguments.checkpoint_path,
-        device,
-        distributed=distributed,
     )
 
     if arguments.fine_tuning:
@@ -122,8 +100,11 @@ if __name__ == "__main__":
         last_scale_path = os.path.join(arguments.checkpoint_path, str(last_scale))
 
         # If the last scale folder was created, but no models were saved, remove the folder
-        has_ckpt = os.path.isfile(os.path.join(last_scale_path, CheckpointFilenames.GENERATOR)) or \
-                   os.path.isfile(os.path.join(last_scale_path, CheckpointFilenames.EPOCH_CKPT))
+        has_ckpt = os.path.isfile(
+            os.path.join(last_scale_path, CheckpointFilenames.GENERATOR)
+        ) or os.path.isfile(
+            os.path.join(last_scale_path, CheckpointFilenames.EPOCH_CKPT)
+        )
 
         if not has_ckpt:
             for file in glob.glob(

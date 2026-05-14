@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 
 import utils
 from datasets.dataset import PyramidsDataset
+from device import device_manager
 from models.palette import PALETTE_RGB
 from options import TrainingOptions
 
@@ -33,9 +34,17 @@ def main():
         if facies_batch.shape[0] == 0:
             continue
 
-        f = facies_batch[idx].detach().cpu()
-        w = wells_batch[idx].detach().cpu() if wells_batch.shape[0] > idx else None
-        s = seismic_batch[idx].detach().cpu() if seismic_batch.shape[0] > idx else None
+        f = device_manager.to_cpu(facies_batch[idx])
+        w = (
+            device_manager.to_cpu(wells_batch[idx])
+            if wells_batch.shape[0] > idx
+            else None
+        )
+        s = (
+            device_manager.to_cpu(seismic_batch[idx])
+            if seismic_batch.shape[0] > idx
+            else None
+        )
 
         # Split channels based on configuration
         ip = f[num_facies_ch] if f.shape[0] > num_facies_ch else None

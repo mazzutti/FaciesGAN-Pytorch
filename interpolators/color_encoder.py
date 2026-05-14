@@ -12,6 +12,7 @@ import torch
 from numpy.typing import NDArray
 
 from config import DomainConfig
+from device import device_manager
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,6 @@ class ColorEncoder:
     ----------
     img_array : NDArray[Any]
         Input RGB image array of shape (H, W, 3) with pixel values.
-    device : torch.device
-        Device (CPU/CUDA) for tensor operations.
 
     Attributes
     ----------
@@ -42,22 +41,20 @@ class ColorEncoder:
         Palette as a float32 tensor on the specified device.
     """
 
-    def __init__(self, img_array: NDArray[Any], device: torch.device) -> None:
+    def __init__(self, img_array: NDArray[Any]) -> None:
         """Create a ColorEncoder from an example RGB image.
 
         Parameters
         ----------
         img_array : ndarray
             RGB image array shaped (H, W, 3) used to build the palette.
-        device : torch.device
-            Device on which palette tensors will be stored.
         """
         # Ensure we work with float32 NumPy arrays to avoid creating
         # torch.float64 tensors.
         pixels = img_array.reshape(-1, 3).astype(np.float32, copy=False)
         self.palette = np.unique(pixels, axis=0).astype(np.float32, copy=False)
         self.num_classes = len(self.palette)
-        self.device = device
+        self.device = device_manager.device
         # Use torch.from_numpy to preserve dtype (float32).
         try:
             self.palette_tensor = torch.from_numpy(  # pyright: ignore
@@ -110,18 +107,20 @@ class ColorEncoder:
         """
 
         # Move to CPU for bincount and ensure integer dtype
-        labels_cpu = labels.detach().cpu().long().reshape(-1)
+        labels_cpu = device_manager.to_cpu(labels).long().reshape(-1)
         counts = torch.bincount(labels_cpu, minlength=self.num_classes).float()
         total = labels_cpu.numel()
 
-        weights = total / (self.num_classes * (counts + max(DomainConfig.EPSILON, 1e-5)))
+        weights = total / (
+            self.num_classes * (counts + max(DomainConfig.EPSILON, 1e-5))
+        )
         weights = weights / weights.mean()
 
         # Log rounded weights for user information
         try:
-            rounded = weights.cpu().numpy().round(2).astype(float).tolist()
+            rounded = device_manager.to_numpy(weights).round(2).astype(float).tolist()
         except (RuntimeError, TypeError, ValueError):
-            rounded = [float(x) for x in weights.detach().cpu().reshape(-1)]
+            rounded = [float(x) for x in device_manager.to_cpu(weights).reshape(-1)]
         logger.info(f"Auto-calculated Class Weights: {rounded}")
 
         return weights.to(self.device).float()

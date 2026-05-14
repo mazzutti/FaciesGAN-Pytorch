@@ -1,8 +1,11 @@
 """Main execution runner for experiments."""
 
+from __future__ import annotations
+
 import os
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
@@ -11,17 +14,18 @@ import utils
 from config import CheckpointFilenames
 from datasets.dataset import PyramidsDataset
 from datasets.utils import build_conditioning_pyramids
+from device import device_manager
+from enums import ExperimentVariant
 from log import format_time
 from main import get_arguments as get_main_arguments
-from options import TrainingOptions
-from enums import ExperimentVariant
+from options import ExperimentOptions, TrainingOptions
 
 from .cli import build_training_args, get_arguments
 from .embeddings import (
     ExperimentCache,
     compute_shared_embeddings,
     load_shared_embeddings,
-    save_shared_embeddings
+    save_shared_embeddings,
 )
 from .generation import generate_variant
 from .plotting import plot_method_all_variants, plot_sample_grid
@@ -48,9 +52,9 @@ def _has_loadable_scale(model_path: str, max_scan: int = 64) -> bool:
 
 def main() -> None:
     parser = get_arguments()
-    args = parser.parse_args()
+    args = parser.parse_args(namespace=ExperimentOptions())
 
-    device = utils.resolve_device(args.gpu_device)
+    device_manager.initialize(gpu_id=args.gpu_device)
     base_output = args.output_path
     nproc = args.nproc_per_node
 
@@ -80,7 +84,7 @@ def main() -> None:
         print("=" * 70)
         print("FACIESGAN CONDITIONING-ABLATION EXPERIMENTS")
         print("=" * 70)
-        print(f"Device: {device} (DDP with {nproc} GPUs)")
+        print(f"Device: {device_manager.device} (DDP with {nproc} GPUs)")
         print(f"compile_backend: {'ON' if args.compile_backend else 'OFF'}")
         print(f"Variants: {', '.join(ev.id for ev in ExperimentVariant)}")
         print(f"Output:   {base_output}")
@@ -182,13 +186,57 @@ def main() -> None:
     )
     _base_opts.rec = False
     _dataset = PyramidsDataset(_base_opts)
+    # NOTE: We no longer subset the dataset here. By keeping the full dataset,
+    # we can use absolute indices (from seen_indices) to retrieve the correct
+    # ground-truth samples for comparison plots and embeddings.
+
+    # ── Load seen indices from the first trained variant's checkpoint ──
+    seen_indices: list[int] = []
+    # Scan scales from finest to coarsest to find the most recent seen_indices
+    last_scale = find_last_completed_scale(first_model)
+    for s in range(last_scale, -1, -1):
+        ckpt_path = os.path.join(first_model, str(s), CheckpointFilenames.EPOCH_CKPT)
+        if os.path.exists(ckpt_path):
+            try:
+                from training.checkpoint import Checkpoint
+
+                ckpt = Checkpoint.load(ckpt_path)
+                seen_indices_raw = ckpt.seen_indices
+                if seen_indices_raw:
+                    # Type hint for the analyzer to understand the pair indexing
+                    raw_list: list[Any] = seen_indices_raw
+                    if isinstance(raw_list[0], (list, tuple)):
+                        # New format: [[rel0, orig0], [rel1, orig1], ...]
+                        # We use the absolute (orig) indices for generation to ensure
+                        # we fetch the correct conditioning from the full dataset.
+                        well_choices = [int(p[1]) for p in raw_list]
+                    else:
+                        # Old format: [rel0, rel1, ...]
+                        well_choices = [int(idx) for idx in raw_list]
+
+                    seen_indices = well_choices
+                    print(
+                        f"\n[INFO] Loaded {len(seen_indices)} seen indices from checkpoint."
+                    )
+                    break
+            except Exception as e:
+                print(f"Warning: Could not load seen indices from {ckpt_path}: {e}")
 
     # Pre-build pyramids for generation once
     wells_pyramid, seismic_pyramid = build_conditioning_pyramids(_base_opts)
 
     # Move pyramids to device
-    wells_pyramid = {k: v.to(device) for k, v in wells_pyramid.items()}
-    seismic_pyramid = {k: v.to(device) for k, v in seismic_pyramid.items()}
+    wells_pyramid = device_manager.to_device(wells_pyramid)
+    seismic_pyramid = device_manager.to_device(seismic_pyramid)
+
+    # ── Initialize data containers ──
+    all_facies: dict[str, list[np.ndarray]] = {}
+    all_ip: dict[str, list[np.ndarray]] = {}
+    all_is: dict[str, list[np.ndarray]] = {}
+    all_vpvs: dict[str, list[np.ndarray]] = {}
+    all_seismic: dict[str, list[np.ndarray]] = {}
+    all_mask_indexes: dict[str, torch.Tensor] = {}
+    shared: dict[str, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
 
     # ── Try to load cached embeddings ──
     # Reuse only when no variant was retrained (all skipped); if any model
@@ -203,18 +251,19 @@ def main() -> None:
         all_facies = cached.all_facies
         all_mask_indexes = cached.all_mask_indexes
         all_ip = cached.all_ip
+        all_is = cached.all_is
+        all_vpvs = cached.all_vpvs
         all_seismic = cached.all_seismic
         print(f"Loaded cached embeddings for epoch {args.num_iter}")
-    else:
+        # Verify cache completeness (especially for rock physics)
+        if not all_is or not all_vpvs:
+            print("    [Cache] Incomplete (missing rock physics). Recomputing...")
+            cached = None
+    if cached is None:
         # ── Generate facies (and rock_physics) from all trained models ──
         print(f"\n{'=' * 70}")
         print("GENERATING FACIES FROM TRAINED MODELS")
         print(f"{'=' * 70}\n")
-
-        all_facies: dict[str, list[np.ndarray]] = {}
-        all_ip: dict[str, list[np.ndarray]] = {}
-        all_seismic: dict[str, list[np.ndarray]] = {}
-        all_mask_indexes: dict[str, torch.Tensor] = {}
 
         from models.utils import calculate_channels
 
@@ -233,57 +282,68 @@ def main() -> None:
             )
             channels = calculate_channels(variant_opts)
 
-            variant_facies, variant_ip, variant_seismic, variant_mi = generate_variant(
+            (
+                variant_facies,
+                variant_ip,
+                variant_is,
+                variant_vpvs,
+                variant_seismic,
+                variant_mi,
+            ) = generate_variant(
                 model_path=model_path,
-                opts=_base_opts,
+                opts=variant_opts,
                 how_many=args.how_many,
-                device=device,
                 wells_pyramid=tuple(wells_pyramid.values()),
                 seismic_pyramid=tuple(seismic_pyramid.values()),
                 channels=channels,
-                gen_output=gen_output
-)
+                gen_output=gen_output,
+                seen_indices=seen_indices,
+            )
             all_facies[name] = variant_facies
             if variant_ip:
                 all_ip[name] = variant_ip
+            if variant_is:
+                all_is[name] = variant_is
+            if variant_vpvs:
+                all_vpvs[name] = variant_vpvs
             if variant_seismic:
                 all_seismic[name] = variant_seismic
             all_mask_indexes[name] = variant_mi
 
         if not args.no_embeddings:
             # ── Shared embeddings for all plots ──
-            emb_methods: list[str] = args.embedding_methods
+            emb_methods = list(args.embedding_methods)
             print(
                 f"\nComputing shared embeddings "
                 f"({', '.join(m.upper() for m in emb_methods)}) ...",
-                flush=True
-)
+                flush=True,
+            )
             shared = compute_shared_embeddings(
                 all_facies, _dataset, methods=emb_methods
             )
+            print("    Done initial compute_shared_embeddings.", flush=True)
 
             # Persist for future resume
             save_shared_embeddings(
                 ExperimentCache(
-                    shared=shared,
+                    shared={},  # Shared embeddings will be computed per-kind below
                     all_facies=all_facies,
                     all_mask_indexes=all_mask_indexes,
                     all_ip=all_ip,
-                    all_seismic=all_seismic
-),
+                    all_is=all_is,
+                    all_vpvs=all_vpvs,
+                    all_seismic=all_seismic,
+                ),
                 base_output,
-                args.num_iter
-)
+                args.num_iter,
+            )
+            print("    Done initial save_shared_embeddings.", flush=True)
         else:
             shared = {}
 
     # ── Resolve effective embedding method list ────────────────────────────
-    emb_methods = list(
-        getattr(args, "embedding_methods", ["isomap", "mds", "tsne", "umap"])
-    )
-    emb_data_kinds: list[str] = list(
-        getattr(args, "embedding_data", ["facies", "rock_physics"])
-    )
+    emb_methods = list(args.embedding_methods or ["isomap", "mds", "tsne", "umap"])
+    emb_data_kinds: list[str] = list(args.embedding_data or ["facies", "rock_physics"])
 
     # ── 1. Comparison Grids ────────────────────────────────────────────────
     print(f"\n{'=' * 70}")
@@ -292,32 +352,43 @@ def main() -> None:
 
     import utils as _utils
 
-    # Get real data once
+    # ── 1. Comparison Grids ───────────────────────────────────────────────
+    # Split real tensor to avoid clamping categorical facies indices to [-1, 1]
     real_tensor, _, _, real_seismic_tensor = _dataset.get_scale_data(-1)
     norm_range: tuple[float, float] = (
         float(_base_opts.normalization_range[0]),
-        float(_base_opts.normalization_range[1])
-)
-    real_full_np = _utils.torch2np(
-        real_tensor,
-        denormalize=True,
-        normalization_range=norm_range
-)
+        float(_base_opts.normalization_range[1]),
+    )
     facies_ch = _base_opts.num_facies_channels
+    real_facies_tensor = real_tensor[:, :facies_ch, ...]
+    real_rp_tensor = real_tensor[:, facies_ch:, ...]
+
+    # Facies (RGB or categorical): no denormalization
+    real_facies_np = _utils.torch2np(real_facies_tensor, denormalize=False)
+    # Rock Physics (continuous): apply denormalization
+    real_rp_np = _utils.torch2np(
+        real_rp_tensor, denormalize=True, normalization_range=norm_range
+    )
+    # Recombine into full numpy array
+    real_full_np = np.concatenate([real_facies_np, real_rp_np], axis=-1)
 
     # Define kinds to plot
     plots = [
         PlotData("facies", all_facies, real_full_np[..., :facies_ch]),
         PlotData("ip", all_ip, real_full_np[..., facies_ch] if all_ip else None),
+        PlotData("is", all_is, real_full_np[..., facies_ch + 1] if all_is else None),
+        PlotData(
+            "vp_vs", all_vpvs, real_full_np[..., facies_ch + 2] if all_vpvs else None
+        ),
         PlotData(
             "seismic",
             all_seismic,
             (
-                np.transpose(real_seismic_tensor.cpu().numpy(), (0, 2, 3, 1))
+                np.transpose(device_manager.to_numpy(real_seismic_tensor), (0, 2, 3, 1))
                 if all_seismic
                 else None
-            )
-),
+            ),
+        ),
     ]
 
     for p in plots:
@@ -325,7 +396,15 @@ def main() -> None:
             continue
         print(f"\n{'-' * 70}")
         print(f"Generating {p.kind} comparison grid...")
-        plot_sample_grid(p.data_dict, p.real_np, base_output, p.kind)
+        plot_sample_grid(
+            p.data_dict,
+            p.real_np,
+            base_output,
+            p.kind,
+            all_mask_indexes,
+            num_samples=args.num_real_facies,
+            seed=args.manual_seed,
+        )
 
     # ── 2. Embedding Plots ────────────────────────────────────────────────
     if not args.no_embeddings:
@@ -333,46 +412,103 @@ def main() -> None:
         print("GENERATING EMBEDDING PLOTS")
         print(f"{'=' * 70}")
 
-        emb_data_map = {
-            "facies": (all_facies, {"rock_physics_only": False, "seismic_only": False}),
-            "rock_physics": (
+        emb_data_map: dict[
+            str,
+            tuple[
+                dict[str, list[np.ndarray]],
+                dict[str, bool | int],
+            ],
+        ] = {
+            "facies": (
+                all_facies,
+                {"rock_physics_only": False, "seismic_only": False},
+            ),
+            "ip": (
                 all_ip,
-                {"rock_physics_only": True, "seismic_only": False}
-),
+                {
+                    "rock_physics_only": True,
+                    "seismic_only": False,
+                    "channel_index": facies_ch,
+                },
+            ),
+            "is": (
+                all_is,
+                {
+                    "rock_physics_only": True,
+                    "seismic_only": False,
+                    "channel_index": facies_ch + 1,
+                },
+            ),
+            "vp_vs": (
+                all_vpvs,
+                {
+                    "rock_physics_only": True,
+                    "seismic_only": False,
+                    "channel_index": facies_ch + 2,
+                },
+            ),
             "seismic": (
                 all_seismic,
-                {"rock_physics_only": False, "seismic_only": True}
-),
+                {"rock_physics_only": False, "seismic_only": True},
+            ),
         }
 
-        for kind in emb_data_kinds:
+        # Ensure vp_vs is included if rock_physics was requested
+        effective_kinds: list[str] = []
+        for k in emb_data_kinds:
+            if k == "rock_physics":
+                effective_kinds.append("ip")
+                effective_kinds.append("is")
+                effective_kinds.append("vp_vs")
+            else:
+                effective_kinds.append(k)
+
+        for kind in effective_kinds:
             if kind not in emb_data_map or not emb_data_map[kind][0]:
                 continue
 
             data_dict, emb_args = emb_data_map[kind]
-            plot_kind = "ip" if kind == "rock_physics" else kind
+            print(f"\n--- Embedding kind: {kind} ---")
+            # RECOMPUTE shared embeddings for each kind to ensure manifolds
+            # are specific to the feature space being analyzed.
+            # Ensure boolean flags are strictly bool (not int) to satisfy
+            # type expectations of compute_shared_embeddings.
+            coerced_args = {
+                k: (bool(v) if k in ("rock_physics_only", "seismic_only") else v)
+                for k, v in emb_args.items()
+            }
 
-            print(f"\n{'-' * 70}")
-            print(f"Computing shared {kind} embeddings for plots...", flush=True)
+            # Explicitly cast boolean arguments to bool for type checking
+            rock_physics_only = (
+                bool(coerced_args.pop("rock_physics_only", False))
+                if "rock_physics_only" in coerced_args
+                else False
+            )
+            seismic_only = (
+                bool(coerced_args.pop("seismic_only", False))
+                if "seismic_only" in coerced_args
+                else False
+            )
 
-            # Use shared embeddings if available for facies, otherwise compute
-            if kind == "facies" and shared:
-                current_shared = shared
-            else:
-                current_shared = compute_shared_embeddings(
-                    data_dict, _dataset, methods=emb_methods, **emb_args
-                )
+            shared = compute_shared_embeddings(
+                data_dict,
+                _dataset,
+                methods=emb_methods,
+                rock_physics_only=rock_physics_only,
+                seismic_only=seismic_only,
+                **coerced_args,
+            )
 
             for method in emb_methods:
                 plot_method_all_variants(
-                    current_shared,
+                    shared,
                     method,
                     base_output,
                     args.num_iter,
-                    plot_kind,
-                    all_mask_indexes=all_mask_indexes,
-                    embedding_per_facies=args.embedding_per_facies
-)
+                    kind,
+                    all_mask_indexes,
+                    args.embedding_per_facies,
+                )
 
     total_elapsed = format_time(int(time.time() - total_start))
     print(f"\n{'=' * 70}")

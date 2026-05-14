@@ -6,16 +6,15 @@ import numpy as np
 import torch
 
 from config import DomainConfig
-from enums import DataFiles
+from device import device_manager
+from enums import ChannelKey, DataFiles, SplitKey
 from models.facies_gan import FaciesGAN
-from models.utils import SplitKey, split_facies_rp
+from models.utils import split_facies_rp
 from options import TrainingOptions
-from physics.seismic import calculate_synthetic_seismic
-from training.trainer import ChannelKey
 
 
-def _generate_on_device(
-    device: torch.device,
+def _generate_samples(
+    gpu_id: int | None,
     model_path: str,
     opts: TrainingOptions,
     how_many: int,
@@ -24,22 +23,31 @@ def _generate_on_device(
     channels: dict[ChannelKey, int],
     gen_output: str,
     start_index: int,
+    seen_indices: list[int] | None = None,
     eps: float = DomainConfig.EPSILON,
-) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], torch.Tensor]:
+) -> tuple[
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    torch.Tensor,
+]:
     """Generate facies (and rock physics when enabled) on a single device.
 
     Returns
     -------
-    tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], torch.Tensor]
-        ``(facies_arrays, ip_arrays, seismic_arrays, mask_indexes)``.
-        *ip_arrays* and *seismic_arrays* are empty when rock physics is not enabled.
+    tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray], torch.Tensor]
+        ``(facies_arrays, ip_arrays, is_arrays, vpvs_arrays, seismic_arrays, mask_indexes)``.
+        *ip_arrays*, *is_arrays*, *vpvs_arrays* and *seismic_arrays* are empty when rock physics is not enabled.
     """
-    import random as _rng
 
-    model = FaciesGAN(options=opts, device=device, channels=channels)
+    device = device_manager.get_or_initialize(gpu_id)
+
+    model = FaciesGAN(options=opts, channels=channels)
     model.load(model_path, load_discriminator=False, load_wells=False)
 
-    has_rock_physics = getattr(opts, "use_rock_physics", False)
+    has_rock_physics = opts.use_rock_physics
     facies_ch = model.num_facies_channels
 
     max_scale = len(model.noise_amps) - 1
@@ -53,6 +61,8 @@ def _generate_on_device(
 
     all_facies: list[np.ndarray] = []
     all_ip: list[np.ndarray] = []
+    all_is: list[np.ndarray] = []
+    all_vpvs: list[np.ndarray] = []
     all_seismic: list[np.ndarray] = []
     all_mi: list[torch.Tensor] = []
 
@@ -61,18 +71,30 @@ def _generate_on_device(
 
     facies_dir = os.path.join(gen_output, DataFiles.FACIES.name.lower())
     ip_dir = os.path.join(gen_output, DataFiles.Ip.name.lower())
+    is_dir = os.path.join(gen_output, DataFiles.Is.name.lower())
+    vpvs_dir = os.path.join(gen_output, DataFiles.VP_VS.name.lower())
     seismic_dir = os.path.join(gen_output, DataFiles.SEISMIC.name.lower())
     os.makedirs(facies_dir, exist_ok=True)
     if has_rock_physics:
         os.makedirs(ip_dir, exist_ok=True)
+        os.makedirs(is_dir, exist_ok=True)
+        os.makedirs(vpvs_dir, exist_ok=True)
         os.makedirs(seismic_dir, exist_ok=True)
 
     # These are constant for the entire generation run — build once outside the loop
-    well_choices = (
-        opts.wells_mask_columns
-        if hasattr(opts, "wells_mask_columns") and opts.wells_mask_columns
-        else (list(range(wells_pyramid[max_scale].shape[0])) if wells_pyramid else [0])
-    )
+    if seen_indices:
+        well_choices = seen_indices
+        print(
+            f"    [{device}] Using {len(well_choices)} seen indices provided to generator."
+        )
+    else:
+        well_choices = (
+            opts.wells_mask_columns
+            if hasattr(opts, "wells_mask_columns") and opts.wells_mask_columns
+            else (
+                list(range(wells_pyramid[max_scale].shape[0])) if wells_pyramid else [0]
+            )
+        )
     wells_dict = (
         {i: wells_pyramid[i] for i in range(len(wells_pyramid))}
         if wells_pyramid
@@ -83,13 +105,22 @@ def _generate_on_device(
         if seismic_pyramid
         else {}
     )
-    noise_amps = model.get_noise_amplitude(max_scale)
+
+    noise_amps = [torch.tensor(a, device=device) for a in model.noise_amps]
 
     for off in range(0, how_many, batch_size):
-        chunk = min(batch_size, how_many - off)
-        mi = torch.tensor(
-            [_rng.choice(well_choices) for _ in range(chunk)], device=device
-        )
+        count = min(batch_size, how_many - off)
+
+        # Ensure we use deterministic indexing even when batching.
+        # Cycle through well_choices (which may be seen_indices).
+        start_in_choices = (start_index + off) % len(well_choices)
+        mi_idx = [
+            well_choices[(start_in_choices + i) % len(well_choices)]
+            for i in range(count)
+        ]
+        mi = torch.tensor(mi_idx, dtype=torch.long, device=device)
+        all_mi.append(mi.cpu())
+
         with torch.no_grad():
             noises = model.get_pyramid_noise(
                 max_scale, mi, wells_dict, seismic_dict, rec=opts.rec
@@ -109,7 +140,7 @@ def _generate_on_device(
                 # facies_t may be None in some configurations; skip if so
                 if facies_t is None:
                     continue
-                facies_np = facies_t.squeeze(0).cpu().numpy()
+                facies_np = device_manager.to_numpy(facies_t.squeeze(0))
                 all_facies.append(facies_np)
 
                 # Save categorical indices to disk (more compact for users)
@@ -122,104 +153,114 @@ def _generate_on_device(
                 np.save(
                     os.path.join(
                         facies_dir,
-                        f"generated_{DataFiles.FACIES.name.lower()}_{idx}.npy",
+                        f"{DataFiles.FACIES.name.lower()}_{idx:04d}.npy",
                     ),
                     facies_idx,
                 )
 
                 if has_rock_physics and rp_t is not None:
-                    # Ip is the first channel of RP
+                    # rp_t: (1, 3, H, W) -> Ip, Is, VpVs
                     ip_norm = rp_t[:, 0:1, ...]
-                    ip_arr = ip_norm.squeeze(0).squeeze(0).cpu().numpy()
-                    norm_min = float(opts.normalization_range[0])
-                    norm_max = float(opts.normalization_range[1])
-                    ip_arr = np.clip(
-                        ip_arr,
-                        min(norm_min, norm_max),
-                        max(norm_min, norm_max),
-                    ).astype(np.float32)
+                    is_norm = rp_t[:, 1:2, ...]
+                    vpvs_norm = rp_t[:, 2:3, ...]
 
-                    # Unified Seismic Modeling (Matches Trainer)
-                    # Use model buffers for physics parameters
-                    p_state = model.physics_state
-                    rho_mean = p_state.rho_mean
-                    vp_min = p_state.vp_min
-                    vp_max = p_state.vp_max
-                    ip_max = p_state.ip_max
-                    ip_min = p_state.ip_min
+                    # Denormalize to physical units
+                    lo, hi = opts.normalization_range
+                    ip = ip_norm * (hi - lo) + lo
+                    is_data = is_norm * (hi - lo) + lo
+                    vpvs = vpvs_norm * (hi - lo) + lo
 
-                    # Dynamic Vp estimation (Matches Trainer)
-                    ip_phys: torch.Tensor = (ip_norm - norm_min) / (
-                        norm_max - norm_min + eps
-                    ) * (ip_max - ip_min) + ip_min
-                    vp_phys = ip_phys / rho_mean
-                    vp_mean = torch.mean(vp_phys).clamp(vp_min, vp_max)
+                    all_ip.append(device_manager.to_numpy(ip.squeeze(0)))
+                    all_is.append(device_manager.to_numpy(is_data.squeeze(0)))
+                    all_vpvs.append(device_manager.to_numpy(vpvs.squeeze(0)))
 
-                    synth = calculate_synthetic_seismic(
-                        ip_norm,
-                        vp_mean,
-                        p_state.dz_pyramid[max_scale],
-                        p_state,
-                    )
-                    syn_seismic = (
-                        synth.squeeze(0).squeeze(0).cpu().numpy().astype(np.float32)
-                    )
-
-                    all_ip.append(ip_arr)
-                    all_seismic.append(syn_seismic)
-
+                    # Save as npy
                     np.save(
                         os.path.join(
-                            ip_dir, f"generated_{DataFiles.Ip.name.lower()}_{idx}.npy"
+                            ip_dir,
+                            f"{DataFiles.Ip.name.lower()}_{idx:04d}.npy",
                         ),
-                        ip_arr,
+                        device_manager.to_numpy(ip.squeeze(0)),
                     )
+                    np.save(
+                        os.path.join(
+                            is_dir,
+                            f"{DataFiles.Is.name.lower()}_{idx:04d}.npy",
+                        ),
+                        device_manager.to_numpy(is_data.squeeze(0)),
+                    )
+                    np.save(
+                        os.path.join(
+                            vpvs_dir,
+                            f"{DataFiles.VP_VS.name.lower()}_{idx:04d}.npy",
+                        ),
+                        device_manager.to_numpy(vpvs.squeeze(0)),
+                    )
+
+                    # Also synthetic seismic
+                    seismic: torch.Tensor = model.get_synthetic_seismic(g.unsqueeze(0))
+                    all_seismic.append(device_manager.to_numpy(seismic.squeeze(0)))
                     np.save(
                         os.path.join(
                             seismic_dir,
-                            f"generated_{DataFiles.SEISMIC.name.lower()}_{idx}.npy",
+                            f"{DataFiles.SEISMIC.name.lower()}_{idx:04d}.npy",
                         ),
-                        syn_seismic,
+                        device_manager.to_numpy(seismic.squeeze(0)),
                     )
-        all_mi.append(mi.cpu())
-        print(f"    [{device}] {off + chunk}/{how_many}")
 
-    return all_facies, all_ip, all_seismic, torch.cat(all_mi)
+    return (
+        all_facies,
+        all_ip,
+        all_is,
+        all_vpvs,
+        all_seismic,
+        torch.cat(all_mi),
+    )
 
 
 def generate_variant(
     model_path: str,
     opts: TrainingOptions,
     how_many: int,
-    device: torch.device,
     wells_pyramid: tuple[torch.Tensor, ...],
     seismic_pyramid: tuple[torch.Tensor, ...],
     channels: dict[ChannelKey, int],
     gen_output: str,
-) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], torch.Tensor]:
+    seen_indices: list[int] | None = None,
+) -> tuple[
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    torch.Tensor,
+]:
     """Load a trained model and generate facies (and rock physics) samples.
 
     Returns
     -------
-    tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], torch.Tensor]
-        ``(facies, ip, seismic, mask_indexes)``.
+    tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray], torch.Tensor]
+        ``(facies, ip, is_data, vpvs, seismic, mask_indexes)``.
     """
-    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    num_gpus = device_manager.accelerator_count
     if num_gpus >= 2:
         from concurrent.futures import Future, ThreadPoolExecutor
 
         # Pre-initialize CUDA contexts on every GPU from the main thread
         # so worker threads don't hit "operation not permitted" errors.
-        for gpu_id in range(num_gpus):
-            torch.cuda.init()
-            torch.zeros(1, device=torch.device(f"cuda:{gpu_id}"))
+        device_manager.warmup_all_accelerators()
 
         chunk_per_gpu = how_many // num_gpus
         remainder = how_many % num_gpus
         futures: list[
             Future[
                 tuple[
-                    list[np.ndarray], list[np.ndarray], list[np.ndarray], torch.Tensor
+                    list[np.ndarray],
+                    list[np.ndarray],
+                    list[np.ndarray],
+                    list[np.ndarray],
+                    list[np.ndarray],
+                    torch.Tensor,
                 ]
             ]
         ] = []
@@ -227,11 +268,12 @@ def generate_variant(
             start = 0
             for gpu_id in range(num_gpus):
                 count = chunk_per_gpu + (1 if gpu_id < remainder else 0)
-                dev = torch.device(f"cuda:{gpu_id}")
+                if count == 0:
+                    continue
                 futures.append(
                     pool.submit(
-                        _generate_on_device,
-                        dev,
+                        _generate_samples,
+                        gpu_id,
                         model_path,
                         opts,
                         count,
@@ -240,24 +282,36 @@ def generate_variant(
                         channels,
                         gen_output,
                         start,
+                        seen_indices=seen_indices,
                     )
                 )
                 start += count
         facies: list[np.ndarray] = []
         ip: list[np.ndarray] = []
+        is_data: list[np.ndarray] = []
+        vpvs: list[np.ndarray] = []
         seismic: list[np.ndarray] = []
         mask_indexes_list: list[torch.Tensor] = []
         for fut in futures:
-            f, i_arr, s_arr, mi = fut.result()
-            facies.extend(f)
-            ip.extend(i_arr)
-            seismic.extend(s_arr)
-            mask_indexes_list.append(mi)
+            (
+                variant_facies,
+                variant_ip,
+                variant_is,
+                variant_vpvs,
+                variant_seismic,
+                variant_mi,
+            ) = fut.result()
+            facies.extend(variant_facies)
+            ip.extend(variant_ip)
+            is_data.extend(variant_is)
+            vpvs.extend(variant_vpvs)
+            seismic.extend(variant_seismic)
+            mask_indexes_list.append(variant_mi)
 
-        return facies, ip, seismic, torch.cat(mask_indexes_list)
+        return facies, ip, is_data, vpvs, seismic, torch.cat(mask_indexes_list)
     else:
-        return _generate_on_device(
-            device,
+        return _generate_samples(
+            None,
             model_path,
             opts,
             how_many,
@@ -266,4 +320,5 @@ def generate_variant(
             channels,
             gen_output,
             0,
+            seen_indices=seen_indices,
         )

@@ -27,9 +27,10 @@ from sklearn.metrics import euclidean_distances  # type: ignore
 from umap import UMAP  # type: ignore
 
 import utils
-from config import CheckpointFilenames, DomainConfig
 from background_workers import submit_plot_generated_outputs
+from config import CheckpointFilenames, DomainConfig
 from datasets.dataset import PyramidsDataset
+from device import device_manager
 from log import format_time
 from models import FaciesGAN
 from models.utils import calculate_channels
@@ -95,7 +96,10 @@ def generate_facies(
 
     # Generate noise for the maximum scale
     noises = model.get_pyramid_noise(
-        max_scale, mask_indexes, wells_pyramid, seismic_pyramid, rec=options.rec
+        max_scale,
+        mask_indexes,
+        wells_pyramid,
+        seismic_pyramid,
     )
 
     with torch.no_grad():
@@ -203,7 +207,7 @@ def generate_comparison_plots(
                     model.get_noise_amplitude(scale),
                     stop_scale=scale,
                 )
-                fake_list.append(fake.detach().cpu())
+                fake_list.append(device_manager.to_cpu(fake))
 
         submit_plot_generated_outputs(
             torch.stack(fake_list), real, scale, start, out_path, masks
@@ -571,10 +575,8 @@ if __name__ == "__main__":
     gen_output = os.path.join(arguments.out_path, "generated")
     os.makedirs(gen_output, exist_ok=True)
 
-    if torch.cuda.is_available():
-        device = torch.device(f"cuda:{arguments.gpu_device}")
-    else:
-        device = torch.device(f"cpu:{arguments.gpu_device}")
+    # Global device initialization using DeviceManager singleton
+    device_manager.initialize(gpu_id=arguments.gpu_device)
 
     with open(
         os.path.join(arguments.model_path, CheckpointFilenames.OPTIONS), "r"
@@ -589,7 +591,6 @@ if __name__ == "__main__":
     args = TrainingOptions(**{k: v for k, v in json_data.items() if k in _valid_keys})
     args.rec = arguments.rec
     args.wells = arguments.wells
-    args.device = device
     args.compile_backend = False  # no need to compile for one-shot generation
 
     start_time = time.time()
@@ -608,7 +609,7 @@ if __name__ == "__main__":
             masked_facies.append(facies_s)
 
     channels = calculate_channels(args)
-    faciesGAN = FaciesGAN(options=args, device=device, channels=channels)
+    faciesGAN = FaciesGAN(options=args, channels=channels)
 
     if arguments.comparison_plots:
         # Generate comparison plots instead of individual facies
