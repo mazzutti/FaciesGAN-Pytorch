@@ -17,15 +17,9 @@ import torch
 from joblib import Memory  # type: ignore
 from numpy.typing import NDArray
 from PIL import Image
-from enums import DeviceType
 
-from config import (
-    DirectoryConfig,
-    CheckpointFilenames,
-    PhysicsConfig,
-    DomainConfig,
-)
-from enums import DataFiles, StatKey
+from config import CheckpointFilenames, DirectoryConfig, DomainConfig, PhysicsConfig
+from enums import DataFiles, DeviceType, StatKey
 from options import NORMALIZATION_RANGE, TrainingOptions
 from typedefs import FileLike
 

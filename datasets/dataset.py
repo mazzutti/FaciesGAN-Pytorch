@@ -16,9 +16,9 @@ from torch.utils.data import Dataset
 
 from config import DomainConfig
 from options import TrainingOptions
+from typedefs import Batch, RawBatch
 
 from . import utils
-from typedefs import Batch, RawBatch
 
 
 class PyramidsDataset(Dataset[RawBatch]):
@@ -79,6 +79,7 @@ class PyramidsDataset(Dataset[RawBatch]):
         fp, wp, mp, sp = self.generate_pyramids()
 
         n_samples = fp[0].shape[0] if fp and fp[0].numel() > 0 else 0
+        self.indices = torch.arange(n_samples, dtype=torch.long)
 
         if n_samples > 0:
             has_wells = bool(wp and wp[0].numel() > 0)
@@ -279,6 +280,8 @@ class PyramidsDataset(Dataset[RawBatch]):
             indexes = torch.randperm(len(self.batches))
 
         self.batches = [self.batches[i] for i in indexes]
+        # Keep indices as a tensor to support advanced indexing (list/tensor indexing)
+        self.indices = self.indices[indexes]
         # Invalidate the scale data cache since order has changed
         self._scale_data_cache.clear()
 
@@ -319,8 +322,9 @@ class PyramidsDataset(Dataset[RawBatch]):
         """
         item = self.batches[idx]
         if self.include_index:
-            # Return tuple: (idx, item)
-            return idx, item
+            # Return tensor: [relative_idx, original_idx]
+            # This allows tracking both prefetch position and absolute dataset ID
+            return torch.tensor([idx, self.indices[idx]], dtype=torch.long), item
         return item
 
     def get_scale_data(self, scale: int | None = None) -> tuple[torch.Tensor, ...]:

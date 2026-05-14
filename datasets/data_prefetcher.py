@@ -6,14 +6,13 @@ to overlap CPU data loading with GPU computation using a dedicated CUDA stream.
 
 from __future__ import annotations
 
-from typing import Iterator, cast
+from typing import Iterator, List, Tuple
 
+import numpy as np
 import torch
 import torch.distributed as dist
 
-import utils
-
-from enums import DeviceType
+from device import device_manager
 from typedefs import Batch, IDataLoader, PyramidsBatch, RawBatch
 
 
@@ -27,25 +26,17 @@ class DataPrefetcher:
         A PyTorch ``DataLoader`` instance to iterate over.
     scale_indices : tuple[int, ...]
         Sequence of scale indices (0-based) to prepare data for.
-    device : torch.device, optional
-        Device to move tensors to, by default CPU.
     """
 
     def __init__(
         self,
         loader: IDataLoader,
         scale_indices: tuple[int, ...],
-        device: torch.device = torch.device(DeviceType.CPU),
     ) -> None:
         self.loader: Iterator[RawBatch] = iter(loader)
         self.scale_indices = scale_indices
-        self.device = device
 
-        self._stream = (
-            torch.cuda.Stream(device=self.device)
-            if self.device.type == DeviceType.CUDA
-            else None
-        )
+        self._stream = device_manager.create_stream()
         self.next_batch: RawBatch | None = None
         self.next_prepared: PyramidsBatch | None = None
         # List of dataset sample indices contained in the most recent batch
@@ -90,8 +81,10 @@ class DataPrefetcher:
         if not component:
             return {}
         return {
-            idx: utils.to_device(
-                component[idx], self.device, channels_last=True, non_blocking=True
+            idx: device_manager.to_device(
+                component[idx],
+                channels_last=True,
+                non_blocking=True,
             )
             for idx in self.scale_indices
             if idx < len(component)
@@ -110,9 +103,11 @@ class DataPrefetcher:
         torch.Tensor
             Indices tensor of dtype int64 on the target device.
         """
-        if isinstance(values, torch.Tensor):
-            return values.detach().to(self.device)
-        return torch.as_tensor(values, device=self.device, dtype=torch.long)
+        # Use as_tensor to handle both tensors and sequences while enforcing
+        # the correct device and dtype (int64) for indices.
+        return torch.as_tensor(
+            values, device=device_manager.device, dtype=torch.long
+        ).detach()
 
     def prepare_batch_async(self, batch: RawBatch) -> PyramidsBatch:
         """Perform batch preparation logic asynchronously.
@@ -126,7 +121,6 @@ class DataPrefetcher:
             The raw batch from the DataLoader. It handles multiple formats:
             - `Batch` NamedTuple
             - `(indices, Batch)` pair
-            - Raw tuple of 4 or 5+ elements (indices + components)
 
         Returns
         -------
@@ -134,50 +128,22 @@ class DataPrefetcher:
             A tuple of ``(indices, facies, wells, masks, seismic)`` where
             the per-scale components are dictionaries keyed by scale index.
         """
-        # Expect either:
-        #  - (indices_tensor, facies, wells, masks, seismic)
-        #  - (facies, wells, masks, seismic)
-        batch_tuple: tuple[object, ...] = cast(tuple[object, ...], batch)
-
-        if len(batch_tuple) >= 5:
-            first = batch_tuple[0]
-            if (
-                isinstance(first, torch.Tensor)
-                and first.dim() == 1
-                and first.dtype in (torch.int64, torch.int32)
-            ):
-                self.last_seen_indices = self._coerce_indices(first)
-                self.seen_indices.append(self.last_seen_indices)
-                facies = cast(tuple[torch.Tensor, ...], batch_tuple[1])
-                wells = cast(tuple[torch.Tensor, ...], batch_tuple[2])
-                masks = cast(tuple[torch.Tensor, ...], batch_tuple[3])
-                seismic = cast(tuple[torch.Tensor, ...], batch_tuple[4])
-            else:
-                self.last_seen_indices = None
-                facies = cast(tuple[torch.Tensor, ...], batch_tuple[0])
-                wells = cast(tuple[torch.Tensor, ...], batch_tuple[1])
-                masks = cast(tuple[torch.Tensor, ...], batch_tuple[2])
-                seismic = cast(tuple[torch.Tensor, ...], batch_tuple[3])
-        elif len(batch_tuple) == 2:
-            # Case: (indices, Batch_as_named_tuple)
-            self.last_seen_indices = self._coerce_indices(batch_tuple[0])
-            self.seen_indices.append(self.last_seen_indices)
-            facies_batch = cast(Batch, batch_tuple[1])
-            facies, wells, masks, seismic = (
-                facies_batch.facies,
-                facies_batch.wells,
-                facies_batch.masks,
-                facies_batch.seismic,
-            )
-        else:
+        # Distinguish between `Batch` (NamedTuple) and `tuple[Tensor, Batch]`
+        if isinstance(batch, Batch):
             self.last_seen_indices = None
-            facies_batch = cast(Batch, batch)
-            facies, wells, masks, seismic = (
-                facies_batch.facies,
-                facies_batch.wells,
-                facies_batch.masks,
-                facies_batch.seismic,
-            )
+            facies_batch = batch
+        else:
+            # It's a tuple[Tensor, Batch]
+            self.last_seen_indices = self._coerce_indices(batch[0])
+            self.seen_indices.append(self.last_seen_indices.detach().clone())
+            facies_batch = batch[1]
+
+        facies, wells, masks, seismic = (
+            facies_batch.facies,
+            facies_batch.wells,
+            facies_batch.masks,
+            facies_batch.seismic,
+        )
 
         # Move primary components to device
         facies_pyramid = self._to_pyramid(facies)
@@ -197,13 +163,18 @@ class DataPrefetcher:
         else:
             masks_pyramid = {}
 
+        # Extract relative index for training conditioning (the first column of our [rel, orig] pairs)
+        training_indices = self.last_seen_indices
+        if training_indices is not None and training_indices.dim() == 2:
+            training_indices = training_indices[:, 0]
+
         return (
             (
-                self.last_seen_indices
-                if self.last_seen_indices is not None
+                training_indices
+                if training_indices is not None
                 else torch.arange(
                     facies[0].shape[0] if facies else 0,
-                    device=self.device,
+                    device=device_manager.device,
                     dtype=torch.long,
                 )
             ),
@@ -248,12 +219,12 @@ class DataPrefetcher:
 
     def __repr__(self) -> str:
         return (
-            f"DataPrefetcher(device='{self.device.type}', "
+            f"DataPrefetcher(device='{device_manager.device.type}', "
             f"scale_indices={self.scale_indices})"
         )
 
 
-def gather_seen_indices(prefetcher: DataPrefetcher) -> list[int]:
+def gather_seen_indices(prefetcher: DataPrefetcher) -> List[Tuple[int, ...]]:
     """Return dataset indices seen by all ranks during the current iteration.
 
     In DDP, each rank processes different data. We gather all indices
@@ -262,27 +233,29 @@ def gather_seen_indices(prefetcher: DataPrefetcher) -> list[int]:
 
     Returns
     -------
-    list[int]
+    List[Union[int, Tuple[int, ...]]]
         A flat list of sample indices gathered across all ranks.
     """
-    local_indices: list[torch.Tensor] = prefetcher.seen_indices
+    local_indices: List[torch.Tensor] = prefetcher.seen_indices
     if not local_indices:
         return []
 
+    # Concatenate all local batches into one [N, 2] or [N] tensor/array
+    local_data = device_manager.to_numpy(torch.cat(local_indices))
+
     if not dist.is_available() or not dist.is_initialized():
-        # Move back to CPU only at the end of epoch
-        return torch.cat(local_indices).cpu().flatten().tolist()  # type: ignore
+        if local_data.ndim == 2:
+            return [tuple(row) for row in local_data]
+        return local_data.tolist()
 
-    # Move indices to a single contiguous GPU tensor for gathering
-    local_tensor = torch.cat(local_indices).to(prefetcher.device)
-
+    # In DDP, use all_gather_object to handle potentially varying number of samples per rank.
+    # This is much safer than fixed-size tensor gathering.
     world_size = dist.get_world_size()
-    gathered_tensors: list[torch.Tensor] = [
-        torch.zeros_like(local_tensor) for _ in range(world_size)
-    ]
+    gathered_objects: List[np.ndarray] = [np.array([]) for _ in range(world_size)]
+    dist.all_gather_object(gathered_objects, local_data)  # type: ignore
 
-    # Collective call: all ranks must participate.
-    dist.all_gather(gathered_tensors, local_tensor)  # type: ignore
-
-    # Single GPU->CPU transfer for all gathered indices
-    return torch.cat(gathered_tensors).cpu().flatten().tolist()  # type: ignore
+    # Combine results from all ranks
+    combined = np.concatenate(gathered_objects, axis=0)
+    if combined.ndim == 2:
+        return [tuple(row) for row in combined]
+    return combined.tolist()
