@@ -40,16 +40,16 @@ import log
 import utils
 from apex_utils import FusedAdam
 from config import CheckpointFilenames, ExperimentPaths
-from typedefs import Batch, IDataLoader, PyramidsBatch, RawBatch
 from datasets.data_prefetcher import DataPrefetcher, gather_seen_indices
 from datasets.dataset import PyramidsDataset
+from device import device_manager
 from enums import DeviceType, LrDecayUnit
-from training.checkpoint import Checkpoint, ScaleCheckpoint
 from models import utils as model_utils
 from models.facies_gan import FaciesGAN, unwrap_ddp
 from models.utils import ChannelKey
 from options import TrainingOptions
 from tensorboard_visualizer import TensorBoardVisualizer
+from training.checkpoint import Checkpoint, ScaleCheckpoint
 from training.metrics import (
     DiscriminatorMetrics,
     GeneratorMetrics,
@@ -58,6 +58,7 @@ from training.metrics import (
     ScaleMetrics,
     compute_masked_loss,
 )
+from typedefs import Batch, IDataLoader, PyramidsBatch, RawBatch
 
 
 class DummyProgress:
@@ -93,15 +94,9 @@ class Trainer:
         Whether to load and fine-tune from existing checkpoints.
     checkpoint_path : str, optional
         Base path used to load/save per-scale checkpoints.
-    device : torch.device
-        Device used for training (cpu/cuda/mps).
-    distributed : bool, optional
-        Whether running under ``DistributedDataParallel`` with ``torchrun``.
 
     Attributes
     ----------
-    device : torch.device
-        Training device.
     model : FaciesGAN
         The multiscale model instance managed by the trainer.
 
@@ -120,8 +115,6 @@ class Trainer:
         options: TrainingOptions,
         fine_tuning: bool = False,
         checkpoint_path: str = ".checkpoints",
-        device: torch.device = torch.device(DeviceType.CPU),
-        distributed: bool = False,
     ) -> None:
         """Create a Trainer instance and prepare datasets, model and logging.
 
@@ -133,21 +126,7 @@ class Trainer:
             Whether to attempt to load existing checkpoints, by default False.
         checkpoint_path : str, optional
             Base path for checkpoint files, by default ".checkpoints/".
-        device : torch.device
-            Device used for training (cpu/cuda/mps).
-        distributed : bool, optional
-            Whether running under ``DistributedDataParallel`` with
-            ``torchrun``.  When ``True`` the batch size is divided by
-            ``world_size`` and a ``DistributedSampler`` is used.
         """
-        self.device: torch.device = device
-        self.distributed: bool = distributed
-        # Must be set *before* the shared init block so that prints inside
-        # are correctly guarded on non-main ranks.
-        if distributed:
-            self._is_main_process: bool = dist.get_rank() == 0
-        else:
-            self._is_main_process = True
 
         # ── Shared initialisation ──────────────────────────────────────
         self.options: TrainingOptions = options
@@ -201,7 +180,7 @@ class Trainer:
         self.scales: tuple[tuple[int, ...], ...] = scales
         self.data_loader: IDataLoader = self.create_dataloader()
 
-        if self._is_main_process:
+        if device_manager.is_main_process:
             print(f"DataLoader num_workers: {self.data_loader.num_workers}")
 
         self.model: FaciesGAN = self.create_model()
@@ -224,14 +203,14 @@ class Trainer:
             int, torch.optim.lr_scheduler.LRScheduler
         ] = {}
 
-        self._seen_indices_for_save: list[int] = []
+        self._seen_indices_for_save: list[tuple[int, ...]] = []
 
-        if self._is_main_process:
+        if device_manager.is_main_process:
             self._print_facie_shapes_table()
 
         self.enable_tensorboard = options.enable_tensorboard
         self.enable_plot_outputs = options.enable_plot_outputs
-        if self.enable_tensorboard and self._is_main_process:
+        if self.enable_tensorboard and device_manager.is_main_process:
             viz_path = os.path.join(self.output_path, "training_visualizations")
             log_dir = os.path.join(self.output_path, "tensorboard_logs")
             dataset_info = f"{len(self.dataset)} pyramids, {self.batch_size} batch size"
@@ -264,7 +243,7 @@ class Trainer:
             print("   URL: http://localhost:6006")
         else:
             self.visualizer = None  # type: ignore
-            if self._is_main_process:
+            if device_manager.is_main_process:
                 print("📊 TensorBoard logging disabled")
 
         # ── Trainer-specific fields ────────────────────────────────────
@@ -281,7 +260,7 @@ class Trainer:
             return
 
         self._compile_warmed_up_scales.add(scales)
-        if self._is_main_process:
+        if device_manager.is_main_process:
             print(
                 f"  [warmup] Warming up JIT compilation traces for scales {scales}..."
             )
@@ -341,21 +320,21 @@ class Trainer:
             finally:
                 self.model.train()
 
-        if self._is_main_process:
+        if device_manager.is_main_process:
             # Force the compilation bar to finish cleanly if it hasn't reached 100% yet
             unwrap_ddp(self.model).finish_compile_progress()  # type: ignore
             print("  [warmup] JIT compilation traces completed.\n")
 
     def _ddp_barrier(self) -> None:
         """Synchronize DDP ranks via NCCL barrier."""
-        if self.distributed and dist.is_initialized():
+        if device_manager.is_distributed and dist.is_initialized():
             dist.barrier()  # type: ignore
 
     def create_dataloader(self) -> IDataLoader:
         sampler: DistributedSampler[RawBatch] | None = None
         do_shuffle = getattr(self.options, "shuffle", True)
         shuffle = False
-        if self.distributed:
+        if device_manager.is_distributed:
             world_size = dist.get_world_size()
             self.batch_size = max(1, self.batch_size // world_size)
             sampler = DistributedSampler(
@@ -374,10 +353,10 @@ class Trainer:
             shuffle=shuffle,
             sampler=sampler,
             num_workers=self.options.num_workers,
-            pin_memory=self.device.type == DeviceType.CUDA,
+            pin_memory=device_manager.is_cuda,
             persistent_workers=has_workers,
             prefetch_factor=2 if has_workers else None,
-            drop_last=True,
+            drop_last=False,
             timeout=120 if has_workers else 0,
         )
 
@@ -390,9 +369,7 @@ class Trainer:
         FaciesGAN
             The initialized model instance.
         """
-        return FaciesGAN(
-            self.options, self.channels, self.device, use_ddp=self.distributed
-        )
+        return FaciesGAN(self.options, self.channels)
 
     def generate_visualization_samples(
         self,
@@ -435,7 +412,7 @@ class Trainer:
     ) -> torch.Tensor:
         real = facies_pyramid[scale]
         if scale == 0:
-            return torch.zeros_like(real).to(self.device)
+            return torch.zeros_like(real).to(device_manager.device)
 
         prev_facies = facies_pyramid[scale - 1]
         # Only index if prev_facies contains the whole dataset (unlikely in training,
@@ -446,7 +423,7 @@ class Trainer:
 
         return model_utils.interpolate(
             prev_facies, cast(tuple[int, int], tuple(real.shape[2:]))
-        ).to(self.device)
+        ).to(device_manager.device)
 
     def _build_z_rec_for_positions(
         self,
@@ -467,7 +444,6 @@ class Trainer:
         if scale == 0:
             z_rec = model_utils.generate_noise(
                 (self.noise_channels, *batch_real.shape[2:]),
-                device=self.device,
                 num_samp=len(positions),
             )
             return F.pad(z_rec, [self.residual_padding] * 4, value=pad_value)
@@ -481,15 +457,16 @@ class Trainer:
         noise_ch = self.noise_channels - num_cond_channels
         z_rec = model_utils.generate_noise(
             (noise_ch, *batch_real.shape[2:]),
-            device=self.device,
             num_samp=len(positions),
         )
 
         to_concat = [z_rec]
         if len(wells_pyramid) > 0:
-            to_concat.append(wells_pyramid[scale][positions].to(self.device))
+            to_concat.append(wells_pyramid[scale][positions].to(device_manager.device))
         if len(seismic_pyramid) > 0:
-            to_concat.append(seismic_pyramid[scale][positions].to(self.device))
+            to_concat.append(
+                seismic_pyramid[scale][positions].to(device_manager.device)
+            )
 
         if len(to_concat) > 1:
             z_rec = torch.cat(to_concat, dim=1)
@@ -521,6 +498,14 @@ class Trainer:
             Conditioning seismic data.
         """
         if len(self.model.rec_noise) >= scale + 1:
+            if self.model.rec_noise[scale].shape[0] == real.shape[0]:
+                return
+            # If batch size mismatch (e.g. resume with different DDP config), 
+            # we must re-initialize this scale's noise.
+            z_rec = self._build_z_rec_for_positions(
+                scale, real, list(range(real.shape[0])), wells_pyramid, seismic_pyramid
+            )
+            self.model.rec_noise[scale] = z_rec
             return
 
         actual_batch = real.shape[0]
@@ -528,73 +513,6 @@ class Trainer:
             scale, real, list(range(actual_batch)), wells_pyramid, seismic_pyramid
         )
         self.model.rec_noise.append(z_rec)
-
-        # batch_real = real[indexes]
-        # pad_value = self.model.padding_value
-        # if scale == 0:
-        #     z_rec = model_utils.generate_noise(
-        #         (self.noise_channels, *batch_real.shape[2:]),
-        #         device=self.device,
-        #         num_samp=len(positions),
-        #     )
-        #     return F.pad(z_rec, [self.residual_padding] * 4, value=pad_value)
-
-        # with torch.no_grad():
-        #     fake = self.model.generator(
-        #         self.model.get_pyramid_noise(scale, indexes),
-        #         [1.0] * (scale + 1),
-        #         stop_scale=scale,
-        #     )
-
-        # # Calibrate amplitude against facies channels only; when
-        # # impedance is enabled real has 6 ch [facies | imp] and the
-        # # continuous impedance scale would otherwise swamp the RMSE.
-        # _orig_C = getattr(self.model, "orig_num_img_channels", fake.shape[1])
-        # _real_f = real[:, :_orig_C].to(fake.device)
-        # _fake_f = fake[:, :_orig_C]
-        # rmse = torch.sqrt(F.mse_loss(_fake_f, _real_f))
-        # amp = self.scale0_noise_amp * rmse.item()
-        # if len(self.model.noise_amps) <= scale:
-        #     self.model.noise_amps.append(amp)
-        # else:
-        #     self.model.noise_amps[scale] = amp
-        # return
-
-        # # Determine how many noise channels we need after conditioning
-        # num_cond_channels = 0
-        # if len(wells_pyramid) > 0:
-        #     num_cond_channels += self.options.num_facies
-        # if len(seismic_pyramid) > 0:
-        #     num_cond_channels += 1
-
-        # noise_ch = self.noise_channels - num_cond_channels
-
-        # z_rec = model_utils.generate_noise(
-        #     (
-        #         noise_ch,
-        #         *batch_real.shape[2:],
-        #     ),
-        #     device=self.device,
-        #     num_samp=len(positions),
-        # )
-
-        # to_concat = [z_rec]
-        # if len(wells_pyramid) > 0:
-        #     to_concat.append(wells_pyramid[scale].to(self.device))
-        # if len(seismic_pyramid) > 0:
-        #     to_concat.append(seismic_pyramid[scale].to(self.device))
-
-        # if len(to_concat) > 1:
-        #     z_rec = torch.cat(to_concat, dim=1)
-
-        # return F.pad(z_rec, [self.residual_padding] * 4, value=pad_value)
-
-        # # Record the dataset indices that correspond to this rec_noise entry so
-        # # that get_rec_noise can reindex correctly when DistributedSampler
-        # # shuffles the batch ordering on subsequent epochs.
-        # if len(self.model.rec_noise_init_indexes) < len(self.model.rec_noise):
-        #     stored = indexes.detach().cpu()
-        #     self.model.rec_noise_init_indexes.append(stored)
 
         with torch.no_grad():
             fake = self.model.generator(
@@ -640,9 +558,11 @@ class Trainer:
         if len(self.options.wells_mask_columns) > 0:
             sel = [int(i) for i in self.options.wells_mask_columns]
             dataset.batches = [dataset.batches[i] for i in sel]
+            dataset.indices = dataset.indices[torch.as_tensor(sel, dtype=torch.long)]
         elif self.options.num_train_pyramids < len(dataset):
             indexes = torch.randperm(len(dataset))[: self.options.num_train_pyramids]
             dataset.batches = [dataset.batches[i] for i in indexes]
+            dataset.indices = dataset.indices[indexes]
 
         return dataset, dataset.scales
 
@@ -663,9 +583,9 @@ class Trainer:
             )
 
             gen = unwrap_ddp(self.model.generator.gens[scale])
-            gen.load_state_dict(model_utils.load(generator_path, self.device))
+            gen.load_state_dict(model_utils.load(generator_path))
             disc = unwrap_ddp(self.model.discriminator.discs[scale])
-            disc.load_state_dict(model_utils.load(discriminator_path, self.device))
+            disc.load_state_dict(model_utils.load(discriminator_path))
         except (FileNotFoundError, RuntimeError, KeyError, ValueError, OSError) as e:
             print(f"Error loading models from {self.checkpoint_path}/{scale}: {e}")
             raise
@@ -701,24 +621,16 @@ class Trainer:
         """
         try:
             generator_optimizer.load_state_dict(
-                model_utils.load(
-                    os.path.join(scale_path, CheckpointFilenames.OPT_G), self.device
-                )
+                model_utils.load(os.path.join(scale_path, CheckpointFilenames.OPT_G))
             )
             discriminator_optimizer.load_state_dict(
-                model_utils.load(
-                    os.path.join(scale_path, CheckpointFilenames.OPT_D), self.device
-                )
+                model_utils.load(os.path.join(scale_path, CheckpointFilenames.OPT_D))
             )
             generator_scheduler.load_state_dict(
-                model_utils.load(
-                    os.path.join(scale_path, CheckpointFilenames.SCH_G), self.device
-                )
+                model_utils.load(os.path.join(scale_path, CheckpointFilenames.SCH_G))
             )
             discriminator_scheduler.load_state_dict(
-                model_utils.load(
-                    os.path.join(scale_path, CheckpointFilenames.SCH_D), self.device
-                )
+                model_utils.load(os.path.join(scale_path, CheckpointFilenames.SCH_D))
             )
         except (FileNotFoundError, RuntimeError, KeyError, ValueError, OSError) as e:
             print(f"Warning: Could not load optimizers for scale {scale}: {e}")
@@ -726,7 +638,7 @@ class Trainer:
     def create_batch_iterator(
         self, loader: IDataLoader, scales: tuple[int, ...]
     ) -> Iterator[PyramidsBatch | None]:
-        prefetcher = DataPrefetcher(loader, scale_indices=scales, device=self.device)
+        prefetcher = DataPrefetcher(loader, scale_indices=scales)
         self._batch_prefetcher = prefetcher
         return iter(prefetcher)
 
@@ -769,7 +681,7 @@ class Trainer:
                 continue
 
             tiled_indexes = torch.arange(
-                sample_count, device=self.device
+                sample_count, device=device_manager.device
             ).repeat_interleave(self.num_generated_per_real)
 
             noises = self.model.get_pyramid_noise(
@@ -786,18 +698,17 @@ class Trainer:
             )
             real_facies_tensor = real_facies
 
-            facies_cpu = facies_tensor.detach().to(DeviceType.CPU, non_blocking=True)
-            real_cpu = real_facies_tensor.detach().to(DeviceType.CPU, non_blocking=True)
+            facies_cpu = device_manager.to_cpu(facies_tensor, non_blocking=True)
+            real_cpu = device_manager.to_cpu(real_facies_tensor, non_blocking=True)
 
             # Synchronize with the non_blocking detach/to('cpu') transfers
             # that were initiated for facies and real.
-            if self.device.type == DeviceType.CUDA:
-                torch.cuda.current_stream().synchronize()
+            device_manager.synchronize()
 
             masks_cpu: torch.Tensor | None = None
             if scale in masks_pyramid:
-                masks_cpu = (
-                    masks_pyramid[scale].detach().to(DeviceType.CPU, non_blocking=True)
+                masks_cpu = device_manager.to_cpu(
+                    masks_pyramid[scale], non_blocking=True
                 )
 
             res_gen = model_utils.split_facies_rp(
@@ -904,14 +815,14 @@ class Trainer:
                     # Diagnostic print: numeric ranges for VP/VS (generated vs real)
                     gen_vpvs = rp_cpu[:, :, 2:3, ...]
                     real_vpvs = real_rp_cpu[:, 2:3, ...]
-                    gen_vpvs_np = gen_vpvs.detach().cpu().numpy()
-                    real_vpvs_np = real_vpvs.detach().cpu().numpy()
-                    lo_g = float(np.nanmin(gen_vpvs_np))
-                    hi_g = float(np.nanmax(gen_vpvs_np))
-                    mean_g = float(np.nanmean(gen_vpvs_np))
-                    lo_r = float(np.nanmin(real_vpvs_np))
-                    hi_r = float(np.nanmax(real_vpvs_np))
-                    mean_r = float(np.nanmean(real_vpvs_np))
+                    gen_vpvs_np = device_manager.to_numpy(gen_vpvs)
+                    real_vpvs_np = device_manager.to_numpy(real_vpvs)
+                    lo_g = float(np.nanmin(cast(np.ndarray, gen_vpvs_np)))
+                    hi_g = float(np.nanmax(cast(np.ndarray, gen_vpvs_np)))
+                    mean_g = float(np.nanmean(cast(np.ndarray, gen_vpvs_np)))
+                    lo_r = float(np.nanmin(cast(np.ndarray, real_vpvs_np)))
+                    hi_r = float(np.nanmax(cast(np.ndarray, real_vpvs_np)))
+                    mean_r = float(np.nanmean(cast(np.ndarray, real_vpvs_np)))
                     print(
                         f"[diagnostic] Scale_{scale} VP_VS generated range: [{lo_g:.6f}, {hi_g:.6f}] mean={mean_g:.6f}"
                     )
@@ -1097,6 +1008,8 @@ class Trainer:
             scales=scales_info,
             grad_scaler_g=self.model.grad_scaler_g.state_dict(),
             rec_noise=self.model.rec_noise,
+            rng_state=device_manager.get_rng_state_dict(),
+            seen_indices=self._seen_indices_for_save,
         )
 
         # Save into the first scale's directory (arbitrary but deterministic)
@@ -1127,7 +1040,7 @@ class Trainer:
             return 0, 0
 
         # 1. Load Checkpoint
-        ckpt = Checkpoint.load(checkpoint_path, device=DeviceType.CPU)
+        ckpt = Checkpoint.load(checkpoint_path)
 
         # 2. Restore Model Weights + Optimizer/Scheduler States
         for s in scales:
@@ -1185,12 +1098,14 @@ class Trainer:
 
         # 3. Restore Auxiliary Metadata
         if ckpt.noise_amps:
-            self.model.noise_amps = [a.to(self.device) for a in ckpt.noise_amps]
+            self.model.noise_amps = [
+                a.to(device_manager.device) for a in ckpt.noise_amps
+            ]
         self.model.disc_step_counter = ckpt.disc_step_counter
         self.model.extra_disc_step_counter = ckpt.extra_disc_step_counter
 
         if ckpt.rec_noise:
-            self.model.rec_noise = [n.to(self.device) for n in ckpt.rec_noise]
+            self.model.rec_noise = [n.to(device_manager.device) for n in ckpt.rec_noise]
 
         if ckpt.grad_scaler_g is not None and self.model.use_grad_scaler:
             try:
@@ -1199,25 +1114,11 @@ class Trainer:
                 pass
 
         # 4. Restore RNG States
-        if "python" in ckpt.rng_state:
-            try:
-                import random
+        device_manager.set_rng_state_dict(ckpt.rng_state)
 
-                random.setstate(ckpt.rng_state["python"])
-            except Exception:
-                pass
-        if "torch" in ckpt.rng_state:
-            try:
-                torch.set_rng_state(cast(torch.Tensor, ckpt.rng_state["torch"]))
-            except Exception:
-                pass
-        if DeviceType.CUDA in ckpt.rng_state and torch.cuda.is_available():
-            try:
-                torch.cuda.set_rng_state_all(
-                    cast(list[torch.Tensor], ckpt.rng_state[DeviceType.CUDA])
-                )
-            except Exception:
-                pass
+        # 5. Restore Seen Indices
+        if ckpt.seen_indices:
+            self._seen_indices_for_save = ckpt.seen_indices
 
         return ckpt.epoch, ckpt.batch_id
 
@@ -1236,7 +1137,10 @@ class Trainer:
         )[:sample_count]
         positions_cpu: list[int] = cast(list[int], randperm_cpu.tolist())  # type: ignore[assignment]
         sampled_items = [
-            cast(tuple[Any, Batch], self.dataset[self._seen_indices_for_save[pos]])
+            cast(
+                tuple[int, Batch],
+                self.dataset[self._seen_indices_for_save[pos][0]],
+            )
             for pos in positions_cpu
         ]
 
@@ -1270,8 +1174,10 @@ class Trainer:
             return {}
 
         return {
-            idx: utils.to_device(
-                component[idx], self.device, channels_last=True, non_blocking=True
+            idx: device_manager.to_device(
+                component[idx],
+                channels_last=True,
+                non_blocking=True,
             )
             for idx in range(len(component))
         }
@@ -1347,11 +1253,7 @@ class Trainer:
             actual_batch = facies_pyramid[first_scale].shape[0] if facies_pyramid else 0
             indexes = torch.arange(
                 actual_batch,
-                device=(
-                    facies_pyramid[first_scale].device
-                    if facies_pyramid
-                    else DeviceType.CPU
-                ),
+                device=device_manager.device,
             )
 
         if facies_pyramid is None:
@@ -1364,7 +1266,7 @@ class Trainer:
             seismic_pyramid = {}
 
         # ── Input Logging (Main Process, First Pass Only) ──────────────
-        if self._is_main_process and start_epoch == 0 and batch_id == 0:
+        if device_manager.is_main_process and start_epoch == 0 and batch_id == 0:
             self._log_input_stats(
                 start_epoch,
                 facies_pyramid,
@@ -1382,7 +1284,7 @@ class Trainer:
         # a progressive forward pass.
         max_scale = max(scales)
         for s in range(max_scale + 1):
-            if len(self.model.rec_noise) <= s:
+            if len(self.model.rec_noise) <= s or self.model.rec_noise[s].shape[0] != facies_pyramid[s].shape[0]:
                 self.init_rec_noise_and_amp(
                     s, indexes, facies_pyramid[s], wells_pyramid, seismic_pyramid
                 )
@@ -1414,7 +1316,7 @@ class Trainer:
             epoch == self._num_passes - 1 and batch_id == self._total_batches - 1
         )
         _is_viz_epoch = global_step % 200 == 0 or _is_last_step
-        if self._is_main_process and _is_viz_epoch:
+        if device_manager.is_main_process and _is_viz_epoch:
             generated_samples = self.generate_visualization_samples(
                 scales, indexes, wells_pyramid, seismic_pyramid
             )
@@ -1463,7 +1365,7 @@ class Trainer:
             )
 
             scales_to_train = tuple(range(scale, scale + num_scales_in_group))
-            if self._is_main_process:
+            if device_manager.is_main_process:
                 print(f"\n{'=' * 60}")
                 print(f"Training scales {scales_to_train} in parallel")
                 print(f"{'=' * 60}\n")
@@ -1511,7 +1413,7 @@ class Trainer:
 
             # Only main process creates directories, writers
             writers: dict[int, SummaryWriter] = {}  # type: ignore
-            if self._is_main_process:
+            if device_manager.is_main_process:
                 for s in scales_to_train:
                     utils.create_dirs(scale_paths[s])
 
@@ -1556,7 +1458,7 @@ class Trainer:
 
             if resume_epoch > 0:
                 base_epoch = resume_epoch
-                if self._is_main_process:
+                if device_manager.is_main_process:
                     resume_step = resume_epoch * len(self.data_loader) + resume_batch_id
                     print(
                         f"Epoch checkpoint loaded: resuming from batch {resume_batch_id}, "
@@ -1580,7 +1482,7 @@ class Trainer:
             # Progress bar for all batches and epochs in this group
             total_batches = len(self.data_loader)
 
-            if self._is_main_process and self.enable_tensorboard:
+            if device_manager.is_main_process and self.enable_tensorboard:
                 if resume_epoch > 0:
                     _purge: int | None = resume_epoch * total_batches + resume_batch_id
                 else:
@@ -1606,7 +1508,7 @@ class Trainer:
             # Write directly to /dev/tty so the bar bypasses torchrun's
             # subprocess pipes and debugpy's output capture entirely.
             # Falls back to sys.stderr when /dev/tty is not available.
-            if self._is_main_process:
+            if device_manager.is_main_process:
                 try:
                     _tqdm_file: "IO[str]" = open("/dev/tty", "w")
                 except OSError:
@@ -1645,7 +1547,9 @@ class Trainer:
 
                 # Initialize progress bar only AFTER warmup completes to avoid
                 # it overlapping with the [compile] progress bar output.
-                if self._is_main_process and isinstance(progress, DummyProgress):
+                if device_manager.is_main_process and isinstance(
+                    progress, DummyProgress
+                ):
                     print(
                         f"  [data] Initializing batch prefetchers for scales {scales_to_train}..."
                     )
@@ -1653,7 +1557,7 @@ class Trainer:
                         total=progress_total,
                         initial=resume_progress,
                         position=0,
-                        disable=not self._is_main_process,
+                        disable=not device_manager.is_main_process,
                         dynamic_ncols=True,
                         file=_tqdm_file,
                     )
@@ -1683,7 +1587,7 @@ class Trainer:
                         start_epoch=epoch,
                         batch=batch,  # Pass the batch directly
                     )
-                    if self._is_main_process:
+                    if device_manager.is_main_process:
                         progress.set_description(
                             f"Epoch {epoch + 1}/{self._num_passes}, Batch {batch_id + 1}/{total_batches}"
                         )
@@ -1691,7 +1595,19 @@ class Trainer:
 
                 # End of batch loop
 
-                if self._is_main_process:
+                # Gather all seen indices for this epoch across all ranks
+                epoch_indices = self.collect_seen_indices()
+                if epoch_indices:
+                    # Update the global set of seen indices (accumulated across all epochs)
+                    current_seen: set[tuple[int, ...]] = set(
+                        self._seen_indices_for_save
+                    )
+                    current_seen.update(epoch_indices)
+                    self._seen_indices_for_save = sorted(list(current_seen))
+
+                # End of batch loop
+
+                if device_manager.is_main_process:
                     # ── Save Epoch Progress (Periodic or Final) ───────
                     interval = self.options.checkpoint_interval
                     is_final_epoch = epoch == self._num_passes - 1
@@ -1722,7 +1638,7 @@ class Trainer:
                             scales_to_train, scale_paths, epoch + 1, 0
                         )
             # After processing all batches for this group, save models (rank 0 only)
-            if self._is_main_process:
+            if device_manager.is_main_process:
                 for s in scales_to_train:
                     self.model.save_scale(s, scale_paths[s])
                     self.save_optimizers(
@@ -1734,7 +1650,7 @@ class Trainer:
                     )
 
             # Flush any pending background plot jobs
-            if self._is_main_process and self.enable_plot_outputs:
+            if device_manager.is_main_process and self.enable_plot_outputs:
                 try:
                     from background_workers import BackgroundWorker
 
@@ -1748,7 +1664,7 @@ class Trainer:
             self._ddp_barrier()
 
             # Close progress bar and the /dev/tty handle (if opened)
-            if self._is_main_process:
+            if device_manager.is_main_process:
                 progress.close()
             if _tqdm_file is not sys.stderr:
                 try:
@@ -1761,17 +1677,17 @@ class Trainer:
                 writer.close()
 
             # Release GPU memory cached by the allocator between groups
-            self._release_accelerator_memory()
+            device_manager.release_accelerator_memory()
 
             group_end_time = time.time()
             elapsed = log.format_time(int(group_end_time - group_start_time))
-            if self._is_main_process:
+            if device_manager.is_main_process:
                 print(f"\nScales {scales_to_train} training time: {elapsed}")
 
             scale += num_scales_in_group
 
         end_train_time = time.time()
-        if self._is_main_process:
+        if device_manager.is_main_process:
             print(
                 "\nTotal training time:",
                 log.format_time(int(end_train_time - start_train_time)),
@@ -1780,7 +1696,7 @@ class Trainer:
         # Close TensorBoard writer
         if self.enable_tensorboard and self.visualizer:
             self.visualizer.close()
-        if self._is_main_process:
+        if device_manager.is_main_process:
             print("\n✅ Training complete!")
         if self.enable_tensorboard:
             print("\n📊 View outputs in TensorBoard (if still running)")
@@ -1849,7 +1765,7 @@ class Trainer:
             self._seen_indices_for_save = self.collect_seen_indices()
 
         # ── Rank-0 only I/O ─────────────────────────────────────────
-        if self._is_main_process:
+        if device_manager.is_main_process:
             _print_table = global_step % 100 == 0
             _log_tb = global_step % self._tb_log_interval == 0 or _is_last_step
 
@@ -2113,7 +2029,7 @@ class Trainer:
             "  ┌" + "─" * 124 + "┐",
             (
                 f"  │ {'Scale':^5} │ {'G_total':^10} │ {'G_adv':^10} │ {'G_fa_rec':^10} │ "
-                f"{'G_well':^10} │ {'G_div':^10} │ {'G_rp_rec':^10} │ {'G_tv':^10} │ {'G_el':^10} │ {'G_ph':^10} │"
+                f"{'G_well':^10} │ {'G_div':^10} │ {'G_rp_rec':^10} │ {'G_tv':^10} │ {'G_el':^10} │ {'G_seis':^10} │"
             ),
             "  ├" + "─" * 124 + "┤",
         ]
@@ -2191,7 +2107,7 @@ class Trainer:
     ) -> list[float]:
         """Convert metric tensors to a flat list of Python floats (single sync).
 
-        Layout:  [0..9] raw G metrics, [10..13] D metrics.  14 total.
+        Layout:  [0..8] raw G metrics, [9..12] D metrics.  13 total.
 
         If *_cached* is provided it is returned directly, avoiding a
         redundant GPU→CPU transfer when the caller has already converted
@@ -2201,21 +2117,13 @@ class Trainer:
             return _cached
         import torch as _t
 
-        gd: list[float] = _t.stack([*g.as_tuple(), *d.as_tuple()]).tolist()  # type: ignore[arg-type]
+        # Ensure all tensors are on the same device (CPU) before stacking.
+        # This prevents RuntimeError when some metrics are DomainConfig.ZERO_SCALAR (CPU)
+        # while others are loss tensors (GPU).
+        gd: list[float] = _t.stack(  # type: ignore[call-overload]
+            device_manager.to_cpu([*g.as_tuple(), *d.as_tuple()])
+        ).tolist()
         return gd
-
-    @staticmethod
-    def _release_accelerator_memory() -> None:
-        """Release unused accelerator (GPU) memory back to the OS.
-
-        Calls the caching allocator to release unused blocks.
-        ``empty_cache()`` already triggers an implicit device sync, so
-        an explicit ``synchronize()`` is unnecessary.  GC is skipped
-        because this is only called between scale groups and the
-        allocator handles freed tensors without a Python GC pass.
-        """
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     # noinspection PyAttributeOutsideInit
 
@@ -2234,7 +2142,7 @@ class Trainer:
             path, load_shapes=False, until_scale=until_scale
         )
 
-    def collect_seen_indices(self) -> list[int]:
+    def collect_seen_indices(self) -> list[tuple[int, ...]]:
         if self._batch_prefetcher is None:
             return []
         return gather_seen_indices(self._batch_prefetcher)

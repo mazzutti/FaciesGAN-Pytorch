@@ -9,8 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-
 import torch
+
+from device import device_manager
 
 
 @dataclass
@@ -41,6 +42,10 @@ def _default_rng_state() -> Dict[str, Any]:
     return {}
 
 
+def _default_seen_indices() -> List[Any]:
+    return []
+
+
 @dataclass
 class Checkpoint:
     """Global training state checkpoint.
@@ -59,6 +64,7 @@ class Checkpoint:
     grad_scaler_g: Dict[str, Any] | None = None
     rec_noise: List[torch.Tensor] = field(default_factory=_default_rec_noise)
     rng_state: Dict[str, Any] = field(default_factory=_default_rng_state)
+    seen_indices: List[Any] = field(default_factory=_default_seen_indices)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the checkpoint to a plain dictionary for torch.save."""
@@ -71,6 +77,7 @@ class Checkpoint:
             "grad_scaler_g": self.grad_scaler_g,
             "rec_noise": self.rec_noise,
             "rng_state": self.rng_state,
+            "seen_indices": self.seen_indices,
             "scales": {
                 s: {
                     "generator": sc.generator,
@@ -85,11 +92,10 @@ class Checkpoint:
         }
 
     @classmethod
-    def load(
-        cls, path: str, device: str | torch.device = "cpu"
-    ) -> Checkpoint:
+    def load(cls, path: str) -> Checkpoint:
         """Load a checkpoint from a file, handling both new and legacy formats."""
-        data = torch.load(path, map_location=device)
+        # Load directly to the managed device for faster restoration.
+        data = torch.load(path, map_location=device_manager.device, weights_only=False)
         return cls.from_dict(data)
 
     @classmethod
@@ -118,6 +124,7 @@ class Checkpoint:
                 grad_scaler_g=data.get("grad_scaler_g"),
                 rec_noise=data.get("rec_noise", []),
                 rng_state=data.get("rng_state", {}),
+                seen_indices=data.get("seen_indices", []),
                 scales=scales,
             )
 
@@ -130,12 +137,16 @@ class Checkpoint:
 
         # Note: legacy format might have a single generator_state_dict if it was pre-multiscale
         # or it might have them indexed. Here we try to reconstruct per-scale states.
-        all_scales = set(disc_states.keys()) | set(gen_opts.keys()) | set(disc_opts.keys())
-        
+        all_scales = (
+            set(disc_states.keys()) | set(gen_opts.keys()) | set(disc_opts.keys())
+        )
+
         scales: dict[int, ScaleCheckpoint] = {}
         for s in all_scales:
             scales[int(s)] = ScaleCheckpoint(
-                generator=data.get("generator_state_dict", {}), # Legacy usually had one shared G
+                generator=data.get(
+                    "generator_state_dict", {}
+                ),  # Legacy usually had one shared G
                 discriminator=disc_states.get(s, {}),
                 opt_g=gen_opts.get(s, {}),
                 opt_d=disc_opts.get(s, {}),
@@ -152,5 +163,6 @@ class Checkpoint:
             grad_scaler_g=data.get("grad_scaler_g"),
             rec_noise=data.get("rec_noise", []),
             rng_state=data.get("rng_state", {}),
+            seen_indices=data.get("seen_indices", []),
             scales=scales,
         )

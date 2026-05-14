@@ -8,10 +8,11 @@ arguments used throughout the project. They may be passed as the
 
 import argparse
 import os
+from typing import Any
 from dataclasses import dataclass
 
 from config import DirectoryConfig, DomainConfig
-from enums import LrDecayUnit
+from enums import EmbeddingMethod, FeatureKey, LrDecayUnit
 
 NORMALIZATION_RANGE: tuple[float, float] = (-1.0, 1.0)
 
@@ -39,7 +40,6 @@ class TrainingOptions(argparse.Namespace):
         gamma: float = 0.9,
         generator_steps: int = 3,
         gpu_device: int = 0,
-        gpu_devices: list[int] | None = None,
         input_path: str = DirectoryConfig.DATA,
         kernel_size: int = 3,
         gradient_loss_penalty: float = 10.0,
@@ -102,10 +102,8 @@ class TrainingOptions(argparse.Namespace):
         lr_smoothing_alpha: float = 0.95,
         lr_g_factor: float = 0.8,
         lr_decay_unit: str = LrDecayUnit.EPOCH,
-        compile_backend: bool = False,
-        use_triton_kernels: bool = True,
+        compile_backend: bool = True,
         seismic_stretch_percentile: int = 98,
-        rec_skip_per_scale: int = 0,
         scale0_padding_size: int | None = None,
         scale0_r1_gamma: float = 0.0,
         scale0_disc_grad_clip: float = 0.0,
@@ -251,7 +249,6 @@ class TrainingOptions(argparse.Namespace):
         self.gamma = gamma
         self.generator_steps = generator_steps
         self.gpu_device = gpu_device
-        self.gpu_devices = gpu_devices
         self.input_path = input_path
         self.kernel_size = kernel_size
         self.gradient_loss_penalty = gradient_loss_penalty
@@ -309,18 +306,14 @@ class TrainingOptions(argparse.Namespace):
         self.wavelet_f_peak = wavelet_f_peak
         self.wavelet_dt = wavelet_dt
         self.wavelet_length = wavelet_length
+        self.layers_per_scale = num_layer
         self.lr_patience = lr_patience
         self.lr_min = lr_min
         self.lr_smoothing_alpha = lr_smoothing_alpha
         self.lr_g_factor = lr_g_factor
         self.lr_decay_unit = lr_decay_unit
         self.compile_backend = compile_backend
-        self.use_triton_kernels = use_triton_kernels
         self.seismic_stretch_percentile = seismic_stretch_percentile
-        # Number of epochs to skip rec_facies loss per scale level in parallel
-        # training. Scale s skips the first s * rec_skip_per_scale epochs,
-        # giving lower scales time to stabilize before higher scales use them.
-        self.rec_skip_per_scale = rec_skip_per_scale
         # Discriminator padding override for scale 0 only (None = use global padding_size).
         self.scale0_padding_size = scale0_padding_size
         # R1 gradient penalty weight for scale 0 discriminator (0 = disabled).
@@ -332,6 +325,80 @@ class TrainingOptions(argparse.Namespace):
         # Learning-rate multiplier for the scale 0 discriminator (1.0 = same as global lr_d).
         # Values < 1 (e.g. 0.2) slow down D at s0 so G can keep up.
         self.scale0_disc_lr_factor = scale0_disc_lr_factor
+
+
+@dataclass
+class ExperimentOptions(TrainingOptions):
+    """Namespace for ablation experiment runner arguments.
+
+    This class extends :class:`TrainingOptions` with experiment-specific
+    parameters such as sample counts, embedding methods, and evaluation
+    flags. It provides a typed interface for orchestrating multi-variant
+    training and generation studies.
+    """
+
+    def __init__(
+        self,
+        how_many: int = 2000,
+        skip_training: bool = False,
+        model_paths: list[str] | None = None,
+        nproc_per_node: int = 2,
+        embedding_methods: list[str] = (
+            EmbeddingMethod.ISOMAP,
+            EmbeddingMethod.MDS,
+            EmbeddingMethod.TSNE,
+            EmbeddingMethod.UMAP,
+        ),
+        embedding_data: list[str] = (
+            FeatureKey.FACIES,
+            FeatureKey.ROCK_PHYSICS,
+            FeatureKey.SEISMIC,
+        ),
+        embedding_per_facies: bool = False,
+        no_embeddings: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize ExperimentOptions, forwarding training args to parent.
+
+        Parameters
+        ----------
+        how_many : int, optional
+            Number of facies to generate per variant during evaluation.
+            Default is 2000.
+        skip_training : bool, optional
+            If True, skip the training phase and only run generation using
+            existing model paths. Default is False.
+        model_paths : list of str, optional
+            Explicit model paths (one per variant) to use when `skip_training`
+            is True. Default is None.
+        nproc_per_node : int, optional
+            Number of processes (GPUs) per node to use for DDP training.
+            Default is 2.
+        embedding_methods : list of str, optional
+            Dimensionality reduction methods (e.g., 'isomap', 'tsne') for latent
+            space visualization. Default is ["isomap", "mds", "tsne", "umap"].
+        embedding_data : list of str, optional
+            Data types (e.g., 'facies', 'rock_physics', 'seismic') to include in the
+            embedding analysis. Default is ["facies", "rock_physics", "seismic"].
+        embedding_per_facies : bool, optional
+            If True, generate separate embedding plots for each unique
+            conditioning crossline. Default is False.
+        no_embeddings : bool, optional
+            If True, disable all manifold learning and latent space
+            visualizations. Default is False.
+        **kwargs : Any
+            Additional training arguments passed to the :class:`TrainingOptions`
+            constructor.
+        """
+        super().__init__(**kwargs)
+        self.how_many = how_many
+        self.skip_training = skip_training
+        self.model_paths = model_paths
+        self.nproc_per_node = nproc_per_node
+        self.embedding_methods = embedding_methods
+        self.embedding_data = embedding_data
+        self.embedding_per_facies = embedding_per_facies
+        self.no_embeddings = no_embeddings
 
 
 # noinspection PyMissingConstructor

@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from config import DomainConfig, PhysicsConfig
+from device import device_manager
 from enums import DeviceType, MetricKey
 from options import TrainingOptions
 
@@ -47,14 +48,9 @@ class DiscriminatorMetrics:
         dict[str, float]
             Dictionary mapping metric names to their tensor values.
         """
-        vals: list[float] = torch.stack(  # type: ignore
-            [
-                self.total,
-                self.real,
-                self.fake,
-                self.gp,
-            ]
-        ).tolist()
+        vals: list[float] = torch.stack(  # type: ignore[call-overload]
+            device_manager.to_cpu([self.total, self.real, self.fake, self.gp])
+        ).tolist()  # type: ignore[return-value]
         return {
             MetricKey.D_TOTAL: vals[0],
             MetricKey.D_REAL: vals[1],
@@ -104,19 +100,21 @@ class GeneratorMetrics:
         dict[str, float]
             Dictionary mapping metric names to their tensor values.
         """
-        vals: list[float] = torch.stack(  # type: ignore
-            [
-                self.total,
-                self.fake,
-                self.rec_facies,
-                self.well,
-                self.div,
-                self.rec_rock_physics,
-                self.tv,
-                self.elastic,
-                self.seismic,
-            ]
-        ).tolist()  # pyright: ignore[reportUnknownMemberType]
+        vals: list[float] = torch.stack(  # type: ignore[call-overload]
+            device_manager.to_cpu(
+                [
+                    self.total,
+                    self.fake,
+                    self.rec_facies,
+                    self.well,
+                    self.div,
+                    self.rec_rock_physics,
+                    self.tv,
+                    self.elastic,
+                    self.seismic,
+                ]
+            )
+        ).tolist()  # type: ignore[return-value]
 
         return {
             MetricKey.G_TOTAL: vals[0],
@@ -398,7 +396,6 @@ def compute_gradient_penalty(
     real: torch.Tensor,
     fake: torch.Tensor,
     lambda_gp: float,
-    device: torch.device,
 ) -> torch.Tensor:
     """Compute the gradient penalty for WGAN-GP style regularization."""
     import models.utils as model_utils
@@ -409,7 +406,6 @@ def compute_gradient_penalty(
             real.float(),
             fake.float(),
             lambda_gp,
-            device,
         )
 
 
@@ -444,7 +440,13 @@ def compute_seismic_loss(
     dz_pixel: torch.Tensor = PhysicsConfig.DZ_PIXEL,
     loss_fn: LossFn = LossFn.HUBER,
 ) -> torch.Tensor:
-    """Calculate Geophysical Consistency Loss (Seismic Loss)."""
+    """Calculate Geophysical Consistency Loss (Seismic Loss).
+
+    This loss is computed on soft-RMS normalized signals to ensure scale
+    invariance while maintaining robustness against low-variance patches.
+    It combines a spatial point-wise loss (Huber) with a phase-sensitive
+    correlation term.
+    """
     from physics.seismic import calculate_synthetic_seismic
 
     synth = calculate_synthetic_seismic(
@@ -459,22 +461,34 @@ def compute_seismic_loss(
             synth, size=(real_seismic.shape[2], real_seismic.shape[3])
         )
 
+    # 1. Zero-mean the signals to remove DC bias
     synth_zero = synth - synth.mean(dim=(2, 3), keepdim=True)
     real_zero = real_seismic - real_seismic.mean(dim=(2, 3), keepdim=True)
 
-    synth_norm = rms_normalize(synth_zero)
-    real_seismic_norm = rms_normalize(real_zero)
+    # 2. Soft-RMS Normalization (Safe floor to prevent division by tiny noise)
+    # Using a larger epsilon (1e-4) to prevent gradient explosions on flat patches.
+    eps_safe = 1e-4
+    synth_rms = torch.sqrt(torch.mean(synth_zero**2) + eps_safe)
+    real_rms = torch.sqrt(torch.mean(real_zero**2) + eps_safe)
 
-    def _reduce_spatial(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        if loss_fn == LossFn.HUBER:
-            return F.huber_loss(a, b)
-        else:
-            return F.mse_loss(a, b)
+    synth_norm = synth_zero / synth_rms
+    real_norm = real_zero / real_rms
 
-    raw_loss = _reduce_spatial(synth, real_seismic)
-    normalized_loss = _reduce_spatial(synth_norm, real_seismic_norm)
+    # 3. Spatial Point-wise Loss
+    if loss_fn == LossFn.HUBER:
+        spatial_loss = F.huber_loss(synth_norm, real_norm)
+    else:
+        spatial_loss = F.mse_loss(synth_norm, real_norm)
 
-    return raw_loss + normalized_loss
+    # 4. Phase-sensitive Correlation Loss (1 - Cosine Similarity)
+    # This helps anchor the waveform phase regardless of amplitude mismatches.
+    cos_sim = F.cosine_similarity(
+        synth_zero.flatten(1), real_zero.flatten(1), dim=1
+    ).mean()
+    corr_loss = 1.0 - cos_sim
+
+    # Weighted combination: spatial matching + phase anchoring
+    return spatial_loss + 0.1 * corr_loss
 
 
 def total_variation_loss(

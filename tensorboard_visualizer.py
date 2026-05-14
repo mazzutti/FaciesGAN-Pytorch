@@ -19,13 +19,14 @@ from tensorboardX import SummaryWriter  # pyright: ignore
 import utils
 from background_workers import submit_save_image
 from config import DirectoryConfig, DomainConfig, LoggingConfig
+from device import device_manager
 from enums import MetricKey
 from models.utils import SplitKey, split_facies_rp
 from physics.seismic import calculate_synthetic_seismic
 
 if TYPE_CHECKING:
-    from training.metrics import ScaleMetrics
     from physics.physics import PhysicsState
+    from training.metrics import ScaleMetrics
 
 
 class TensorBoardVisualizer:
@@ -291,7 +292,7 @@ class TensorBoardVisualizer:
                     # Use raw tensor channels (without tensor2np default
                     # clipping to [0, 1]) so diagnostics and plots reflect
                     # the true normalization domain (e.g. [-1, 1]).
-                    sample_chw = sample[0].detach().cpu()
+                    sample_chw = device_manager.to_cpu(sample[0])
                     rp_chw_t = sample_chw[
                         self.num_facies_channels : self.num_facies_channels + 3, ...
                     ]
@@ -404,7 +405,7 @@ class TensorBoardVisualizer:
         # seismic amplitudes are naturally signed. If values cluster near the
         # center, direct mapping can look washed out; we apply a robust
         # center-preserving stretch for display only.
-        synth_np = np.asarray(synth[0, 0].detach().cpu().numpy(), dtype=np.float32)
+        synth_np = np.asarray(device_manager.to_numpy(synth[0, 0]), dtype=np.float32)
 
         seis_min = float(torch.as_tensor(self.physics_state.seis_min).item())
         seis_max = float(torch.as_tensor(self.physics_state.seis_max).item())
