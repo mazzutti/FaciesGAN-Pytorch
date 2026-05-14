@@ -6,14 +6,15 @@ and synthetic seismogram modeling from P-Impedance data.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.signal import fftconvolve  # type: ignore[import]
 
 from config import DomainConfig, PhysicsConfig
-
-from typing import TYPE_CHECKING
+from device import device_manager
 
 if TYPE_CHECKING:
     from physics.physics import PhysicsState
@@ -133,7 +134,6 @@ def torch_ricker_wavelet(
     f_peak: float,
     dt: float,
     length: float = PhysicsConfig.WAVELET_LENGTH,
-    device: torch.device | None = None,
 ) -> torch.Tensor:
     """
     Generate a Ricker (zero-phase) wavelet as a torch Tensor.
@@ -146,15 +146,14 @@ def torch_ricker_wavelet(
         Sampling interval in seconds.
     length : float, optional
         Total length in seconds. Default is PhysicsConfig.WAVELET_LENGTH.
-    device : torch.device, optional
-        Target device for the tensor.
 
     Returns
     -------
     torch.Tensor
         1D wavelet tensor.
     """
-    t = torch.arange(-length / 2, length / 2, dt, device=device)
+    dev = device_manager.device
+    t = torch.arange(-length / 2, length / 2, dt, device=dev)
     pi_sq = torch.pi**2
     f_sq = f_peak**2
     t_sq = t**2
@@ -263,10 +262,10 @@ def resample_wavelet_to_depth(
         align_corners=True,
     )
 
-    # Normalize energy in float32 to prevent overflow and NaN gradients.
-    # Add epsilon inside sqrt to prevent instability if the wavelet is near-zero.
-    w_ms = torch.sum(w_z.to(torch.float32) ** 2)
-    w_norm = torch.sqrt(w_ms + DomainConfig.EPSILON)
+    # Normalize by L1-norm (sum of absolute values) to ensure consistent convolution
+    # gain across different sampling densities (dz).
+    w_l1 = torch.sum(torch.abs(w_z.to(torch.float32)))
+    w_norm = w_l1 + DomainConfig.EPSILON
     w_z = (w_z.to(torch.float32) / w_norm).to(dtype)  # type: ignore[assignment]
 
     # Return as (OutC, InC, H, W) -> (1, 1, fixed_size, 1)

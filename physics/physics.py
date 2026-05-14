@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from config import DomainConfig, PhysicsConfig
+from device import device_manager
 from enums import DataFiles, StatKey
 
 
@@ -14,7 +15,9 @@ class PhysicsState(nn.Module):
     """
 
     def __init__(
-        self, options: Any, shapes: tuple[tuple[int, ...], ...], device: torch.device
+        self,
+        options: Any,
+        shapes: tuple[tuple[int, ...], ...],
     ) -> None:
         super().__init__()
         self.options = options
@@ -41,9 +44,9 @@ class PhysicsState(nn.Module):
         self.wavelet_dt: torch.Tensor
         self.wavelet_t: torch.Tensor
 
-        self._register_physics_buffers(device)
+        self._register_physics_buffers()
 
-    def _register_physics_buffers(self, device: torch.device) -> None:
+    def _register_physics_buffers(self) -> None:
         """Pre-compute and register tensors for fast denormalization on GPU."""
         from datasets.utils import get_effective_global_stats
         from physics.seismic import torch_ricker_wavelet
@@ -64,7 +67,7 @@ class PhysicsState(nn.Module):
                 ),
             ),
         )
-        phys_min, phys_diff, phys_mean = self._compute_phys_ranges(stats, device)
+        phys_min, phys_diff, phys_mean = self._compute_phys_ranges(stats)
 
         self.phys_names = DataFiles.rock_physics_names()
 
@@ -83,7 +86,7 @@ class PhysicsState(nn.Module):
             torch.tensor(
                 self.options.normalization_range[0],
                 dtype=torch.float32,
-                device=device,
+                device=device_manager.device,
             ),
         )
         self.register_buffer(
@@ -91,7 +94,7 @@ class PhysicsState(nn.Module):
             torch.tensor(
                 self.options.normalization_range[1],
                 dtype=torch.float32,
-                device=device,
+                device=device_manager.device,
             ),
         )
 
@@ -99,7 +102,7 @@ class PhysicsState(nn.Module):
             "padding_value",
             torch.tensor(
                 get_padding_value(self.options.normalization_range),
-                device=device,
+                device=device_manager.device,
             ),
         )
 
@@ -110,7 +113,8 @@ class PhysicsState(nn.Module):
         # Register rho_mean as a buffer for fast access in physics loss
         rho_mean = float(stats[DataFiles.RHO.name][StatKey.MEAN])
         self.register_buffer(
-            "rho_mean", torch.tensor(rho_mean, device=device, dtype=torch.float32)
+            "rho_mean",
+            torch.tensor(rho_mean, device=device_manager.device, dtype=torch.float32),
         )
 
         ip_min = phys_min[DataFiles.Ip.name]
@@ -123,7 +127,9 @@ class PhysicsState(nn.Module):
 
         # Reference velocity for Wavelet Resampling (avoids per-batch sync)
         ip_mean = float(phys_mean[DataFiles.Ip.name])
-        vp_ref = torch.tensor(ip_mean / rho_mean, device=device, dtype=torch.float32)
+        vp_ref = torch.tensor(
+            ip_mean / rho_mean, device=device_manager.device, dtype=torch.float32
+        )
         self.register_buffer("vp_ref", vp_ref)
 
         # Pre-calculate dz for every scale to avoid redundant float math in G-loop
@@ -139,7 +145,7 @@ class PhysicsState(nn.Module):
             "dz_pyramid",
             torch.tensor(
                 dz_pyramid,
-                device=device,
+                device=device_manager.device,
                 dtype=torch.float32,
             ),
         )
@@ -149,7 +155,7 @@ class PhysicsState(nn.Module):
             "wavelet_dt",
             torch.tensor(
                 self.options.wavelet_dt,
-                device=device,
+                device=device_manager.device,
                 dtype=torch.float32,
             ),
         )
@@ -158,13 +164,10 @@ class PhysicsState(nn.Module):
             self.options.wavelet_f_peak,
             self.options.wavelet_dt,
             self.options.wavelet_length,
-            device=device,
         )
         self.register_buffer("wavelet_t", wavelet_t)
 
-    def _compute_phys_ranges(
-        self, stats: dict[str, dict[str, Any]], device: torch.device
-    ) -> tuple[
+    def _compute_phys_ranges(self, stats: dict[str, dict[str, Any]]) -> tuple[
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
@@ -186,16 +189,18 @@ class PhysicsState(nn.Module):
             )
 
             phys_min[key] = torch.tensor(
-                s[StatKey.MIN] * scale, device=device, dtype=torch.float32
+                s[StatKey.MIN] * scale,
+                device=device_manager.device,
+                dtype=torch.float32,
             )
             phys_diff[key] = torch.tensor(
                 (s[StatKey.MAX] - s[StatKey.MIN]) * scale,
-                device=device,
+                device=device_manager.device,
                 dtype=torch.float32,
             )
             phys_mean[key] = torch.tensor(
                 s[StatKey.MEAN] * scale,
-                device=device,
+                device=device_manager.device,
                 dtype=torch.float32,
             )
         return phys_min, phys_diff, phys_mean
