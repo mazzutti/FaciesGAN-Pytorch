@@ -13,8 +13,9 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from enums import DeviceType
+
 from config import DomainConfig
+from device import device_manager
 
 
 class ConvBlock(nn.Sequential):
@@ -243,6 +244,8 @@ class SPADEGenerator(nn.Module):
         Size of convolutional kernels.
     padding_size : int
         Padding size for convolutions.
+    stride : int
+        Stride of the convolution.
     num_features : int
         Number of features in the first layer.
     min_num_features : int
@@ -259,6 +262,7 @@ class SPADEGenerator(nn.Module):
         num_layer: int,
         kernel_size: int,
         padding_size: int,
+        stride: int,
         num_features: int,
         min_num_features: int,
         output_channels: int,
@@ -285,18 +289,30 @@ class SPADEGenerator(nn.Module):
             out_ch = max(int(num_features / pow(2, (i + 1))), min_num_features)
             self.spade_blocks.append(
                 SPADEConvBlock(
-                    curr_features, out_ch, input_channels, kernel_size, padding_size, 1
+                    curr_features,
+                    out_ch,
+                    input_channels,
+                    kernel_size,
+                    padding_size,
+                    stride,
                 )
             )
             curr_features = out_ch
 
-        # Final output layer
+        # Final output layer with coordination block
         self.tail = nn.Sequential(
+            ConvBlock(
+                curr_features,
+                curr_features,
+                kernel_size=1,
+                padding=0,
+                stride=1,
+            ),
             nn.Conv2d(
                 curr_features,
                 output_channels,
                 kernel_size=kernel_size,
-                stride=1,
+                stride=stride,
                 padding=padding_size,
             ),
             nn.Tanh(),
@@ -335,6 +351,30 @@ class SPADEDiscriminator(nn.Module):
     network detect mode collapse and encourage diversity. It is compatible with
     distributed training: when DDP is active the minibatch statistic is
     computed across the global batch gathered from all ranks.
+
+    Parameters
+    ----------
+    num_features : int
+        Number of features in the first convolutional layer.
+    min_num_features : int
+        Minimum number of features used when reducing channels.
+    num_layer : int
+        Number of convolutional layers.
+    kernel_size : int
+        Convolution kernel size.
+    padding_size : int
+        Padding applied to convolutions.
+    stride : int
+        Stride of the convolution.
+    input_channels : int
+        Number of input image channels.
+    minibatch_stddev_group_size : int, optional
+        Group size used to compute minibatch standard deviation. The
+        implementation falls back to the full batch when the batch is
+        smaller than this value. Default is 4.
+    minibatch_stddev_epsilon : float, optional
+        Numerical stability constant added before the square root.
+        Default is DomainConfig.EPSILON.
     """
 
     def __init__(
@@ -344,6 +384,7 @@ class SPADEDiscriminator(nn.Module):
         num_layer: int,
         kernel_size: int,
         padding_size: int,
+        stride: int,
         input_channels: int,
         minibatch_stddev_group_size: int = 4,
         minibatch_stddev_epsilon: float = DomainConfig.EPSILON,
@@ -382,7 +423,7 @@ class SPADEDiscriminator(nn.Module):
             num_features,
             kernel_size,
             padding_size,
-            1,
+            stride,
         )
 
         self.body = nn.Sequential(
@@ -392,7 +433,7 @@ class SPADEDiscriminator(nn.Module):
                     max(num_features // (2 ** (i + 1)), min_num_features),
                     kernel_size,
                     padding_size,
-                    1,
+                    stride,
                 )
                 for i in range(num_layer - 2)
             ]
@@ -403,7 +444,7 @@ class SPADEDiscriminator(nn.Module):
             output_channels + 1,
             1,
             kernel_size=kernel_size,
-            stride=1,
+            stride=stride,
             padding=padding_size,
         )
 
@@ -481,7 +522,6 @@ class FaciesQuantization(nn.Module):
     def __init__(
         self,
         temperature: float = 0.5,
-        device: torch.device = torch.device(DeviceType.CPU),
     ) -> None:
         """Create a ColorQuantization module.
 
@@ -492,17 +532,14 @@ class FaciesQuantization(nn.Module):
             Higher values produce softer (more differentiable) assignments
             enabling better gradient flow; lower values produce sharper
             (more discrete) outputs. Default is 0.5.
-        device : torch.device
-            Device used for training (cpu/cuda/mps).
         """
         super().__init__()  # type: ignore
-        self.device = device
         self.register_buffer(
             "temperature",
             torch.tensor(
                 temperature,
                 dtype=torch.float32,
-                device=self.device,
+                device=device_manager.device,
             ),
         )
 
@@ -518,7 +555,7 @@ class FaciesQuantization(nn.Module):
                     [-1.0, 1.0, -1.0],
                 ],
                 dtype=torch.float32,
-                device=self.device,
+                device=device_manager.device,
             ),
         )
 

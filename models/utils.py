@@ -1,10 +1,10 @@
 from typing import Any
 
-
 import torch
 from apex.normalization import FusedLayerNorm  # type: ignore[import]
 
 from config import DomainConfig
+from device import device_manager
 from enums import ChannelKey, DeviceType, LossFn, SplitKey
 from options import TrainingOptions
 
@@ -39,7 +39,6 @@ def calc_gradient_penalty(
     real_data: torch.Tensor,
     fake_data: torch.Tensor,
     LAMBDA: float,
-    device: torch.device,
 ) -> torch.Tensor:
     """Calculate gradient penalty for WGAN-GP training.
 
@@ -56,8 +55,6 @@ def calc_gradient_penalty(
         Generated fake data samples.
     LAMBDA : float
         Gradient penalty coefficient (typically 10.0).
-    device : torch.device
-        Device to perform calculations on.
 
     Returns
     -------
@@ -66,17 +63,18 @@ def calc_gradient_penalty(
     """
     # Sample one alpha per batch item so every sample has its own interpolation
     # point — required by WGAN-GP for an unbiased gradient penalty estimate.
+    dev = device_manager.device
     batch_size = real_data.size(0)
-    alpha = torch.rand(batch_size, 1, 1, 1, device=device).expand_as(real_data)
+    alpha = torch.rand(batch_size, 1, 1, 1, device=dev).expand_as(real_data)
     interpolates = (alpha * real_data + (1 - alpha) * fake_data).requires_grad_(True)
     disc_interpolates: torch.Tensor = discriminator(interpolates)
 
     gradients: torch.Tensor = torch.autograd.grad(
         outputs=disc_interpolates,
         inputs=interpolates,
-        grad_outputs=torch.ones(
-            1, dtype=disc_interpolates.dtype, device=device
-        ).expand_as(disc_interpolates),
+        grad_outputs=torch.ones(1, dtype=disc_interpolates.dtype, device=dev).expand_as(
+            disc_interpolates
+        ),
         create_graph=True,
         only_inputs=True,
     )[0]
@@ -95,13 +93,17 @@ def calc_gradient_penalty(
     return gradient_penalty  # type: ignore
 
 
-def load(path: str, device: torch.device) -> Any:
-    """Load a torch file from disk and move it to the target device."""
+def load(path: str) -> Any:
+    """Load a torch file from disk, automatically mapping to the managed device.
+    
+    Uses the device_manager to ensure tensors are loaded onto the correct 
+    local rank or CPU, regardless of where they were originally saved.
+    """
     import os
 
     if not os.path.exists(path):
         return None
-    return torch.load(path, map_location=device, weights_only=False)
+    return torch.load(path, map_location=device_manager.device, weights_only=False)
 
 
 def interpolate(tensor: torch.Tensor, size: tuple[int, ...]) -> torch.Tensor:
@@ -168,7 +170,9 @@ def calculate_channels(options: TrainingOptions) -> dict[ChannelKey, int]:
 
 
 def generate_noise(
-    size: tuple[int, ...], device: torch.device, num_samp: int = 1, scale: float = 1.0
+    size: tuple[int, ...],
+    num_samp: int = 1,
+    scale: float = 1.0,
 ) -> torch.Tensor:
     """Generate a random noise tensor with specified dimensions.
 
@@ -180,8 +184,6 @@ def generate_noise(
     ----------
     size : tuple[int, ...]
         Shape of the noise tensor as (channels, height, width).
-    device : torch.device
-        Device on which to generate the tensor (CPU, CUDA, or MPS).
     num_samp : int, optional
         Number of samples (batch size) to generate. Defaults to 1.
     scale : float, optional
@@ -194,14 +196,15 @@ def generate_noise(
         Random tensor sampled from standard normal distribution with shape
         (num_samp, channels, height/scale, width/scale).
     """
+    dev = device_manager.device
     shape = (num_samp, size[0], *[round(s / scale) for s in size[1:]])
-    if device.type == DeviceType.CUDA and len(shape) == 4:
+    if dev.type == DeviceType.CUDA and len(shape) == 4:
         # Allocate directly in channels_last layout — avoids a copy
         # compared to torch.randn(...).to(memory_format=channels_last).
-        noise = torch.empty(shape, device=device, memory_format=torch.channels_last)
+        noise = torch.empty(shape, device=dev, memory_format=torch.channels_last)
         noise.normal_()
     else:
-        noise = torch.randn(*shape, device=device)
+        noise = torch.randn(*shape, device=dev)
     if scale != 1:
         noise = interpolate(noise, size[1:])
     return noise

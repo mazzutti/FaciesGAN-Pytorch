@@ -39,6 +39,8 @@ class Generator(nn.Module):
         Size of convolutional kernels.
     padding_size : int
         Padding size for convolutions.
+    stride : int
+        Stride of the convolution.
     input_channels : int
         Number of input channels (noise + conditioning channels).
 
@@ -72,11 +74,11 @@ class Generator(nn.Module):
         kernel_size: int,
         padding_size: int,
         padding_value: float,
+        stride: int,
         input_channels: int,
         output_channels: int = 3,
         num_facies: int = DomainConfig.NUM_FACIES_CHANNELS,
         normalization_range: tuple[float, ...] = (-1.0, 1.0),
-        device: torch.device = torch.device(DeviceType.CPU),
     ) -> None:
         """Initialize the multiscale Generator.
 
@@ -94,11 +96,14 @@ class Generator(nn.Module):
             Number of input channels (noise plus optional conditioning).
         output_channels : int
             Number of output color channels.
-        device : torch.device
-            Device for computation.
         num_facies : int, optional
             Number of facies output channels (default DomainConfig.NUM_FACIES_CHANNELS).
         """
+        # Force Dynamo limits before compilation starts.
+        # noinspection PyProtectedMember
+        torch._dynamo.config.cache_size_limit = 64  # type: ignore[attr-defined]
+        torch._dynamo.config.recompile_limit = 64  # type: ignore[attr-defined]
+
         # Initialize generator configuration used throughout the class.
         self.spade_scales: set[int] = set()
 
@@ -124,6 +129,7 @@ class Generator(nn.Module):
 
         # channel counts used in the generator
         self.input_channels = input_channels
+        self.stride = stride
 
         # output channel count (e.g., RGB)
         self.output_channels = output_channels
@@ -156,7 +162,7 @@ class Generator(nn.Module):
         self.gens = nn.ModuleList()  # type: ignore[assignment]
 
         # Color quantization layer (framework-specific)
-        self.color_quantizer = FaciesQuantization(temperature=0.5, device=device)
+        self.color_quantizer = FaciesQuantization(temperature=0.5)
 
         # Residual add + clamp fused into a single callable so that
         # torch.compile can merge them into one Inductor kernel,
@@ -274,6 +280,13 @@ class Generator(nn.Module):
             Generated facies tensor at the finest requested scale.
         """
         if in_noise is None:
+            if not z or start_scale >= len(z):
+                raise RuntimeError(
+                    f"Generator.forward: noise pyramid 'z' is empty or start_scale {start_scale} "
+                    f"is out of bounds (len(z)={len(z)}). This usually indicates that the "
+                    "model was not loaded correctly or noise_amps were not initialized."
+                )
+
             channels = self.output_channels
             batch_size = z[start_scale].shape[0]
             height, width = tuple(
@@ -391,6 +404,7 @@ class Generator(nn.Module):
                 num_layer=self.num_layer,
                 kernel_size=self.kernel_size,
                 padding_size=self.padding_size,
+                stride=self.stride,
                 num_features=num_features,
                 min_num_features=min_num_features,
                 output_channels=self.output_channels,
@@ -422,11 +436,18 @@ class Generator(nn.Module):
                 body.add_module(f"block{i + 1}", block)
 
             tail = nn.Sequential(
+                ConvBlock(
+                    max(block_features, min_num_features),
+                    max(block_features, min_num_features),
+                    kernel_size=1,
+                    padding=0,
+                    stride=1,
+                ),
                 nn.Conv2d(
                     max(block_features, min_num_features),
                     self.output_channels,
                     kernel_size=self.kernel_size,
-                    stride=1,
+                    stride=self.stride,
                     padding=self.padding_size,
                 ),
                 nn.Tanh(),

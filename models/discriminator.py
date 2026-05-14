@@ -46,6 +46,7 @@ class Discriminator(nn.Module):
         num_layer: int,
         kernel_size: int,
         padding_size: int,
+        stride: int,
         input_channels: int,
     ) -> None:
         """Initialize the convolutional discriminator.
@@ -64,6 +65,7 @@ class Discriminator(nn.Module):
         self.num_layer = num_layer
         self.kernel_size = kernel_size
         self.padding_size = padding_size
+        self.stride = stride
         self.input_channels = input_channels
 
         nn.Module.__init__(self)
@@ -104,6 +106,7 @@ class Discriminator(nn.Module):
             num_layer=self.num_layer,
             kernel_size=self.kernel_size,
             padding_size=self.padding_size,
+            stride=self.stride,
             num_features=num_features,
             min_num_features=min_num_features,
             input_channels=self.input_channels,

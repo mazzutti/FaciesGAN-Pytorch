@@ -19,29 +19,26 @@ from torch.amp.grad_scaler import GradScaler
 # Removed legacy constants import
 from config import CheckpointFilenames
 from datasets.utils import generate_scales
+from device import device_manager
+from enums import DeviceType
 from models import utils
 from models.discriminator import Discriminator
 from models.generator import Generator
 from models.utils import ChannelKey
-from enums import DeviceType
 from options import TrainingOptions
 from physics.physics import PhysicsState
 from training.metrics import (
+    DiscriminatorMetrics,
+    GeneratorMetrics,
+    ScaleMetrics,
     compute_adversarial_loss,
     compute_diversity_loss,
     compute_gradient_penalty,
     compute_masked_loss,
     compute_reconstruction_loss,
     compute_rock_physics_loss,
-    DiscriminatorMetrics,
-    GeneratorMetrics,
-    ScaleMetrics
 )
 from utils import get_padding_value
-
-# Raise the per-code-object recompile cache for torch.compile.
-# noinspection PyProtectedMember
-torch._dynamo.config.cache_size_limit = 64  # type: ignore[attr-defined]
 
 
 def unwrap_ddp(module: nn.Module) -> nn.Module:
@@ -74,8 +71,6 @@ class FaciesGAN(nn.Module):
         The multiscale PyTorch generator instance.
     discriminator : Discriminator
         The multiscale PyTorch discriminator instance.
-    device : torch.device
-        Primary device for computation.
     options : TrainingOptions
         Training configuration containing hyperparameters.
     """
@@ -91,9 +86,7 @@ class FaciesGAN(nn.Module):
         self,
         options: TrainingOptions,
         channels: dict[ChannelKey, int],
-        device: torch.device = torch.device(DeviceType.CPU),
-        use_ddp: bool = False
-) -> None:
+    ) -> None:
         """Initialize the FaciesGAN model.
 
         Parameters
@@ -102,11 +95,6 @@ class FaciesGAN(nn.Module):
             Training options containing hyperparameters and configuration.
         channels : dict[ChannelKey, int]
             Dictionary mapping channel keys to the number of channels for each component.
-        device : torch.device, optional
-            Primary device for computation (default is CPU).
-        use_ddp : bool, optional
-            When ``True``, each per-scale submodule is wrapped with
-            ``DistributedDataParallel`` after creation.
         """
         super().__init__()
 
@@ -129,16 +117,28 @@ class FaciesGAN(nn.Module):
         # persist across checkpoints.
         self.register_buffer(
             "noise_amp",
-            torch.tensor(options.noise_amp, dtype=torch.float32, device=device)
-)
+            torch.tensor(
+                options.noise_amp,
+                dtype=torch.float32,
+                device=device_manager.device,
+            ),
+        )
         self.register_buffer(
             "min_noise_amp",
-            torch.tensor(options.min_noise_amp, dtype=torch.float32, device=device)
-)
+            torch.tensor(
+                options.min_noise_amp,
+                dtype=torch.float32,
+                device=device_manager.device,
+            ),
+        )
         self.register_buffer(
             "scale0_noise_amp",
-            torch.tensor(options.scale0_noise_amp, dtype=torch.float32, device=device)
-)
+            torch.tensor(
+                options.scale0_noise_amp,
+                dtype=torch.float32,
+                device=device_manager.device,
+            ),
+        )
 
         # --- State Tracking ---
         self.shapes: tuple[tuple[int, ...], ...] = generate_scales(options)
@@ -153,13 +153,10 @@ class FaciesGAN(nn.Module):
         self.padding_value: float = get_padding_value(options.normalization_range)
         self.zero_padding = int(options.num_layer * math.floor(options.kernel_size / 2))
 
-        self.device = device
-        self.use_ddp = use_ddp
-
         self._wavelets_z_cache: dict[int, torch.Tensor] = {}
 
         # --- Performance & Parallelism ---
-        self.use_amp = device.type == DeviceType.CUDA
+        self.use_amp = device_manager.is_cuda
         self.amp_dtype = (
             torch.bfloat16
             if str(options.amp_dtype).lower() == "bf16"
@@ -168,8 +165,8 @@ class FaciesGAN(nn.Module):
         self.use_grad_scaler = self.use_amp and self.amp_dtype == torch.float16
         self.grad_scaler_g = GradScaler(enabled=self.use_grad_scaler)
 
-        self.use_compile = device.type == DeviceType.CUDA and options.compile_backend
-        self.zero_scalar = torch.tensor(0.0, device=device)
+        self.use_compile = device_manager.is_cuda and options.compile_backend
+        self.zero_scalar = torch.tensor(0.0, device=device_manager.device)
         self.use_gradient_checkpointing = options.gradient_checkpointing
 
         self.uncompiled_discs: dict[int, nn.Module] = {}
@@ -183,9 +180,7 @@ class FaciesGAN(nn.Module):
         self.d_noise_buffers: dict[tuple[int, ...], torch.Tensor] = {}
         self.g_noise_buffers: dict[tuple[int, ...], torch.Tensor] = {}
 
-        # Pre-allocate constant zero scalars on device so the hot path
-        # avoids repeated small CUDA allocations.
-        self.zero_scalar = torch.tensor(0.0, device=device)
+        # self.zero_scalar already allocated
 
         # Profiling
         self.profile_all_reduce = False
@@ -200,23 +195,24 @@ class FaciesGAN(nn.Module):
             kernel_size=options.kernel_size,
             padding_size=options.padding_size,
             padding_value=self.padding_value,
+            stride=options.stride,
             input_channels=self.gen_input_channels,
             output_channels=self.gen_output_channels,
             num_facies=self.num_facies_channels,
             normalization_range=options.normalization_range,
-            device=self.device
-)
+        )
         self.discriminator = Discriminator(
             num_layer=options.num_layer,
             kernel_size=options.kernel_size,
             padding_size=options.padding_size,
-            input_channels=self.disc_input_channels
-)
+            stride=options.stride,
+            input_channels=self.disc_input_channels,
+        )
 
         if self.use_gradient_checkpointing:
             self.generator.use_gradient_checkpointing = True
 
-        self.physics_state = PhysicsState(self.options, self.shapes, device)
+        self.physics_state = PhysicsState(self.options, self.shapes)
 
         if self.use_compile:
             # noinspection PyTypeChecker
@@ -224,20 +220,17 @@ class FaciesGAN(nn.Module):
                 self.generator.color_quantizer,
                 fullgraph=True,
                 dynamic=True,
-                mode="default"
-)
+                mode="default",
+            )
             # noinspection PyTypeChecker
             self.generator._residual_clamp = torch.compile(  # type: ignore
                 self.generator._residual_clamp,  # type: ignore
                 fullgraph=True,
-                dynamic=True
-)
+                dynamic=True,
+            )
 
         # Rank-0 compile progress indicator (useful with max-autotune mode).
-        is_rank0 = (
-            not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
-        )
-        self._is_main_process = is_rank0
+        is_rank0 = device_manager.is_main_process
         self._compile_progress_enabled = bool(self.use_compile and is_rank0)
         # Total tick count estimation for the progress bar.
         # planned = discriminator blocks + generator blocks + 2 (quantizer, clamp).
@@ -323,8 +316,8 @@ class FaciesGAN(nn.Module):
         rec_in_pyramid: dict[int, torch.Tensor],
         wells_pyramid: dict[int, torch.Tensor] = {},
         masks_pyramid: dict[int, torch.Tensor] = {},
-        seismic_pyramid: dict[int, torch.Tensor] = {}
-) -> ScaleMetrics:
+        seismic_pyramid: dict[int, torch.Tensor] = {},
+    ) -> ScaleMetrics:
         """Perform a forward pass and compute scale metrics for active scales.
 
         This method orchestrates both discriminator and generator optimization steps.
@@ -358,8 +351,8 @@ class FaciesGAN(nn.Module):
             discriminator_optimizers,
             facies_pyramid,
             wells_pyramid,
-            seismic_pyramid
-)
+            seismic_pyramid,
+        )
         gen_metrics_tuple = self.optimize_generator(
             indexes,
             generator_optimizers,
@@ -367,8 +360,8 @@ class FaciesGAN(nn.Module):
             rec_in_pyramid,
             wells_pyramid,
             masks_pyramid,
-            seismic_pyramid
-)
+            seismic_pyramid,
+        )
 
         discriminator_metrics = {
             scale: disc_metrics_tuple[i]
@@ -380,9 +373,8 @@ class FaciesGAN(nn.Module):
         }
 
         return ScaleMetrics(
-            discriminator=discriminator_metrics,
-            generator=generator_metrics
-)
+            discriminator=discriminator_metrics, generator=generator_metrics
+        )
 
     def optimize_discriminator(
         self,
@@ -390,8 +382,8 @@ class FaciesGAN(nn.Module):
         optimizers: dict[int, torch.optim.Optimizer],
         facies_pyramid: dict[int, torch.Tensor],
         wells_pyramid: dict[int, torch.Tensor] = {},
-        seismic_pyramid: dict[int, torch.Tensor] = {}
-) -> tuple[DiscriminatorMetrics, ...]:
+        seismic_pyramid: dict[int, torch.Tensor] = {},
+    ) -> tuple[DiscriminatorMetrics, ...]:
         """Perform discriminator optimization with gradient accumulation.
 
         Generates fakes upfront and iterates through discriminator steps.
@@ -430,13 +422,8 @@ class FaciesGAN(nn.Module):
             for scale in sorted_scales:
                 d_count = d * scale0_multi if scale == 0 else d
                 batched_noises = self.get_batched_d_noise(
-                    scale,
-                    d_count,
-                    b,
-                    indexes,
-                    wells_pyramid,
-                    seismic_pyramid
-)
+                    scale, d_count, b, indexes, wells_pyramid, seismic_pyramid
+                )
                 amps = self.get_noise_amplitude(scale)
                 batched_fake = self.generator(batched_noises, amps, stop_scale=scale)
                 pre_faked[scale] = list(torch.chunk(batched_fake, d_count, dim=0))
@@ -471,9 +458,7 @@ class FaciesGAN(nn.Module):
                     if scale == 0 and self.options.scale0_gp_alpha > 0.0
                     else self.options.gradient_loss_penalty
                 )
-                gp = compute_gradient_penalty(
-                    disc, real, fake.detach(), lambda_gp, self.device
-                )
+                gp = compute_gradient_penalty(disc, real, fake.detach(), lambda_gp)
                 last_gp[scale] = gp.detach()
             else:
                 gp = self.zero_scalar
@@ -512,7 +497,7 @@ class FaciesGAN(nn.Module):
                 raw_losses[scale] = _disc_step(scale, step_idx, compute_gp)
 
             # Phase 2: Coalesced all-reduce
-            if self.use_ddp:
+            if device_manager.is_distributed:
                 self.all_reduce_grads_coalesced(ddp_modules)
 
             # Phase 3: Step optimizers and build metrics
@@ -531,11 +516,8 @@ class FaciesGAN(nn.Module):
                     # did not coincide with any step in this call).
                     gp_val = last_gp.get(scale, self.zero_scalar)
                     step_metrics[sorted_scales.index(scale)] = DiscriminatorMetrics(
-                        total=rl + fl + gp_val,
-                        real=rl,
-                        fake=fl,
-                        gp=gp_val
-)
+                        total=rl + fl + gp_val, real=rl, fake=fl, gp=gp_val
+                    )
 
         return tuple(step_metrics)
 
@@ -547,8 +529,8 @@ class FaciesGAN(nn.Module):
         rec_in_pyramid: dict[int, torch.Tensor],
         wells_pyramid: dict[int, torch.Tensor] = {},
         masks_pyramid: dict[int, torch.Tensor] = {},
-        seismic_pyramid: dict[int, torch.Tensor] = {}
-) -> tuple[GeneratorMetrics, ...]:
+        seismic_pyramid: dict[int, torch.Tensor] = {},
+    ) -> tuple[GeneratorMetrics, ...]:
         """Perform generator optimization with gradient accumulation and per-scale freezing.
 
         Parameters
@@ -609,8 +591,8 @@ class FaciesGAN(nn.Module):
                     rec_in_pyramid,
                     wells_pyramid,
                     masks_pyramid,
-                    seismic_pyramid
-)
+                    seismic_pyramid,
+                )
 
                 # zero_grad + backward per scale
                 self.optimizer_zero_grad(optimizers[scale])
@@ -632,8 +614,8 @@ class FaciesGAN(nn.Module):
                     rec_rock_physics=metrics.rec_rock_physics.detach(),
                     tv=metrics.tv.detach(),
                     elastic=metrics.elastic.detach(),
-                    seismic=metrics.seismic.detach()
-)
+                    seismic=metrics.seismic.detach(),
+                )
                 step_metrics.append(detached_metrics)
 
             # Restore requires_grad BEFORE all-reduce
@@ -642,7 +624,7 @@ class FaciesGAN(nn.Module):
                     self.generator.gens[s].requires_grad_(True)
 
             # Phase 2: Coalesced all_reduce for all gen modules
-            if self.use_ddp:
+            if device_manager.is_distributed:
                 self.all_reduce_grads_coalesced(
                     [
                         self.generator.gens[s]
@@ -697,8 +679,8 @@ class FaciesGAN(nn.Module):
         rec_in_pyramid: dict[int, torch.Tensor] = {},
         wells_pyramid: dict[int, torch.Tensor] = {},
         masks_pyramid: dict[int, torch.Tensor] = {},
-        seismic_pyramid: dict[int, torch.Tensor] = {}
-) -> GeneratorMetrics:
+        seismic_pyramid: dict[int, torch.Tensor] = {},
+    ) -> GeneratorMetrics:
         """Compute generator losses and return comprehensive metrics.
 
         Parameters
@@ -722,11 +704,8 @@ class FaciesGAN(nn.Module):
         with autocast(DeviceType.CUDA, enabled=self.use_amp, dtype=self.amp_dtype):
             # Generate diversity candidates
             fake_samples = self.generate_diverse_samples(
-                indexes,
-                scale,
-                wells_pyramid,
-                seismic_pyramid
-)
+                indexes, scale, wells_pyramid, seismic_pyramid
+            )
             fake = fake_samples[0]
 
             # WGAN generator adversarial loss
@@ -743,8 +722,8 @@ class FaciesGAN(nn.Module):
                 real,
                 wells_pyramid.get(scale),
                 masks_pyramid.get(scale),
-                self.options
-)
+                self.options,
+            )
 
             tv_loss, elastic_loss, seismic_loss = compute_rock_physics_loss(
                 fake, seismic_pyramid, scale, self.options, self.physics_state
@@ -761,12 +740,8 @@ class FaciesGAN(nn.Module):
                 rec_facies_loss, rec_rp_loss = self.zero_scalar, self.zero_scalar
             else:
                 rec_noise = self.get_pyramid_noise(
-                    scale,
-                    indexes,
-                    wells_pyramid,
-                    seismic_pyramid,
-                    rec=True
-)
+                    scale, indexes, wells_pyramid, seismic_pyramid, rec=True
+                )
                 rec_facies_loss, rec_rp_loss = compute_reconstruction_loss(
                     self.generator,
                     self.noise_amps,
@@ -777,8 +752,8 @@ class FaciesGAN(nn.Module):
                     self.options,
                     self.zero_scalar,
                     self.current_epoch,
-                    self.rec_skip_epochs
-)
+                    self.rec_skip_epochs,
+                )
 
             # Apply extra loss weight at scale 0 to anchor the pyramid
             if scale == 0 and self.options.scale0_loss_multiplier != 1.0:
@@ -811,8 +786,8 @@ class FaciesGAN(nn.Module):
             rec_rock_physics=rec_rp_loss.detach(),
             tv=tv_loss.detach(),
             elastic=elastic_loss.detach(),
-            seismic=seismic_loss.detach()
-)
+            seismic=seismic_loss.detach(),
+        )
 
         return metrics
 
@@ -825,8 +800,8 @@ class FaciesGAN(nn.Module):
         indexes: torch.Tensor,
         scale: int,
         wells_pyramid: dict[int, torch.Tensor] = {},
-        seismic_pyramid: dict[int, torch.Tensor] = {}
-) -> list[torch.Tensor]:
+        seismic_pyramid: dict[int, torch.Tensor] = {},
+    ) -> list[torch.Tensor]:
         """Generate multiple candidate outputs for `scale` using current generator."""
         n = (
             1
@@ -853,8 +828,8 @@ class FaciesGAN(nn.Module):
         scale: int,
         indexes: torch.Tensor,
         wells_pyramid: dict[int, torch.Tensor] = {},
-        seismic_pyramid: dict[int, torch.Tensor] = {}
-) -> list[torch.Tensor]:
+        seismic_pyramid: dict[int, torch.Tensor] = {},
+    ) -> list[torch.Tensor]:
         """Generate optimized pre-allocated noise buffers for the G-phase."""
         return self.build_batched_noise(
             n, b, scale, indexes, wells_pyramid, seismic_pyramid
@@ -867,8 +842,8 @@ class FaciesGAN(nn.Module):
         b: int,
         indexes: torch.Tensor,
         wells_pyramid: dict[int, torch.Tensor],
-        seismic_pyramid: dict[int, torch.Tensor]
-) -> list[torch.Tensor]:
+        seismic_pyramid: dict[int, torch.Tensor],
+    ) -> list[torch.Tensor]:
         """Generate optimized noise buffers for the D-phase."""
         return self.build_batched_noise(
             d, b, scale, indexes, wells_pyramid, seismic_pyramid, channels_last=True
@@ -883,8 +858,8 @@ class FaciesGAN(nn.Module):
         wells_pyramid: dict[int, torch.Tensor],
         seismic_pyramid: dict[int, torch.Tensor],
         *,
-        channels_last: bool = False
-) -> list[torch.Tensor]:
+        channels_last: bool = False,
+    ) -> list[torch.Tensor]:
         """Build pre-allocated batched noise buffers for G- or D-phase.
 
         Parameters
@@ -917,7 +892,7 @@ class FaciesGAN(nn.Module):
 
             if wells_pyramid:
                 w_local = wells_pyramid[lvl]
-                w_local = w_local.to(self.device, non_blocking=True)
+                w_local = w_local.to(device_manager.device, non_blocking=True)
                 if isinstance(indexes, torch.Tensor) and w_local.shape[0] != b:
                     w_local = w_local[indexes]
                 elif isinstance(indexes, list) and w_local.shape[0] != b:
@@ -932,8 +907,8 @@ class FaciesGAN(nn.Module):
                     else seismic_pyramid.get(lvl)
                 )
                 if s_local is not None:
-                    s_local = s_local.to(self.device, non_blocking=True)
-                    if isinstance(indexes, torch.Tensor) and s_local.shape[0] != b:
+                    s_local = s_local.to(device_manager.device, non_blocking=True)
+                    if s_local.shape[0] != b:
                         s_local = s_local[indexes]
                     elif isinstance(indexes, list) and s_local.shape[0] != b:
                         s_local = s_local[indexes]
@@ -952,7 +927,7 @@ class FaciesGAN(nn.Module):
                         total_channels,
                         pad_height,
                         pad_width,
-                        device=self.device,
+                        device=device_manager.device,
                         memory_format=torch.channels_last,  # type: ignore
                     ).zero_()
                 else:
@@ -961,8 +936,8 @@ class FaciesGAN(nn.Module):
                         total_channels,
                         pad_height,
                         pad_width,
-                        device=self.device
-)
+                        device=device_manager.device,
+                    )
                 buf_cache[key] = buf
 
             buf[:, :noise_channels, p : p + height, p : p + width].normal_()
@@ -999,8 +974,8 @@ class FaciesGAN(nn.Module):
         indexes: torch.Tensor | list[int],
         wells_pyramid: dict[int, torch.Tensor] = {},
         seismic_pyramid: dict[int, torch.Tensor] = {},
-        rec: bool = False
-) -> list[torch.Tensor]:
+        rec: bool = False,
+    ) -> list[torch.Tensor]:
         """Generate noise tensors up to a specific pyramid scale.
 
         Parameters
@@ -1018,18 +993,20 @@ class FaciesGAN(nn.Module):
             Pyramid of noise tensors.
         """
         if rec:
-            return self.rec_noise[: scale + 1]
+            # Use a relative slice instead of absolute indexes because rec_noise 
+            # is a rank-local buffer initialized for the current batch samples.
+            return [n[:len(indexes)] for n in self.rec_noise[: scale + 1]]
 
         if isinstance(indexes, list):
-            indexes = torch.tensor(indexes, device=self.device)
+            indexes = torch.tensor(indexes, device=device_manager.device)
 
         return [
             self.generate_noise(
                 i,
                 indexes,
                 wells_pyramid[i] if wells_pyramid else None,
-                seismic_pyramid[i] if seismic_pyramid else None
-)
+                seismic_pyramid[i] if seismic_pyramid else None,
+            )
             for i in range(scale + 1)
         ]
 
@@ -1038,8 +1015,8 @@ class FaciesGAN(nn.Module):
         scale: int,
         indexes: torch.Tensor,
         well: torch.Tensor | None = None,
-        seismic: torch.Tensor | None = None
-) -> torch.Tensor:
+        seismic: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Create a noise tensor for a single pyramid level.
 
         Applies conditioning (well/seismic) and padding.
@@ -1064,7 +1041,7 @@ class FaciesGAN(nn.Module):
 
         w_on_device: torch.Tensor | None = None
         if well is not None:
-            w_local = well.to(self.device, non_blocking=True)
+            w_local = well.to(device_manager.device, non_blocking=True)
             if w_local.shape[0] != batch:
                 w_local = w_local[indexes]
             w_on_device = w_local
@@ -1072,16 +1049,14 @@ class FaciesGAN(nn.Module):
 
         s_on_device: torch.Tensor | None = None
         if seismic is not None:
-            s_local = seismic.to(self.device, non_blocking=True)
+            s_local = seismic.to(device_manager.device, non_blocking=True)
             if s_local.shape[0] != batch:
                 s_local = s_local[indexes]
             s_on_device = s_local
             noise_channels -= s_local.shape[1]
 
         parts.append(
-            utils.generate_noise(
-                (noise_channels, *spatial_shape), num_samp=batch, device=self.device
-            )
+            utils.generate_noise((noise_channels, *spatial_shape), num_samp=batch)
         )
         if w_on_device is not None:
             parts.append(w_on_device)
@@ -1108,6 +1083,39 @@ class FaciesGAN(nn.Module):
             fake = self.generator(noises, amps, stop_scale=scale)
         return fake
 
+    def get_synthetic_seismic(
+        self, g_out: torch.Tensor, scale: int | None = None
+    ) -> torch.Tensor:
+        """Compute synthetic seismic for the given generator output.
+
+        Parameters
+        ----------
+        g_out : torch.Tensor
+            Full generator output (facies + rock physics).
+        scale : int | None, optional
+            Current scale. If None, uses the finest scale.
+
+        Returns
+        -------
+        torch.Tensor
+            Synthetic seismic tensor.
+        """
+        if scale is None:
+            scale = len(self.noise_amps) - 1
+
+        # Extract IP channel
+        # ip_norm is at index self.num_facies_channels in g_out
+        ip_norm = g_out[:, self.num_facies_channels : self.num_facies_channels + 1, ...]
+
+        from physics.seismic import calculate_synthetic_seismic
+
+        return calculate_synthetic_seismic(
+            ip_norm,
+            self.physics_state.vp_ref,
+            self.physics_state.dz_pyramid[scale],
+            self.physics_state,
+        )
+
     def generate_padding(self, z: torch.Tensor, value: float) -> torch.Tensor:
         """Pad tensor `z` using the model's zero-padding size."""
         p = self.zero_padding
@@ -1116,8 +1124,8 @@ class FaciesGAN(nn.Module):
                 (z.shape[0], z.shape[1], z.shape[2] + 2 * p, z.shape[3] + 2 * p),
                 value,
                 dtype=z.dtype,
-                device=z.device
-)
+                device=z.device,
+            )
             padded[..., p:-p, p:-p] = z
             return padded
         return z
@@ -1176,26 +1184,24 @@ class FaciesGAN(nn.Module):
                 self.generator.gens[scale].apply(utils.weights_init)
 
         self.generator.gens[scale] = self.generator.gens[scale].to(  # type: ignore[call-overload]
-            self.device, memory_format=torch.channels_last
+            device_manager.device, memory_format=torch.channels_last
         )
-        if self.use_ddp:
+        if device_manager.is_distributed:
             for p in self.generator.gens[scale].parameters():
                 dist.broadcast(p.data, src=0)
         if self.use_compile and not self.generator.use_gradient_checkpointing:
             # noinspection PyTypeChecker
             self.generator.gens[scale] = torch.compile(  # type: ignore
-                self.generator.gens[scale],
-                fullgraph=True,
-                dynamic=True
-)
+                self.generator.gens[scale], fullgraph=True, dynamic=True
+            )
 
     def finalize_discriminator_scale(self, scale: int) -> None:
         """Finalize discriminator block after creation."""
         self.discriminator.discs[scale].apply(utils.weights_init)
         self.discriminator.discs[scale] = self.discriminator.discs[scale].to(  # type: ignore[call-overload]
-            self.device, memory_format=torch.channels_last
+            device_manager.device, memory_format=torch.channels_last
         )
-        if self.use_ddp:
+        if device_manager.is_distributed:
             # Broadcast initial weights from rank 0
             for p in self.discriminator.discs[scale].parameters():
                 dist.broadcast(p.data, src=0)
@@ -1205,10 +1211,8 @@ class FaciesGAN(nn.Module):
         if self.use_compile:
             # noinspection PyTypeChecker
             self.discriminator.discs[scale] = torch.compile(  # type: ignore
-                self.discriminator.discs[scale],
-                fullgraph=True,
-                dynamic=False
-)
+                self.discriminator.discs[scale], fullgraph=True, dynamic=False
+            )
 
     def freeze_generator_scales(self, active_scales: tuple[int, ...]) -> None:
         """Freeze generator blocks outside the active training set."""
@@ -1259,7 +1263,9 @@ class FaciesGAN(nn.Module):
                 one = torch.ones_like(ref)
                 amps.extend(one.clone() for _ in range(target_len - len(amps)))
             return amps
-        return [torch.tensor(1.0, device=self.device) for _ in range(target_len)]
+        return [
+            torch.tensor(1.0, device=device_manager.device) for _ in range(target_len)
+        ]
 
     def get_num_features(self, scale: int) -> tuple[int, int]:
         """Calculate feature counts for networks at a given scale."""
@@ -1385,8 +1391,8 @@ class FaciesGAN(nn.Module):
         load_shapes: bool = True,
         until_scale: int | None = None,
         load_discriminator: bool = False,
-        load_wells: bool = False
-) -> int:
+        load_wells: bool = False,
+    ) -> int:
         """Load saved models and metadata from a checkpoint directory.
 
         Parameters
@@ -1403,6 +1409,13 @@ class FaciesGAN(nn.Module):
             The next scale index to train.
         """
         scale = 0
+
+        # If loading for inference/generation (no discriminator), adjust the
+        # compile progress total so the progress bar correctly reflects 100%
+        # completion after the generator and helpers are triggered.
+        if not load_discriminator and self._compile_progress_enabled:
+            planned_scales = int(getattr(self.options, "stop_scale", 0)) + 1
+            self._compile_progress_total -= planned_scales
         while os.path.exists(os.path.join(path, str(scale))):
             if until_scale is not None and scale > until_scale:
                 break
@@ -1414,7 +1427,17 @@ class FaciesGAN(nn.Module):
                 # Load from structured epoch checkpoint
                 from training.checkpoint import Checkpoint
 
-                ckpt = Checkpoint.load(ckpt_path, device=self.device)
+                ckpt = Checkpoint.load(ckpt_path)
+
+                # Restore global training state from the monolithic checkpoint
+                if ckpt.noise_amps:
+                    self.noise_amps = ckpt.noise_amps
+                if ckpt.rec_noise:
+                    self.rec_noise = ckpt.rec_noise
+                self.disc_step_counter = ckpt.disc_step_counter
+                self.extra_disc_step_counter = ckpt.extra_disc_step_counter
+                self.current_epoch = ckpt.epoch
+
                 for s, sd in ckpt.scales.items():
                     if until_scale is not None and s > until_scale:
                         continue
@@ -1471,14 +1494,18 @@ class FaciesGAN(nn.Module):
         """Load generator state dict for a scale."""
         gen_path = os.path.join(scale_path, CheckpointFilenames.GENERATOR)
         if os.path.exists(gen_path):
-            state = torch.load(gen_path, map_location=self.device)
+            state = torch.load(
+                gen_path, map_location=device_manager.device, weights_only=False
+            )
             self.load_state_dict_compat(unwrap_ddp(self.generator.gens[scale]), state)  # type: ignore
 
     def load_discriminator_state(self, scale_path: str, scale: int) -> None:
         """Load discriminator state dict for a scale."""
         disc_path = os.path.join(scale_path, CheckpointFilenames.DISCRIMINATOR)
         if os.path.exists(disc_path):
-            state = torch.load(disc_path, map_location=self.device)
+            state = torch.load(
+                disc_path, map_location=device_manager.device, weights_only=False
+            )
             self.load_state_dict_compat(  # type: ignore
                 unwrap_ddp(self.discriminator.discs[scale]), state
             )
@@ -1506,16 +1533,16 @@ class FaciesGAN(nn.Module):
         if scale < len(self.generator.gens):
             torch.save(
                 unwrap_ddp(self.generator.gens[scale]).state_dict(),
-                os.path.join(scale_path, CheckpointFilenames.GENERATOR)
-)
+                os.path.join(scale_path, CheckpointFilenames.GENERATOR),
+            )
 
     def save_discriminator_state(self, scale_path: str, scale: int) -> None:
         """Save discriminator state dict for a scale."""
         if scale < len(self.discriminator.discs):
             torch.save(
                 unwrap_ddp(self.discriminator.discs[scale]).state_dict(),
-                os.path.join(scale_path, CheckpointFilenames.DISCRIMINATOR)
-)
+                os.path.join(scale_path, CheckpointFilenames.DISCRIMINATOR),
+            )
 
     def load_amp(self, scale_path: str) -> None:
         """Load noise amplitude from file."""
@@ -1523,7 +1550,7 @@ class FaciesGAN(nn.Module):
         if os.path.exists(amp_path):
             with open(amp_path, "r") as f:
                 self.noise_amps.append(
-                    torch.tensor(float(f.read().strip()), device=self.device)
+                    torch.tensor(float(f.read().strip()), device=device_manager.device)
                 )
 
     def save_amp(self, scale_path: str, scale: int) -> None:
@@ -1537,21 +1564,27 @@ class FaciesGAN(nn.Module):
         """Load shape metadata for a scale."""
         shape_path = os.path.join(scale_path, CheckpointFilenames.SHAPE)
         if os.path.exists(shape_path):
-            self.shapes += tuple(torch.load(shape_path, map_location=self.device))
+            self.shapes += tuple(
+                torch.load(
+                    shape_path, map_location=device_manager.device, weights_only=False
+                )
+            )
 
     def save_shape(self, scale_path: str, scale: int) -> None:
         """Save shape metadata for a scale."""
         if scale < len(self.shapes):
-            torch.save(self.shapes[scale], os.path.join(scale_path, CheckpointFilenames.SHAPE))
+            torch.save(
+                self.shapes[scale], os.path.join(scale_path, CheckpointFilenames.SHAPE)
+            )
 
     def load_wells(self, scale_path: str) -> None:
         """Load well conditioning data for a scale."""
-        loaded = utils.load(os.path.join(scale_path, CheckpointFilenames.MASKS), self.device)
+        loaded = utils.load(os.path.join(scale_path, CheckpointFilenames.MASKS))
         wells = [
             (
                 loaded
                 if isinstance(loaded, torch.Tensor)
-                else torch.as_tensor(loaded, device=self.device)
+                else torch.as_tensor(loaded, device=device_manager.device)
             )
         ]
         # noinspection PyAttributeOutsideInit
@@ -1565,7 +1598,9 @@ class FaciesGAN(nn.Module):
     @staticmethod
     def has_discriminator_checkpoint(scale_path: str) -> bool:
         """Return True if discriminator checkpoint exists."""
-        return os.path.exists(os.path.join(scale_path, CheckpointFilenames.DISCRIMINATOR))
+        return os.path.exists(
+            os.path.join(scale_path, CheckpointFilenames.DISCRIMINATOR)
+        )
 
     @staticmethod
     def has_amp_file(scale_path: str) -> bool:
