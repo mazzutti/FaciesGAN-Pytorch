@@ -15,8 +15,9 @@ required, for example::
 Do not put runtime logic in this module; it only contains constants.
 """
 
-import torch
 from dataclasses import dataclass
+
+import torch
 
 
 @dataclass(frozen=True)

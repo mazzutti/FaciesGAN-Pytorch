@@ -69,7 +69,7 @@ FaciesGAN/
 
 ### Prerequisites
 * Python 3.10+
-* PyTorch with CUDA/MPS support (for GPU acceleration)
+* PyTorch with CUDA support (for GPU acceleration)
 * 8GB+ GPU memory recommended for training
 
 ### Setup
@@ -118,30 +118,18 @@ python main.py --input_path data --num_iter 100 --batch_size 200 \
     --num_train_pyramids 50 --gpu_device 0 --stop_scale 6 \
     --num_parallel_scales 2 --use-profiler
 
+#### Profiling
+FaciesGAN supports PyTorch profiling to analyze training performance and identify bottlenecks.
+
+```sh
+# Profile training with Chrome trace export
+python main.py --input_path data --num_iter 100 --batch_size 200 \
+    --num_train_pyramids 50 --gpu_device 0 --stop_scale 6 \
+    --num_parallel_scales 2 --use-profiler
+
 # After training completes, open chrome://tracing and load profiler_trace.json
 ```
 
-#### MPS (Apple Silicon) Profiling
-Uses `torch.mps.profiler` to generate OS Signpost traces for Xcode Instruments:
-
-```sh
-# Profile MPS training (automatically opens Instruments after completion)
-python main.py --input_path data --num_iter 100 --batch_size 200 \
-    --num_train_pyramids 50 --stop_scale 6 \
-    --num_parallel_scales 2 --use-profiler
-```
-
-**Workflow for MPS profiling:**
-1. Open Xcode Instruments before training
-2. Select the "Logging" instrument
-3. Click the record button
-4. Run your training command with `--use-profiler`
-5. View detailed signpost intervals showing MPS kernel execution in the Instruments timeline
-
-**Note**: The script will automatically attempt to open Instruments after profiling, but traces
-must be captured during execution. Launch Instruments and start recording before running training.
-
-**Key Training Parameters:**
 **Key Training Parameters:**
 - `--min_size`: Starting resolution for coarse scale (int, default: 16)
 - `--max_size`: Final high-resolution output (int, default: 128)
@@ -156,8 +144,8 @@ must be captured during execution. Launch Instruments and start recording before
 - `--lr_g`, `--lr_d`: Learning rates for generator and discriminator (float, default: 0.0005)
 - `--alpha`: Reconstruction loss weight (float, default: 100)
 - `--beta`: Well conditioning weight (float, default: 0.1)
-- `--gpu_device`: GPU device index or identifier (int, default: 0). If not available, CPU or MPS backends are used when supported.
-- `--use-profiler`: Enable PyTorch profiler (flag). Produces Chrome traces on CUDA/CPU and OS Signpost traces for MPS.
+- `--gpu_device`: GPU device index or identifier (int, default: 0).
+- `--use-profiler`: Enable PyTorch profiler (flag). Produces Chrome traces for analysis.
 - `--no-tensorboard`: Disable TensorBoard logging (flag)
 - `--use-wells`, `--use-seismic`: Enable conditioning on well and seismic data respectively (flags)
 
@@ -271,7 +259,7 @@ Three interpolation methods for multi-scale representations:
 The `ColorEncoder` class manages palette-based conversions:
 * Extracts unique colors from RGB facies images
 * Maps RGB pixels to categorical label indices
-* Supports MPS/CUDA devices with proper dtype handling
+* Supports CUDA devices with proper dtype handling
 * Enables efficient categorical cross-entropy loss
 
 ### Data Management
@@ -411,9 +399,7 @@ mypy .
     ``<output_path>/tensorboard_logs`` and also creates a per-scale
     SummaryWriter inside each scale folder (``<output_path>/<scale>/``) for
     easier per-scale inspection.
-* ✅ **Performance Profiling**: Added `--use-profiler` flag with backend-specific
-    profiling support: Chrome traces for CUDA/CPU, OS Signpost traces for MPS
-    with automatic Xcode Instruments integration.
+* ✅ **Performance Profiling**: Added `--use-profiler` flag with Chrome trace support.
 
 - ✅ **Well-conditioning parameter**: Added `--well-loss-penalty` (float, default
     10.0) to control the multiplier applied to well-conditioning loss terms during

@@ -10,8 +10,8 @@ Design notes:
   overhead that a ProcessPoolExecutor with spawn would impose.
 - PIL and numpy release the GIL for most operations, so plotting threads run
   concurrently with GPU computation without blocking the training loop.
-- CUDA tensors must still be moved to CPU (``tensor.detach().cpu()``) before
-  submitting to avoid accidental GPU-to-CPU copies inside the worker.
+- CUDA tensors must still be moved to CPU (using ``device_manager.to_cpu()``)
+  before submitting to avoid accidental GPU-to-CPU copies inside the worker.
 """
 
 from __future__ import annotations
@@ -269,9 +269,10 @@ class BackgroundWorker:
 
         Important
         ---------
-        (``tensor.detach().cpu()``) before calling this method rather than
-        passing CUDA tensors directly into the executor to avoid
-        pickling/serialization issues with GPU-backed storage.
+        Move all tensors to CPU (using ``device_manager.to_cpu()``) before
+        calling this method rather than passing CUDA tensors directly into
+        the executor to avoid pickling/serialization issues with GPU-backed
+        storage.
         """
         with self._pending_cond:
             bail = self._wait_for_slot(wait_if_full, timeout)

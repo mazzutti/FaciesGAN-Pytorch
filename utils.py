@@ -20,6 +20,8 @@ import torch
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
 
+from device import device_manager
+
 # ---------------------------------------------------------------------------
 # Normalization Helpers
 # ---------------------------------------------------------------------------
@@ -127,9 +129,8 @@ from models.palette import PALETTE_RGB
 # Generic type variable used for helpers that return the same type as the input
 T = TypeVar("T")
 
-from config import DomainConfig
-from config import DirectoryConfig
-from enums import DeviceType, FaciesClass
+from config import DirectoryConfig, DomainConfig
+from enums import FaciesClass
 
 # ---------------------------------------------------------------------------
 # Color & Palette Helpers
@@ -158,15 +159,12 @@ class ExtractUniqueColors:
     def __init__(
         self,
         max_cache_size: int = 128,
-        device: torch.device = torch.device(DeviceType.CPU),
     ) -> None:
         # initialize cache once - safe even if __init__ called multiple times
         if getattr(self, "_cache", None) is None:
             # use OrderedDict for simple LRU eviction
             self._cache: OrderedDict[tuple[Any, ...], np.ndarray] = OrderedDict()
         self.max_cache_size = max_cache_size
-        # Optional device for torch operations (e.g. torch.device('cuda'))
-        self.device = device
 
     def __call__(
         self, facies_tensor: torch.Tensor, tolerance: float = 0.01
@@ -182,24 +180,17 @@ class ExtractUniqueColors:
                     t0 = t0[0]
                 # t0 shape: (C,H,W)
                 # convert to HWC numpy quickly by permuting and taking a small thumbnail
-                # Optionally move tensor to configured device for interpolation
-                if (
-                    getattr(self, "device", None) is not None
-                    and t0.device != self.device
-                ):
-                    try:
-                        t0 = t0.to(self.device)
-                    except Exception:
-                        pass
+                # Use device_manager to move tensor to the managed device if needed
+                try:
+                    t0 = device_manager.to_device(t0)
+                except Exception:
+                    pass
 
                 small = torch.nn.functional.interpolate(
                     t0.unsqueeze(0), size=(16, 16), mode="bilinear", align_corners=False
                 )[0]
                 # Ensure thumbnail is on CPU before converting to numpy
-                try:
-                    small_cpu = small.detach().cpu()
-                except Exception:
-                    small_cpu = small.detach()
+                small_cpu = device_manager.to_cpu(small)
                 thumb_np = np.clip(torch2np(small_cpu), 0.0, 1.0)
             else:
                 # Fallback: convert via torch2np
@@ -289,7 +280,6 @@ class PreprocessWellMask:
     def __init__(
         self,
         max_cache_size: int = 128,
-        device: torch.device = torch.device(DeviceType.CPU),
     ) -> None:
         # OrderedDict for LRU eviction
         self._cache: OrderedDict[
@@ -297,7 +287,6 @@ class PreprocessWellMask:
             tuple[np.ndarray, np.ndarray, np.ndarray],
         ] = OrderedDict()
         self.max_cache_size = max_cache_size
-        self.device = device
 
     # Singleton instance holder
     _instance: Any | None = None
@@ -392,7 +381,7 @@ def facies_to_rgb(
 
     # Convert to numpy and handle dimensions
     if isinstance(facies, torch.Tensor):
-        facies_np = facies.detach().cpu().numpy()
+        facies_np = device_manager.to_numpy(facies)
     else:
         facies_np = np.asarray(facies)
 
@@ -486,7 +475,7 @@ def rgb_to_facies(
         palette = PALETTE_NORMALIZED
 
     if isinstance(rgb, torch.Tensor):
-        rgb_np = rgb.detach().cpu().numpy()
+        rgb_np = device_manager.to_numpy(rgb)
     else:
         rgb_np = np.asarray(rgb)
 
@@ -524,17 +513,6 @@ def set_seed(seed: int = DomainConfig.RANDOM_SEED) -> None:
 # ---------------------------------------------------------------------------
 # Device & Tensor Conversion
 # ---------------------------------------------------------------------------
-
-
-def resolve_device(gpu_device: int = 0) -> torch.device:
-    """Return the preferred device: CUDA, or CPU.
-
-    Exposed at module level so other modules can determine the best device
-    without constructing a `NeuralSmoother` instance.
-    """
-    if torch.cuda.is_available():
-        return torch.device(f"{DeviceType.CUDA}:{gpu_device}")
-    return torch.device(DeviceType.CPU)
 
 
 def apply_well_mask(
@@ -727,7 +705,7 @@ def torch2np(
             torch.Tensor,
             denorm(tensor, ceiling, normalization_range=normalization_range),
         )
-    np_array = tensor.detach().cpu().numpy()
+    np_array = device_manager.to_numpy(tensor)
     # Support 5D, 4D, and 3D tensors
     if np_array.ndim == 5:
         # (B, T, C, H, W) -> (B, T, H, W, C)
@@ -779,26 +757,21 @@ def tensor2np(
     lo = min(norm_min, norm_max)
     hi = max(norm_min, norm_max)
 
-    # Check if it's a torch tensor using hasattr instead of isinstance
-    # (isinstance can fail due to import/module reloading issues)
-    if (
-        hasattr(tensor, DeviceType.CPU)
-        and hasattr(tensor, "detach")
-        and hasattr(tensor, "numpy")
-    ):
-        return torch2np(
-            tensor,
-            denormalize,
-            ceiling,
-            normalization_range=normalization_range,
+    # specialized torch2np helper handles transpositions and managed device transfers.
+    return torch2np(
+        tensor,
+        denormalize,
+        ceiling,
+        normalization_range=normalization_range,
+    )
+
+    # Fallback for non-tensors: convert to numpy and apply heuristics.
+    arr = np.asarray(device_manager.to_numpy(tensor)).copy()
+    if denormalize:
+        arr = np.asarray(
+            denorm(arr, ceiling=ceiling, normalization_range=normalization_range),
+            dtype=np.float32,
         )
-    else:
-        arr: np.ndarray = np.asarray(tensor).copy()
-        if denormalize:
-            arr = np.asarray(
-                denorm(arr, ceiling=ceiling, normalization_range=normalization_range),
-                dtype=np.float32,
-            )
         # Auto-transpose to channels-last if it looks like (B, C, H, W)
         if arr.ndim == 4 and arr.shape[1] in [1, 3, 4, 6, 7]:
             arr = np.transpose(arr, (0, 2, 3, 1))
@@ -806,31 +779,6 @@ def tensor2np(
             arr = np.transpose(arr, (1, 2, 0))
         return np.clip(arr, lo, hi).astype(np.float32)
     return np.array(tensor).astype(np.float32)
-
-
-def to_device(
-    tensor: torch.Tensor,
-    device: torch.device,
-    *,
-    channels_last: bool = True,
-    non_blocking: bool = True,
-) -> torch.Tensor:
-    """Move ``tensor`` to ``device`` with appropriate layout and contiguity.
-
-    - On CUDA: optionally convert to `channels_last` memory format and use
-      `non_blocking` transfer where supported.
-    - On CPU: returns the original tensor (if already on CPU).
-
-    This helper centralizes device-layout handling so callers can avoid
-    duplicating `.to(...).contiguous(...)` branches.
-    """
-    if device.type == DeviceType.CUDA:
-        if channels_last:
-            return tensor.to(device, non_blocking=non_blocking).contiguous(
-                memory_format=torch.channels_last
-            )
-        return tensor.to(device, non_blocking=non_blocking).contiguous()
-    return tensor
 
 
 def draw_well_arrows(
@@ -884,7 +832,7 @@ def draw_well_arrows(
     # cell pixel coordinates (for backward compatibility with callers that
     # still pass the raw mask).
     if isinstance(mask, torch.Tensor):
-        mask = mask.detach().cpu().numpy()
+        mask = device_manager.to_numpy(mask)
     mask_sum = np.sum(np.squeeze(mask), axis=0)
     well_cols = np.where(mask_sum > 0)[0]
     if well_cols.size == 0:
@@ -952,7 +900,6 @@ def plot_generated_outputs(
     out_dir: str = DirectoryConfig.OUTPUTS,
     save: bool = False,
     cell_size: int = 256,
-    device: torch.device = torch.device(DeviceType.CPU),
     batch_id: int | None = None,
     plot_title: str = "Facies",
     cmap: str = "viridis",
@@ -983,8 +930,6 @@ def plot_generated_outputs(
         Whether to save the plot to disk. Defaults to False.
     cell_size : int
         Size of each cell in pixels (default 256).
-    device : torch.device
-        Optional device to run torch-based helpers on (e.g. `torch.device('cuda')`).
     """
     if not save:
         return
@@ -1148,7 +1093,7 @@ def plot_generated_outputs(
             getattr(torch, "from_numpy", None)
         )
         if torch_available:
-            extractor = ExtractUniqueColors(device=device)
+            extractor = ExtractUniqueColors()
             pure_colors = extractor(np2torch(np_real_facies), 0.01)  # type: ignore
             pure_colors = np.asarray(pure_colors)
         else:
@@ -1293,7 +1238,7 @@ def plot_generated_outputs(
             # Apply well mask at native resolution
             if np_masks is not None:
                 mask_np = np.asarray(
-                    np_masks[i].detach().cpu().numpy()
+                    device_manager.to_numpy(np_masks[i])
                     if isinstance(np_masks[i], torch.Tensor)
                     else np_masks[i]
                 )

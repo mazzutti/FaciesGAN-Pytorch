@@ -52,7 +52,6 @@ class DeviceType(StrEnum):
 
     CUDA = "cuda"
     CPU = "cpu"
-    MPS = "mps"
 
 
 class AmpDtype(StrEnum):

@@ -62,8 +62,8 @@ A tuple of five elements:
     - seismic: Dict mapping scale index to seismic tensor of shape (N, C, H, W).
 """
 
-# Raw batch yielded by the DataLoader (either just the Batch or (index, Batch))
-RawBatch = tuple[int, Batch] | Batch
+# Raw batch yielded by the DataLoader (either just the Batch or (index_tensor, Batch))
+RawBatch = tuple[torch.Tensor, Batch] | Batch
 
 # Interface for data loader
 IDataLoader = DataLoader[RawBatch]

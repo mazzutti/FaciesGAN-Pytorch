@@ -14,9 +14,10 @@ typing_extensions
 tzdata
 scikit-learn
 scipy
-umap-learn
 lovely_tensors
 tqdm
 apex
 joblib
 triton
+cuml
+umap-learn
