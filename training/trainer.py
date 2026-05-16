@@ -354,7 +354,7 @@ class Trainer:
             sampler=sampler,
             num_workers=self.options.num_workers,
             pin_memory=device_manager.is_cuda,
-            persistent_workers=has_workers,
+            persistent_workers=False,
             prefetch_factor=2 if has_workers else None,
             drop_last=False,
             timeout=120 if has_workers else 0,
@@ -1538,10 +1538,9 @@ class Trainer:
                         first_batch = next(batch_iterator)
                         if first_batch is not None:
                             self._warmup_compile_traces(scales_to_train, first_batch)
-                        # Re-create iterator because we consumed one item
-                        batch_iterator = self.create_batch_iterator(
-                            self.data_loader, all_scales
-                        )
+                        # Chain first_batch back to the iterator without recreating it or spawning new workers
+                        import itertools
+                        batch_iterator = itertools.chain([first_batch], batch_iterator)
                     except StopIteration:
                         pass
 
