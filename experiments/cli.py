@@ -240,6 +240,12 @@ def build_training_args(
         cmd.extend(["--wavelet-f-peak", str(args.wavelet_f_peak)])
         cmd.extend(["--wavelet-dt", str(args.wavelet_dt)])
 
+    if args.use_gradnorm:
+        cmd.append("--use-gradnorm")
+        cmd.extend(["--gradnorm-interval", str(args.gradnorm_interval)])
+        cmd.extend(["--gradnorm-alpha", str(args.gradnorm_alpha)])
+        cmd.extend(["--gradnorm-lr", str(args.gradnorm_lr)])
+
     return cmd
 
 
