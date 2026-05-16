@@ -209,6 +209,30 @@ def add_optimization_args(
         default=d.get("generator_steps", 3),
     )
     parser.add_argument(
+        "--use-gradnorm",
+        action="store_true",
+        default=d.get("use_gradnorm", False),
+        help="Use GradNorm to dynamically balance multi-task generator losses."
+    )
+    parser.add_argument(
+        "--gradnorm-interval",
+        type=int,
+        default=d.get("gradnorm_interval", 16),
+        help="Update loss weights via GradNorm every N generator steps."
+    )
+    parser.add_argument(
+        "--gradnorm-alpha",
+        type=float,
+        default=d.get("gradnorm_alpha", 0.15),
+        help="GradNorm asymmetry parameter (restoring force strength)."
+    )
+    parser.add_argument(
+        "--gradnorm-lr",
+        type=float,
+        default=d.get("gradnorm_lr", 0.0005),
+        help="GradNorm optimizer learning rate."
+    )
+    parser.add_argument(
         "--discriminator-steps",
         type=int,
         help="Discriminator inner steps",

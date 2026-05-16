@@ -109,6 +109,10 @@ class TrainingOptions(argparse.Namespace):
         scale0_disc_grad_clip: float = 0.0,
         scale0_gp_alpha: float = 0.0,
         scale0_disc_lr_factor: float = 1.0,
+        use_gradnorm: bool = False,
+        gradnorm_interval: int = 16,
+        gradnorm_alpha: float = 0.15,
+        gradnorm_lr: float = 0.0005,
     ) -> None:
         """Create a TrainingOptions namespace with defaults for training.
 
@@ -325,6 +329,10 @@ class TrainingOptions(argparse.Namespace):
         # Learning-rate multiplier for the scale 0 discriminator (1.0 = same as global lr_d).
         # Values < 1 (e.g. 0.2) slow down D at s0 so G can keep up.
         self.scale0_disc_lr_factor = scale0_disc_lr_factor
+        self.use_gradnorm = use_gradnorm
+        self.gradnorm_interval = gradnorm_interval
+        self.gradnorm_alpha = gradnorm_alpha
+        self.gradnorm_lr = gradnorm_lr
 
 
 @dataclass

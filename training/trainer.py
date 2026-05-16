@@ -519,7 +519,7 @@ class Trainer:
                 self.model.get_pyramid_noise(
                     scale, indexes, wells_pyramid, seismic_pyramid, rec=True
                 ),
-                self.model.noise_amps + [0.0],
+                self.model.noise_amps + [torch.tensor(0.0, device=real.device)],
                 stop_scale=scale,
             )
 

@@ -34,6 +34,19 @@ class MetricKey(StrEnum):
     G_ELASTIC = "g_elastic"
     G_SEISMIC = "g_seismic"
 
+    @classmethod
+    def generator_keys(cls) -> list["MetricKey"]:
+        return [
+            cls.G_FAKE,
+            cls.G_REC_FACIES,
+            cls.G_WELL,
+            cls.G_DIV,
+            cls.G_REC_ROCK_PHYSICS,
+            cls.G_TV,
+            cls.G_ELASTIC,
+            cls.G_SEISMIC,
+        ]
+
 
 class FeatureKey(StrEnum):
     """Keys for feature splitting and representation."""

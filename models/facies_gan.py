@@ -13,6 +13,7 @@ from typing import cast
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 
@@ -20,10 +21,11 @@ from torch.amp.grad_scaler import GradScaler
 from config import CheckpointFilenames
 from datasets.utils import generate_scales
 from device import device_manager
-from enums import DeviceType
+from enums import DeviceType, MetricKey
 from models import utils
 from models.discriminator import Discriminator
 from models.generator import Generator
+from models.gradnorm import GradNorm
 from models.utils import ChannelKey
 from options import TrainingOptions
 from physics.physics import PhysicsState
@@ -77,6 +79,7 @@ class FaciesGAN(nn.Module):
 
     generator: Generator
     discriminator: Discriminator
+    gradnorm: GradNorm | None
 
     noise_amp: torch.Tensor
     min_noise_amp: torch.Tensor
@@ -249,6 +252,16 @@ class FaciesGAN(nn.Module):
 
         # Route generator first-use compile events to this model progress bar.
         self.generator.compile_progress_callback = self._tick_compile_progress
+
+        # --- GradNorm Initialization ---
+        self.gradnorm = None
+        if getattr(options, "use_gradnorm", False):
+            all_scales = list(range(options.stop_scale + 1))
+            self.gradnorm = GradNorm(
+                scales=all_scales,
+                alpha=getattr(options, "gradnorm_alpha", 0.15),
+                lr=getattr(options, "gradnorm_lr", 0.0005),
+            )
 
     # ---------------------------------------------------------------------------
     # Training Orchestration
@@ -584,24 +597,126 @@ class FaciesGAN(nn.Module):
                 # Unfreeze only the target scale's gen block
                 self.generator.gens[scale].requires_grad_(True)
 
-                metrics = self.compute_generator_metrics(
-                    indexes,
-                    scale,
-                    facies_pyramid[scale],
-                    rec_in_pyramid,
-                    wells_pyramid,
-                    masks_pyramid,
-                    seismic_pyramid,
-                )
+                if self.gradnorm is not None:
+                    # 1. Obter as losses individuais em float32
+                    curr_losses = self.compute_generator_metrics(
+                        indexes,
+                        scale,
+                        facies_pyramid[scale],
+                        rec_in_pyramid,
+                        wells_pyramid,
+                        masks_pyramid,
+                        seismic_pyramid,
+                        return_vector=True,
+                    )
+                    
+                    # Formar loss_matrix com as losses desta escala
+                    loss_matrix = torch.zeros(
+                        len(self.gradnorm.scales),
+                        len(MetricKey.generator_keys()),
+                        device=indexes.device
+                    )
+                    loss_matrix[scale] = curr_losses.clone()
+                    
+                    # 2. Obter a loss total ponderada para treinar o Generator
+                    total_loss = (self.gradnorm.w[scale].detach() * curr_losses.clone()).sum()
+                    
+                    # Obter GeneratorMetrics para logging
+                    metrics = self.gradnorm.to_metrics_dict(loss_matrix)[scale]
+                    # Vincula o total_loss ponderado real
+                    metrics.total = total_loss
+                else:
+                    metrics = self.compute_generator_metrics(
+                        indexes,
+                        scale,
+                        facies_pyramid[scale],
+                        rec_in_pyramid,
+                        wells_pyramid,
+                        masks_pyramid,
+                        seismic_pyramid,
+                    )
+                    total_loss = metrics.total
 
                 # zero_grad + backward per scale
                 self.optimizer_zero_grad(optimizers[scale])
                 if self.use_grad_scaler:
-                    self.grad_scaler_g.scale(metrics.total).backward()  # type: ignore
+                    self.grad_scaler_g.scale(total_loss).backward()  # type: ignore
                 else:
-                    metrics.total.backward()  # type: ignore
+                    total_loss.backward()  # type: ignore
 
-                losses_by_scale[scale] = metrics.total
+                # GradNorm weights update happens AFTER backward pass to prevent autograd in-place conflicts
+                if self.gradnorm is not None and self.disc_step_counter % self.options.gradnorm_interval == 0:
+                    from torch.func import functional_call
+                    
+                    # Obter a camada proxy (última convolução compartilhada da escala)
+                    scale_block = self.generator.gens[scale]
+                    if hasattr(scale_block, "_orig_mod"):
+                        orig_block = scale_block._orig_mod
+                    else:
+                        orig_block = scale_block
+
+                    if scale == 0:
+                        last_shared_layer = orig_block.tail[1]
+                    else:
+                        last_shared_layer = orig_block[2][1]
+
+                    # Obter buffers e noises para o forward funcional
+                    buffers = dict(self.generator.named_buffers())
+                    
+                    n_div = 1 if self.current_epoch < self.div_skip_epochs else self.options.num_diversity_samples
+                    batched_noises = self.build_batched_noise(
+                        n_div, len(indexes), scale, indexes, wells_pyramid, seismic_pyramid
+                    )
+                    
+                    # Função forward funcional para o VJP do GradNorm
+                    def scale_forward_fn(p_shared_scale: dict[str, torch.Tensor]) -> torch.Tensor:
+                        with autocast(DeviceType.CUDA, enabled=False):
+                            p_shared_f32 = {k: v.to(torch.float32) for k, v in p_shared_scale.items()}
+                            
+                            div_out = functional_call(
+                                self.generator,
+                                (p_shared_f32, buffers),
+                                (batched_noises, self.noise_amps),
+                                kwargs={"stop_scale": scale}
+                            )
+                            
+                            if getattr(self.options, "rec_facies_loss_penalty", 0) == 0 or self.current_epoch < self.rec_skip_epochs:
+                                rec_out = None
+                            else:
+                                rec_noise = self.get_pyramid_noise(
+                                    scale, indexes, wells_pyramid, seismic_pyramid, rec=True
+                                )
+                                rec_out = functional_call(
+                                    self.generator,
+                                    (p_shared_f32, buffers),
+                                    (rec_noise, self.noise_amps),
+                                    kwargs={
+                                        "in_noise": rec_in_pyramid[scale],
+                                        "start_scale": scale,
+                                        "stop_scale": scale,
+                                    }
+                                )
+                                
+                            s_loss = self.compute_generator_metrics(
+                                indexes, scale, facies_pyramid[scale], rec_in_pyramid,
+                                wells_pyramid, masks_pyramid, seismic_pyramid,
+                                precomputed_fakes={scale: div_out},
+                                precomputed_rec={scale: rec_out} if rec_out is not None else None,
+                                force_f32=True,
+                                return_vector=True,
+                            )
+                            return s_loss
+
+                    # Executa o passo do GradNorm para ajustar self.gradnorm.w
+                    self.gradnorm.update_weights(
+                        loss_matrix=loss_matrix,
+                        shared_layer=last_shared_layer,
+                        forward_fn=scale_forward_fn,
+                        scale_idx=scale,
+                        accumulate_only=False,
+                    )
+
+                losses_by_scale[scale] = total_loss
                 # Re-freeze
                 self.generator.gens[scale].requires_grad_(False)
 
@@ -680,8 +795,12 @@ class FaciesGAN(nn.Module):
         wells_pyramid: dict[int, torch.Tensor] = {},
         masks_pyramid: dict[int, torch.Tensor] = {},
         seismic_pyramid: dict[int, torch.Tensor] = {},
-    ) -> GeneratorMetrics:
-        """Compute generator losses and return comprehensive metrics.
+        precomputed_fakes: dict[int, torch.Tensor] | None = None,
+        precomputed_rec: dict[int, torch.Tensor] | None = None,
+        force_f32: bool = False,
+        return_vector: bool = False,
+    ) -> GeneratorMetrics | torch.Tensor:
+        """Compute generator losses and return comprehensive metrics or raw loss vector.
 
         Parameters
         ----------
@@ -695,17 +814,27 @@ class FaciesGAN(nn.Module):
         wells_pyramid : dict[int, torch.Tensor], optional
         masks_pyramid : dict[int, torch.Tensor], optional
         seismic_pyramid : dict[int, torch.Tensor], optional
+        precomputed_fakes : dict[int, torch.Tensor], optional
+        precomputed_rec : dict[int, torch.Tensor], optional
+        force_f32 : bool, optional
+        return_vector : bool, optional
 
         Returns
         -------
-        GeneratorMetrics
-            Computed metrics.
+        GeneratorMetrics | torch.Tensor
+            Computed metrics or raw stacked loss vector.
         """
-        with autocast(DeviceType.CUDA, enabled=self.use_amp, dtype=self.amp_dtype):
+        use_amp = self.use_amp and not force_f32
+        amp_dtype = torch.float32 if force_f32 else self.amp_dtype
+
+        with autocast(DeviceType.CUDA, enabled=use_amp, dtype=amp_dtype):
             # Generate diversity candidates
-            fake_samples = self.generate_diverse_samples(
-                indexes, scale, wells_pyramid, seismic_pyramid
-            )
+            if precomputed_fakes is not None and scale in precomputed_fakes:
+                fake_samples = [precomputed_fakes[scale]]
+            else:
+                fake_samples = self.generate_diverse_samples(
+                    indexes, scale, wells_pyramid, seismic_pyramid
+                )
             fake = fake_samples[0]
 
             # WGAN generator adversarial loss
@@ -739,21 +868,32 @@ class FaciesGAN(nn.Module):
             ):
                 rec_facies_loss, rec_rp_loss = self.zero_scalar, self.zero_scalar
             else:
-                rec_noise = self.get_pyramid_noise(
-                    scale, indexes, wells_pyramid, seismic_pyramid, rec=True
-                )
-                rec_facies_loss, rec_rp_loss = compute_reconstruction_loss(
-                    self.generator,
-                    self.noise_amps,
-                    rec_noise,
-                    scale,
-                    real,
-                    rec_in_pyramid[scale],
-                    self.options,
-                    self.zero_scalar,
-                    self.current_epoch,
-                    self.rec_skip_epochs,
-                )
+                if precomputed_rec is not None and scale in precomputed_rec:
+                    rec = precomputed_rec[scale]
+                else:
+                    rec_noise = self.get_pyramid_noise(
+                        scale, indexes, wells_pyramid, seismic_pyramid, rec=True
+                    )
+                    rec = self.generator(
+                        rec_noise,
+                        self.noise_amps[: scale + 1],
+                        in_noise=rec_in_pyramid[scale],
+                        start_scale=scale,
+                        stop_scale=scale,
+                    )
+
+                if self.options.use_rock_physics:
+                    fc = self.options.num_facies_channels
+                    rec_loss_facies = self.options.rec_facies_loss_penalty * F.mse_loss(
+                        rec[:, :fc, ...], real[:, :fc, ...]
+                    )
+                    rec_loss_rp = self.options.rec_rock_physics_loss_penalty * F.huber_loss(
+                        rec[:, fc : fc + 3, ...], real[:, fc : fc + 3, ...]
+                    )
+                    rec_facies_loss, rec_rp_loss = rec_loss_facies, rec_loss_rp
+                else:
+                    rec_loss_facies = self.options.rec_facies_loss_penalty * F.mse_loss(rec, real)
+                    rec_facies_loss, rec_rp_loss = rec_loss_facies, self.zero_scalar
 
             # Apply extra loss weight at scale 0 to anchor the pyramid
             if scale == 0 and self.options.scale0_loss_multiplier != 1.0:
@@ -765,6 +905,20 @@ class FaciesGAN(nn.Module):
                 tv_loss *= self.options.scale0_loss_multiplier
                 elastic_loss *= self.options.scale0_loss_multiplier
                 seismic_loss *= self.options.scale0_loss_multiplier
+
+            if return_vector:
+                # Ensure correct order mapping to MetricKey.generator_keys()
+                target_dtype = torch.float32 if force_f32 else (amp_dtype if use_amp else torch.float32)
+                return torch.stack([
+                    adv_loss.to(device=indexes.device, dtype=target_dtype),
+                    rec_facies_loss.to(device=indexes.device, dtype=target_dtype),
+                    well_loss.to(device=indexes.device, dtype=target_dtype),
+                    div_loss.to(device=indexes.device, dtype=target_dtype),
+                    rec_rp_loss.to(device=indexes.device, dtype=target_dtype),
+                    tv_loss.to(device=indexes.device, dtype=target_dtype),
+                    elastic_loss.to(device=indexes.device, dtype=target_dtype),
+                    seismic_loss.to(device=indexes.device, dtype=target_dtype),
+                ])
 
             total = (
                 adv_loss
@@ -995,7 +1149,7 @@ class FaciesGAN(nn.Module):
         if rec:
             # Use a relative slice instead of absolute indexes because rec_noise 
             # is a rank-local buffer initialized for the current batch samples.
-            return [n[:len(indexes)] for n in self.rec_noise[: scale + 1]]
+            return [n[:len(indexes)].to(device_manager.device) for n in self.rec_noise[: scale + 1]]
 
         if isinstance(indexes, list):
             indexes = torch.tensor(indexes, device=device_manager.device)
