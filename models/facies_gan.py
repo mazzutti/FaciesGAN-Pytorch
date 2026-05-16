@@ -677,7 +677,7 @@ class FaciesGAN(nn.Module):
                                 self.generator,
                                 (p_shared_f32, buffers),
                                 (batched_noises, self.noise_amps),
-                                kwargs={"stop_scale": scale}
+                                kwargs={"stop_scale": scale, "use_uncompiled": True}
                             )
                             
                             if getattr(self.options, "rec_facies_loss_penalty", 0) == 0 or self.current_epoch < self.rec_skip_epochs:
@@ -694,6 +694,7 @@ class FaciesGAN(nn.Module):
                                         "in_noise": rec_in_pyramid[scale],
                                         "start_scale": scale,
                                         "stop_scale": scale,
+                                        "use_uncompiled": True,
                                     }
                                 )
                                 

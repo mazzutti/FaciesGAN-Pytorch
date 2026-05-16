@@ -256,6 +256,7 @@ class Generator(nn.Module):
         in_noise: torch.Tensor | None = None,
         start_scale: int = 0,
         stop_scale: int | None = None,
+        use_uncompiled: bool = False,
     ) -> torch.Tensor:
         """Generate facies through progressive pyramid synthesis.
 
@@ -345,34 +346,53 @@ class Generator(nn.Module):
             if self.cond_channels > 0:
                 z_in = torch.cat([z_in, z[index][:, n_in:, ...]], dim=1)
 
-            if self.use_gradient_checkpointing and self.training and z_in.requires_grad:
+            block = self.gens[index]
+            if use_uncompiled:
+                while hasattr(block, "_orig_mod") or hasattr(block, "module"):
+                    if hasattr(block, "_orig_mod"):
+                        block = getattr(block, "_orig_mod")
+                    elif hasattr(block, "module"):
+                        block = getattr(block, "module")
+
+            if self.use_gradient_checkpointing and self.training and z_in.requires_grad and not use_uncompiled:
                 # Recompute this block's activations during backward.
                 # use_reentrant=False is the recommended mode (no
                 # nesting caveats, compatible with compiled models).
                 gen_out = cast(
                     torch.Tensor,
                     ckpt_utils.checkpoint(  # type: ignore[misc]
-                        self.gens[index], z_in, use_reentrant=False
+                        block, z_in, use_reentrant=False
                     ),
                 )
             else:
-                gen_out = self.gens[index](z_in)
+                gen_out = block(z_in)
 
             # Fused residual add + clamp to [-1, 1].
             # When compiled, Inductor merges the add and clamp into a
             # single pointwise kernel, saving one kernel launch per scale.
             self._mark_compile_progress("residual_clamp")
-            out_facie = self._residual_clamp(gen_out, out_facie)
+            if use_uncompiled:
+                out_facie = self._residual_clamp_method(gen_out, out_facie)
+            else:
+                out_facie = self._residual_clamp(gen_out, out_facie)
+
+        quantizer = self.color_quantizer
+        if use_uncompiled:
+            while hasattr(quantizer, "_orig_mod") or hasattr(quantizer, "module"):
+                if hasattr(quantizer, "_orig_mod"):
+                    quantizer = getattr(quantizer, "_orig_mod")
+                elif hasattr(quantizer, "module"):
+                    quantizer = getattr(quantizer, "module")
 
         if self.num_facies < out_facie.shape[1]:
             self._mark_compile_progress("facies_quantizer")
             facies = out_facie[:, : self.num_facies, ...]
             imp = out_facie[:, self.num_facies :, ...]
-            facies_q = self.color_quantizer(facies)
+            facies_q = quantizer(facies)
             out_facie = torch.cat([facies_q, imp], dim=1)
         else:
             self._mark_compile_progress("facies_quantizer")
-            out_facie = self.color_quantizer(out_facie)
+            out_facie = quantizer(out_facie)
 
         return out_facie  # type: ignore[return-value]
 
