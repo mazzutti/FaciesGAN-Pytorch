@@ -831,7 +831,8 @@ class FaciesGAN(nn.Module):
         with autocast(DeviceType.CUDA, enabled=use_amp, dtype=amp_dtype):
             # Generate diversity candidates
             if precomputed_fakes is not None and scale in precomputed_fakes:
-                fake_samples = [precomputed_fakes[scale]]
+                n_div = 1 if self.current_epoch < self.div_skip_epochs else self.options.num_diversity_samples
+                fake_samples = list(torch.chunk(precomputed_fakes[scale], n_div, dim=0))
             else:
                 fake_samples = self.generate_diverse_samples(
                     indexes, scale, wells_pyramid, seismic_pyramid
