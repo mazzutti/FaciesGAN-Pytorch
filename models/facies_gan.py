@@ -609,22 +609,24 @@ class FaciesGAN(nn.Module):
                         seismic_pyramid,
                         return_vector=True,
                     )
-                    
-                    # Formar loss_matrix com as losses desta escala
-                    loss_matrix = torch.zeros(
-                        len(self.gradnorm.scales),
-                        len(MetricKey.generator_keys()),
-                        device=indexes.device
-                    )
-                    loss_matrix[scale] = curr_losses.clone()
-                    
+
                     # 2. Obter a loss total ponderada para treinar o Generator
-                    total_loss = (self.gradnorm.w[scale].detach() * curr_losses.clone()).sum()
-                    
-                    # Obter GeneratorMetrics para logging
-                    metrics = self.gradnorm.to_metrics_dict(loss_matrix)[scale]
-                    # Vincula o total_loss ponderado real
-                    metrics.total = total_loss
+                    total_loss = (
+                        self.gradnorm.w[scale].detach() * curr_losses.clone()
+                    ).sum()
+
+                    # Obter GeneratorMetrics para logging diretamente (evita overhead massivo)
+                    metrics = GeneratorMetrics(
+                        total=total_loss,
+                        fake=curr_losses[0],
+                        rec_facies=curr_losses[1],
+                        well=curr_losses[2],
+                        div=curr_losses[3],
+                        rec_rock_physics=curr_losses[4],
+                        tv=curr_losses[5],
+                        elastic=curr_losses[6],
+                        seismic=curr_losses[7],
+                    )
                 else:
                     metrics = self.compute_generator_metrics(
                         indexes,
@@ -645,9 +647,20 @@ class FaciesGAN(nn.Module):
                     total_loss.backward()  # type: ignore
 
                 # GradNorm weights update happens AFTER backward pass to prevent autograd in-place conflicts
-                if self.gradnorm is not None and self.disc_step_counter % self.options.gradnorm_interval == 0:
+                if (
+                    self.gradnorm is not None
+                    and self.disc_step_counter % self.options.gradnorm_interval == 0
+                ):
                     from torch.func import functional_call
-                    
+
+                    # Formar loss_matrix com as losses desta escala para o update
+                    loss_matrix = torch.zeros(
+                        len(self.gradnorm.scales),
+                        len(MetricKey.generator_keys()),
+                        device=indexes.device,
+                    )
+                    loss_matrix[scale] = curr_losses.clone()
+
                     # Obter a camada proxy (última convolução compartilhada da escala)
                     scale_block = self.generator.gens[scale]
                     if hasattr(scale_block, "_orig_mod"):
@@ -662,29 +675,50 @@ class FaciesGAN(nn.Module):
 
                     # Obter buffers e noises para o forward funcional
                     buffers = dict(self.generator.named_buffers())
-                    
-                    n_div = 1 if self.current_epoch < self.div_skip_epochs else self.options.num_diversity_samples
-                    batched_noises = self.build_batched_noise(
-                        n_div, len(indexes), scale, indexes, wells_pyramid, seismic_pyramid
+
+                    n_div = (
+                        1
+                        if self.current_epoch < self.div_skip_epochs
+                        else self.options.num_diversity_samples
                     )
-                    
+                    batched_noises = self.build_batched_noise(
+                        n_div,
+                        len(indexes),
+                        scale,
+                        indexes,
+                        wells_pyramid,
+                        seismic_pyramid,
+                    )
+
                     # Função forward funcional para o VJP do GradNorm
-                    def scale_forward_fn(p_shared_scale: dict[str, torch.Tensor]) -> torch.Tensor:
+                    def scale_forward_fn(
+                        p_shared_scale: dict[str, torch.Tensor],
+                    ) -> torch.Tensor:
                         with autocast(DeviceType.CUDA, enabled=False):
-                            p_shared_f32 = {k: v.to(torch.float32) for k, v in p_shared_scale.items()}
-                            
+                            p_shared_f32 = {
+                                k: v.to(torch.float32)
+                                for k, v in p_shared_scale.items()
+                            }
+
                             div_out = functional_call(
                                 self.generator,
                                 (p_shared_f32, buffers),
                                 (batched_noises, self.noise_amps),
-                                kwargs={"stop_scale": scale, "use_uncompiled": True}
+                                kwargs={"stop_scale": scale, "use_uncompiled": True},
                             )
-                            
-                            if getattr(self.options, "rec_facies_loss_penalty", 0) == 0 or self.current_epoch < self.rec_skip_epochs:
+
+                            if (
+                                getattr(self.options, "rec_facies_loss_penalty", 0) == 0
+                                or self.current_epoch < self.rec_skip_epochs
+                            ):
                                 rec_out = None
                             else:
                                 rec_noise = self.get_pyramid_noise(
-                                    scale, indexes, wells_pyramid, seismic_pyramid, rec=True
+                                    scale,
+                                    indexes,
+                                    wells_pyramid,
+                                    seismic_pyramid,
+                                    rec=True,
                                 )
                                 rec_out = functional_call(
                                     self.generator,
@@ -695,14 +729,21 @@ class FaciesGAN(nn.Module):
                                         "start_scale": scale,
                                         "stop_scale": scale,
                                         "use_uncompiled": True,
-                                    }
+                                    },
                                 )
-                                
+
                             s_loss = self.compute_generator_metrics(
-                                indexes, scale, facies_pyramid[scale], rec_in_pyramid,
-                                wells_pyramid, masks_pyramid, seismic_pyramid,
+                                indexes,
+                                scale,
+                                facies_pyramid[scale],
+                                rec_in_pyramid,
+                                wells_pyramid,
+                                masks_pyramid,
+                                seismic_pyramid,
                                 precomputed_fakes={scale: div_out},
-                                precomputed_rec={scale: rec_out} if rec_out is not None else None,
+                                precomputed_rec=(
+                                    {scale: rec_out} if rec_out is not None else None
+                                ),
                                 force_f32=True,
                                 return_vector=True,
                             )
@@ -831,7 +872,11 @@ class FaciesGAN(nn.Module):
         with autocast(DeviceType.CUDA, enabled=use_amp, dtype=amp_dtype):
             # Generate diversity candidates
             if precomputed_fakes is not None and scale in precomputed_fakes:
-                n_div = 1 if self.current_epoch < self.div_skip_epochs else self.options.num_diversity_samples
+                n_div = (
+                    1
+                    if self.current_epoch < self.div_skip_epochs
+                    else self.options.num_diversity_samples
+                )
                 fake_samples = list(torch.chunk(precomputed_fakes[scale], n_div, dim=0))
             else:
                 fake_samples = self.generate_diverse_samples(
@@ -889,12 +934,17 @@ class FaciesGAN(nn.Module):
                     rec_loss_facies = self.options.rec_facies_loss_penalty * F.mse_loss(
                         rec[:, :fc, ...], real[:, :fc, ...]
                     )
-                    rec_loss_rp = self.options.rec_rock_physics_loss_penalty * F.huber_loss(
-                        rec[:, fc : fc + 3, ...], real[:, fc : fc + 3, ...]
+                    rec_loss_rp = (
+                        self.options.rec_rock_physics_loss_penalty
+                        * F.huber_loss(
+                            rec[:, fc : fc + 3, ...], real[:, fc : fc + 3, ...]
+                        )
                     )
                     rec_facies_loss, rec_rp_loss = rec_loss_facies, rec_loss_rp
                 else:
-                    rec_loss_facies = self.options.rec_facies_loss_penalty * F.mse_loss(rec, real)
+                    rec_loss_facies = self.options.rec_facies_loss_penalty * F.mse_loss(
+                        rec, real
+                    )
                     rec_facies_loss, rec_rp_loss = rec_loss_facies, self.zero_scalar
 
             # Apply extra loss weight at scale 0 to anchor the pyramid
@@ -910,17 +960,23 @@ class FaciesGAN(nn.Module):
 
             if return_vector:
                 # Ensure correct order mapping to MetricKey.generator_keys()
-                target_dtype = torch.float32 if force_f32 else (amp_dtype if use_amp else torch.float32)
-                return torch.stack([
-                    adv_loss.to(device=indexes.device, dtype=target_dtype),
-                    rec_facies_loss.to(device=indexes.device, dtype=target_dtype),
-                    well_loss.to(device=indexes.device, dtype=target_dtype),
-                    div_loss.to(device=indexes.device, dtype=target_dtype),
-                    rec_rp_loss.to(device=indexes.device, dtype=target_dtype),
-                    tv_loss.to(device=indexes.device, dtype=target_dtype),
-                    elastic_loss.to(device=indexes.device, dtype=target_dtype),
-                    seismic_loss.to(device=indexes.device, dtype=target_dtype),
-                ])
+                target_dtype = (
+                    torch.float32
+                    if force_f32
+                    else (amp_dtype if use_amp else torch.float32)
+                )
+                return torch.stack(
+                    [
+                        adv_loss.to(device=indexes.device, dtype=target_dtype),
+                        rec_facies_loss.to(device=indexes.device, dtype=target_dtype),
+                        well_loss.to(device=indexes.device, dtype=target_dtype),
+                        div_loss.to(device=indexes.device, dtype=target_dtype),
+                        rec_rp_loss.to(device=indexes.device, dtype=target_dtype),
+                        tv_loss.to(device=indexes.device, dtype=target_dtype),
+                        elastic_loss.to(device=indexes.device, dtype=target_dtype),
+                        seismic_loss.to(device=indexes.device, dtype=target_dtype),
+                    ]
+                )
 
             total = (
                 adv_loss
@@ -1149,9 +1205,12 @@ class FaciesGAN(nn.Module):
             Pyramid of noise tensors.
         """
         if rec:
-            # Use a relative slice instead of absolute indexes because rec_noise 
+            # Use a relative slice instead of absolute indexes because rec_noise
             # is a rank-local buffer initialized for the current batch samples.
-            return [n[:len(indexes)].to(device_manager.device) for n in self.rec_noise[: scale + 1]]
+            return [
+                n[: len(indexes)].to(device_manager.device)
+                for n in self.rec_noise[: scale + 1]
+            ]
 
         if isinstance(indexes, list):
             indexes = torch.tensor(indexes, device=device_manager.device)
@@ -1519,6 +1578,7 @@ class FaciesGAN(nn.Module):
         """Wait for any pending async all-reduce operation to complete."""
         if self.pending_all_reduce_work is not None:
             self.pending_all_reduce_work.wait()
+
             self.pending_all_reduce_work = None
 
     def report_all_reduce_profile(self) -> None:
