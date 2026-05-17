@@ -303,7 +303,9 @@ class Trainer:
                 )
 
                 # Trigger discriminator traces
+                model_unwrapped = unwrap_ddp(self.model)
                 for scale in scales:
+                    model_unwrapped._mark_disc_compile_progress(scale)
                     self.model.discriminator.discs[scale](facies_pyramid[scale])
 
                 # Trigger a dummy call to compute_generator_metrics to satisfy linting
