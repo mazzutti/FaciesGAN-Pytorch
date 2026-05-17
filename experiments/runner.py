@@ -54,7 +54,6 @@ def main() -> None:
     parser = get_arguments()
     args = parser.parse_args(namespace=ExperimentOptions())
 
-    device_manager.initialize(gpu_id=args.gpu_device)
     base_output = args.output_path
     nproc = args.nproc_per_node
 
@@ -84,7 +83,10 @@ def main() -> None:
         print("=" * 70)
         print("FACIESGAN CONDITIONING-ABLATION EXPERIMENTS")
         print("=" * 70)
-        print(f"Device: {device_manager.device} (DDP with {nproc} GPUs)")
+        print(
+            f"Device: GPU {args.gpu_device} for generation/plotting "
+            f"(DDP training runs in subprocesses with {nproc} GPUs)"
+        )
         print(f"compile_backend: {'ON' if args.compile_backend else 'OFF'}")
         print(f"Variants: {', '.join(ev.id for ev in ExperimentVariant)}")
         print(f"Output:   {base_output}")
@@ -177,7 +179,8 @@ def main() -> None:
             model_paths[name] = variant_output
             print(f"  Training complete ({elapsed}) -> {variant_output}")
 
-    # ── Load base options & dataset (needed for plots and embeddings) ──
+            # ── Load base options & dataset (needed for plots and embeddings) ──
+            device_manager.initialize(gpu_id=args.gpu_device, use_cpu=args.use_cpu)
     _first_ev = next(iter(ExperimentVariant))
     first_model = model_paths[_first_ev.id]
     _base_args = build_training_args(args, _first_ev.value, first_model)

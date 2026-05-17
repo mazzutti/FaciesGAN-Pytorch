@@ -78,12 +78,14 @@ def generate_facies(
         a list of NumPy arrays and mask_indexes are the well conditioning
         indices used.
     """
-    model.load(model_path, load_discriminator=False, load_wells=False)
+    facies_model: FaciesGAN = model
+
+    facies_model.load(model_path, load_discriminator=False, load_wells=False)
 
     mask_indexes = list(random.choice(options.wells) for _ in range(how_many))
 
     # Get the highest scale (finest resolution)
-    max_scale = len(model.noise_amps) - 1
+    max_scale = len(facies_model.noise_amps) - 1
 
     # Build conditioning pyramids from dataset (if not supplied directly)
     if wells_pyramid is None or seismic_pyramid is None:
@@ -95,7 +97,7 @@ def generate_facies(
         )
 
     # Generate noise for the maximum scale
-    noises = model.get_pyramid_noise(
+    noises: list[torch.Tensor] = facies_model.get_pyramid_noise(
         max_scale,
         mask_indexes,
         wells_pyramid,
@@ -105,8 +107,8 @@ def generate_facies(
     with torch.no_grad():
         generated_facies: list[NDArray[np.float32]] = [
             utils.torch2np(gen_facie.unsqueeze(0), denormalize=True)
-            for gen_facie in model.generator(
-                noises, model.get_noise_amplitude(max_scale)
+            for gen_facie in facies_model.generator(
+                noises, facies_model.get_noise_amplitude(max_scale)
             )
         ]
     return generated_facies, mask_indexes
@@ -163,11 +165,13 @@ def generate_comparison_plots(
     scale : int | None, optional
         Pyramid scale to use. If None, uses the finest scale. Defaults to None.
     """
-    model.load(model_path, load_discriminator=False, load_wells=False)
+    facies_model: FaciesGAN = model
+
+    facies_model.load(model_path, load_discriminator=False, load_wells=False)
 
     # Use finest scale if not specified
     if scale is None:
-        scale = len(model.noise_amps) - 1
+        scale = len(facies_model.noise_amps) - 1
 
     # Build conditioning pyramids from dataset
     wells_pyramid, seismic_pyramid = _build_conditioning_pyramids(
@@ -198,13 +202,13 @@ def generate_comparison_plots(
         # Generate fake samples using the trained model
         fake_list: list[torch.Tensor] = []
         for i_idx in range(start, end):
-            noises = model.get_pyramid_noise(
+            noises: list[torch.Tensor] = facies_model.get_pyramid_noise(
                 scale, [i_idx] * num_generated, wells_pyramid, seismic_pyramid
             )
             with torch.no_grad():
-                fake = model.generator(
+                fake = facies_model.generator(
                     noises,
-                    model.get_noise_amplitude(scale),
+                    facies_model.get_noise_amplitude(scale),
                     stop_scale=scale,
                 )
                 fake_list.append(device_manager.to_cpu(fake))
