@@ -1,8 +1,8 @@
-from typing import Any
-
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
+from typing import Any
 from training.metrics import GeneratorMetrics
 from enums import MetricKey
 from device import device_manager
@@ -117,23 +117,29 @@ class GradNorm(nn.Module):
         """
         self.optimizer.zero_grad()
 
-        params = list(scale_block.parameters())
+        params = [p for p in scale_block.parameters() if p.requires_grad]
         if not params:
             return torch.tensor(0.0, device=z_in.device, dtype=torch.float32)
 
         # Forward pass mínimo: apenas pelo bloco atual, com z_in já detachado.
-        # O grafo de autograd é pequeno: z_in → scale_block → fake_local.
-        fake_local = scale_block(z_in)
+        # Para evitar conflito com donated buffers do torch.compile/functorch,
+        # não reutilizamos o mesmo grafo para múltiplas chamadas de grad.
+        with torch.no_grad():
+            fake_local = scale_block(z_in)
+            curr_l_tensor = task_losses_fn(fake_local).float()
 
-        # Computar as losses sobre fake_local (grafo pequeno, só 1 bloco)
-        curr_l_tensor = task_losses_fn(fake_local).float()
+        # Sincronizar as losses entre as instâncias DDP para balanceamento global
+        if device_manager.is_distributed:
+            dist.all_reduce(curr_l_tensor, op=dist.ReduceOp.AVG)  # type: ignore
+
         w_flat = self.w[scale_idx]
 
         # Inicialização do L0
+        num_tasks = curr_l_tensor.size(0)
+        start = scale_idx * num_tasks
+        end = (scale_idx + 1) * num_tasks
+
         with torch.no_grad():
-            num_tasks = curr_l_tensor.size(0)
-            start = scale_idx * num_tasks
-            end = (scale_idx + 1) * num_tasks
             if self.l0[start:end].abs().sum() < 1e-6:
                 self.l0[start:end].copy_(curr_l_tensor.detach().clamp(min=1e-4))
             self.l0_initialized.fill_(True)
@@ -141,27 +147,37 @@ class GradNorm(nn.Module):
         l0_scale = self.l0[start:end].to(curr_l_tensor.device)
 
         # --- Calcular normas dos gradientes de cada task ---
-        # O grafo é pequeno (apenas 1 bloco), então retain_graph=True é barato.
+        # Cada task usa um forward isolado para manter retain_graph=False sempre.
         norms_list: list[torch.Tensor] = []
         n = len(curr_l_tensor)
         for i in range(n):
             try:
+                fake_i = scale_block(z_in)
+                curr_l_i = task_losses_fn(fake_i).float()
                 grads = torch.autograd.grad(
-                    curr_l_tensor[i],
+                    curr_l_i[i],
                     params,
-                    retain_graph=(i < n - 1),  # libera o grafo na última task
+                    retain_graph=False,
                     create_graph=False,
                     allow_unused=True,
                 )
-                sq_norms = [g.detach().pow(2).sum() for g in grads if g is not None]
+                sq_norms = [g.detach().pow(2).sum() for g in grads]
                 if sq_norms:
                     norms_list.append(torch.sqrt(torch.stack(sq_norms).sum()).float())
                 else:
-                    norms_list.append(torch.tensor(0.0, device=z_in.device, dtype=torch.float32))
+                    norms_list.append(
+                        torch.tensor(0.0, device=z_in.device, dtype=torch.float32)
+                    )
             except Exception:
-                norms_list.append(torch.tensor(0.0, device=z_in.device, dtype=torch.float32))
+                norms_list.append(
+                    torch.tensor(0.0, device=z_in.device, dtype=torch.float32)
+                )
 
         norms = torch.stack(norms_list)
+
+        # Sincronizar as normas dos gradientes entre as instâncias DDP
+        if device_manager.is_distributed:
+            dist.all_reduce(norms, op=dist.ReduceOp.AVG)  # type: ignore
 
         # Cálculo do Target baseado na taxa de aprendizado relativa (ri)
         with torch.no_grad():
@@ -174,13 +190,16 @@ class GradNorm(nn.Module):
         # Loss do GradNorm — diferencia apenas w_flat (não os parâmetros do bloco)
         loss_grad = torch.nn.functional.l1_loss(norms * w_flat, constant_term)
 
-        loss_grad.backward()  # type: ignore
-
-        self.optimizer.step()  # pyright: ignore[reportUnknownMemberType]
+        try:
+            loss_grad.backward()  # type: ignore
+            self.optimizer.step()  # pyright: ignore[reportUnknownMemberType]
+        except Exception:
+            # Fallback em caso de erro no autograd do GradNorm (ex: grafo quebrado)
+            pass
 
         # Renormalização dos pesos (Soma = N_tasks total)
         with torch.no_grad():
             n_tasks_total = self.w.numel()
-            self.w.data *= n_tasks_total / self.w.sum()
+            self.w.data *= n_tasks_total / self.w.sum().clamp(min=1e-6)
 
         return loss_grad
