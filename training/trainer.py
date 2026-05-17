@@ -354,7 +354,7 @@ class Trainer:
             sampler=sampler,
             num_workers=self.options.num_workers,
             pin_memory=device_manager.is_cuda,
-            persistent_workers=False,
+            persistent_workers=has_workers,
             prefetch_factor=2 if has_workers else None,
             drop_last=False,
             timeout=120 if has_workers else 0,
