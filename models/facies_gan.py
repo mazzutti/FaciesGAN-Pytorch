@@ -680,7 +680,6 @@ class FaciesGAN(nn.Module):
                                 in_noise=None,
                                 start_scale=0,
                                 stop_scale=scale - 1,
-                                use_uncompiled=True,
                             )
 
                         # Build z_in for the current scale
