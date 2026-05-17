@@ -651,10 +651,10 @@ class FaciesGAN(nn.Module):
                     and self.disc_step_counter % self.options.gradnorm_interval == 0
                 ):
                     gen = self.generator
-                    # Unwrap compile/DDP to get the raw block
+                    # Use the block as-is (compiled or not): torch.autograd.grad
+                    # walks the C++ autograd graph and does NOT need the unwrapped
+                    # module. Unwrapping was only required for torch.func.vjp.
                     scale_block = gen.gens[scale]
-                    while hasattr(scale_block, "_orig_mod") or hasattr(scale_block, "module"):
-                        scale_block = getattr(scale_block, "_orig_mod", None) or getattr(scale_block, "module")
 
                     # Build z_in for the current scale with no_grad (no graph through pyramid)
                     with torch.no_grad():
