@@ -263,7 +263,7 @@ class FaciesGAN(nn.Module):
                 lr=getattr(options, "gradnorm_lr", 0.0005),
             )
 
-    # ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------gradnorm.w
     # Training Orchestration
     # ---------------------------------------------------------------------------
 
@@ -639,28 +639,15 @@ class FaciesGAN(nn.Module):
                     )
                     total_loss = metrics.total
 
-                # zero_grad + backward per scale
+                # zero_grad antes do GradNorm (que pode acumular grads em self.gradnorm.w)
                 self.optimizer_zero_grad(optimizers[scale])
-                if self.use_grad_scaler:
-                    self.grad_scaler_g.scale(total_loss).backward()  # type: ignore
-                else:
-                    total_loss.backward()  # type: ignore
 
-                # GradNorm weights update happens AFTER backward pass to prevent autograd in-place conflicts
+                # GradNorm weights update happens BEFORE backward to reuse the live autograd graph,
+                # avoiding a costly second forward pass through the generator.
                 if (
                     self.gradnorm is not None
                     and self.disc_step_counter % self.options.gradnorm_interval == 0
                 ):
-                    from torch.func import functional_call
-
-                    # Formar loss_matrix com as losses desta escala para o update
-                    loss_matrix = torch.zeros(
-                        len(self.gradnorm.scales),
-                        len(MetricKey.generator_keys()),
-                        device=indexes.device,
-                    )
-                    loss_matrix[scale] = curr_losses.clone()
-
                     # Obter a camada proxy (última convolução compartilhada da escala)
                     scale_block = self.generator.gens[scale]
                     if hasattr(scale_block, "_orig_mod"):
@@ -673,90 +660,18 @@ class FaciesGAN(nn.Module):
                     else:
                         last_shared_layer = orig_block[2][1]
 
-                    # Obter buffers e noises para o forward funcional
-                    buffers = dict(self.generator.named_buffers())
-
-                    n_div = (
-                        1
-                        if self.current_epoch < self.div_skip_epochs
-                        else self.options.num_diversity_samples
-                    )
-                    batched_noises = self.build_batched_noise(
-                        n_div,
-                        len(indexes),
-                        scale,
-                        indexes,
-                        wells_pyramid,
-                        seismic_pyramid,
-                    )
-
-                    # Função forward funcional para o VJP do GradNorm
-                    def scale_forward_fn(
-                        p_shared_scale: dict[str, torch.Tensor],
-                    ) -> torch.Tensor:
-                        with autocast(DeviceType.CUDA, enabled=False):
-                            p_shared_f32 = {
-                                k: v.to(torch.float32)
-                                for k, v in p_shared_scale.items()
-                            }
-
-                            div_out = functional_call(
-                                self.generator,
-                                (p_shared_f32, buffers),
-                                (batched_noises, self.noise_amps),
-                                kwargs={"stop_scale": scale, "use_uncompiled": True},
-                            )
-
-                            if (
-                                getattr(self.options, "rec_facies_loss_penalty", 0) == 0
-                                or self.current_epoch < self.rec_skip_epochs
-                            ):
-                                rec_out = None
-                            else:
-                                rec_noise = self.get_pyramid_noise(
-                                    scale,
-                                    indexes,
-                                    wells_pyramid,
-                                    seismic_pyramid,
-                                    rec=True,
-                                )
-                                rec_out = functional_call(
-                                    self.generator,
-                                    (p_shared_f32, buffers),
-                                    (rec_noise, self.noise_amps),
-                                    kwargs={
-                                        "in_noise": rec_in_pyramid[scale],
-                                        "start_scale": scale,
-                                        "stop_scale": scale,
-                                        "use_uncompiled": True,
-                                    },
-                                )
-
-                            s_loss = self.compute_generator_metrics(
-                                indexes,
-                                scale,
-                                facies_pyramid[scale],
-                                rec_in_pyramid,
-                                wells_pyramid,
-                                masks_pyramid,
-                                seismic_pyramid,
-                                precomputed_fakes={scale: div_out},
-                                precomputed_rec=(
-                                    {scale: rec_out} if rec_out is not None else None
-                                ),
-                                force_f32=True,
-                                return_vector=True,
-                            )
-                            return s_loss
-
-                    # Executa o passo do GradNorm para ajustar self.gradnorm.w
-                    self.gradnorm.update_weights(
-                        loss_matrix=loss_matrix,
+                    # Usa o grafo de autograd existente — sem segundo forward pass!
+                    # curr_losses ainda possui grafo ativo; retain_graph=True internamente.
+                    self.gradnorm.update_weights_from_graph(
+                        curr_losses=curr_losses,
                         shared_layer=last_shared_layer,
-                        forward_fn=scale_forward_fn,
                         scale_idx=scale,
-                        accumulate_only=False,
                     )
+
+                if self.use_grad_scaler:
+                    self.grad_scaler_g.scale(total_loss).backward()  # type: ignore
+                else:
+                    total_loss.backward()  # type: ignore
 
                 losses_by_scale[scale] = total_loss
                 # Re-freeze
