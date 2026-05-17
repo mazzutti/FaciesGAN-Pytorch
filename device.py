@@ -38,17 +38,25 @@ class DeviceManager:
             return
 
         self._thread_local.device = None
-        # Distributed environment variables (set by torchrun)
+        self._refresh_distributed_state()
+        self._initialized = True
+
+    def _refresh_distributed_state(self) -> None:
+        """Refresh distributed environment-derived state from the current process."""
+        # Distributed environment variables are set by torchrun.
         self._local_rank = int(os.environ.get("LOCAL_RANK", -1))
         self._world_size = int(os.environ.get("WORLD_SIZE", 1))
         self._rank = int(os.environ.get("RANK", 0))
         self._is_distributed = self._local_rank != -1
-        self._initialized = True
 
     def initialize(
         self, gpu_id: int = 0, use_cpu: bool = False, manual_seed: int | None = None
     ) -> torch.device:
         """Initialize the global device with priority: CUDA > CPU."""
+        self._refresh_distributed_state()
+
+        import inspect
+
         if manual_seed is not None:
             import utils
 
@@ -103,6 +111,15 @@ class DeviceManager:
         else:
             self._thread_local.device = torch.device(DeviceType.CPU)
 
+        caller = inspect.stack()[1]
+        print(
+            "[device init] "
+            f"rank={self._rank} local_rank={self._local_rank} "
+            f"world_size={self._world_size} device={self._thread_local.device} "
+            f"caller={caller.filename}:{caller.lineno}:{caller.function}",
+            flush=True,
+        )
+
         return self._thread_local.device
 
     def get_or_initialize(self, gpu_id: int | None = None) -> torch.device:
@@ -149,6 +166,7 @@ class DeviceManager:
     @property
     def rank(self) -> int:
         """Return the global rank of the current process."""
+        self._refresh_distributed_state()
         if self._is_distributed and dist.is_initialized():
             return dist.get_rank()
         return self._rank
@@ -156,6 +174,7 @@ class DeviceManager:
     @property
     def world_size(self) -> int:
         """Return the total number of processes in the distributed group."""
+        self._refresh_distributed_state()
         if self._is_distributed and dist.is_initialized():
             return dist.get_world_size()
         return self._world_size
@@ -163,6 +182,7 @@ class DeviceManager:
     @property
     def is_distributed(self) -> bool:
         """Return True if running in distributed mode."""
+        self._refresh_distributed_state()
         return self._is_distributed
 
     @property
