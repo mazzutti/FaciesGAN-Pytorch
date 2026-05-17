@@ -804,13 +804,13 @@ class FaciesGAN(nn.Module):
                     self.grad_scaler_g.unscale_(optimizers[scale])
                     if _clip_norm > 0:
                         torch.nn.utils.clip_grad_norm_(
-                            self.generator.gens[scale].parameters(), max_norm=_clip_norm
+                            self.generator.gens[scale].parameters(), max_norm=_clip_norm, foreach=True
                         )
                     self.grad_scaler_g.step(optimizers[scale])
                 else:
                     if _clip_norm > 0:
                         torch.nn.utils.clip_grad_norm_(
-                            self.generator.gens[scale].parameters(), max_norm=_clip_norm
+                            self.generator.gens[scale].parameters(), max_norm=_clip_norm, foreach=True
                         )
                     optimizers[scale].step()
                 # noinspection PyProtectedMember
