@@ -19,6 +19,8 @@ from dataclasses import dataclass
 
 import torch
 
+from device import device_manager
+
 
 @dataclass(frozen=True)
 class _DomainConfig:
@@ -28,7 +30,10 @@ class _DomainConfig:
     RANDOM_SEED: int = 42
     LOSS_SCALE_MIN: float = 1e-4
     EPSILON: float = 1e-8
-    ZERO_SCALAR: torch.Tensor = torch.tensor(0.0)
+
+    @property
+    def ZERO_SCALAR(self) -> torch.Tensor:
+        return torch.tensor(0.0, device=device_manager.device)
 
 
 @dataclass(frozen=True)
@@ -40,7 +45,10 @@ class _PhysicsConfig:
     WAVELET_LENGTH: float = 0.128
     VP_MIN: float = 2000.0
     VP_MS_SCALE: float = 1000.0
-    DZ_PIXEL: torch.Tensor = torch.tensor(1.0)
+
+    @property
+    def DZ_PIXEL(self) -> torch.Tensor:
+        return torch.tensor(1.0, device=device_manager.device)
 
 
 @dataclass(frozen=True)

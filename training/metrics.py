@@ -437,7 +437,7 @@ def compute_seismic_loss(
     real_seismic: torch.Tensor,
     vp_mean: torch.Tensor,
     physics_state: PhysicsState,
-    dz_pixel: torch.Tensor = PhysicsConfig.DZ_PIXEL,
+    dz_pixel: torch.Tensor | None = None,
     loss_fn: LossFn = LossFn.HUBER,
 ) -> torch.Tensor:
     """Calculate Geophysical Consistency Loss (Seismic Loss).
@@ -448,6 +448,9 @@ def compute_seismic_loss(
     correlation term.
     """
     from physics.seismic import calculate_synthetic_seismic
+
+    if dz_pixel is None:
+        dz_pixel = PhysicsConfig.DZ_PIXEL
 
     synth = calculate_synthetic_seismic(
         gen_ip_norm,

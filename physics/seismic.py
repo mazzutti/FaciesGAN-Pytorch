@@ -193,7 +193,7 @@ def ip_to_reflectivity(ip: torch.Tensor, padding_value: torch.Tensor) -> torch.T
 def resample_wavelet_to_depth(
     vp_mean: torch.Tensor,
     physics_state: "PhysicsState",
-    dz_pixel: torch.Tensor | None = PhysicsConfig.DZ_PIXEL,
+    dz_pixel: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Resample a time-domain wavelet to depth using a zero-sync grid_sample approach.
 
@@ -216,6 +216,9 @@ def resample_wavelet_to_depth(
     """
     device = physics_state.wavelet_t.device
     dtype = physics_state.wavelet_t.dtype
+
+    if dz_pixel is None:
+        dz_pixel = PhysicsConfig.DZ_PIXEL
 
     # Ensure everything is a tensor on the correct device
     v = torch.as_tensor(vp_mean, device=device, dtype=dtype).clamp(
