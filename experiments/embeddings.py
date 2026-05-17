@@ -1,8 +1,8 @@
 """Manifold learning pipeline for latent space visualization.
 
-This module provides a robust, CPU-based pipeline for dimensionality reduction 
-and manifold embedding (t-SNE, UMAP, MDS, Isomap). It enforces absolute 
-reproducibility through deterministic seeding and optimizes performance for 
+This module provides a robust, CPU-based pipeline for dimensionality reduction
+and manifold embedding (t-SNE, UMAP, MDS, Isomap). It enforces absolute
+reproducibility through deterministic seeding and optimizes performance for
 high-dimensional facies volumes using a 100-component PCA pre-reduction step.
 """
 
@@ -251,8 +251,10 @@ def prepare_features(
         dataset.options.crop_size or 128
     )
     if arr.shape[2] != target_h or arr.shape[3] != target_w:
-        tensor = torch.tensor(arr, dtype=torch.float32)
-        arr = F.interpolate(tensor, size=(target_h, target_w), mode="bilinear").numpy()
+        # Perform interpolation on the active device for speed, then move to CPU
+        tensor = torch.as_tensor(arr, dtype=torch.float32, device=device_manager.device)
+        resized = F.interpolate(tensor, size=(target_h, target_w), mode="bilinear")
+        arr = device_manager.to_cpu(resized, non_blocking=True).numpy()
 
     return _flatten_data(arr)
 

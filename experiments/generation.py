@@ -144,9 +144,10 @@ def _generate_samples(
                 all_facies.append(facies_np)
 
                 # Save categorical indices to disk (more compact for users)
+                # Move argmax result to CPU non-blocking and convert to numpy
+                facies_idx_t = torch.argmax(facies_t.squeeze(0), dim=0)
                 facies_idx = (
-                    torch.argmax(facies_t.squeeze(0), dim=0)
-                    .cpu()
+                    device_manager.to_cpu(facies_idx_t, non_blocking=True)
                     .numpy()
                     .astype(np.int64)
                 )

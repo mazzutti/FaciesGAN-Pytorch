@@ -1319,7 +1319,8 @@ def load_facies_for_plot(
     if len(facies) == 0:
         return np.zeros((num_real, height, width, channels), dtype=np.float32)
 
-    arr = facies[0].numpy()
+    # Move tensor to CPU non-blocking before converting to numpy
+    arr = device_manager.to_cpu(facies[0], non_blocking=True).numpy()
     if arr.ndim == 3:
         arr = arr[None, ...]
     if num_real > 0 and arr.shape[0] > num_real:

@@ -649,8 +649,10 @@ if __name__ == "__main__":
         for i, (facie, masked_facie) in enumerate(
             zip(facies, [masked_facies[-1][i] for i in mi]), 1
         ):
-            masked_facie_arr = np.squeeze(masked_facie.numpy())
-            mask_index = np.argmax(np.sum(np.squeeze(masked_facie) != 0, axis=0))
+            # Move mask tensor to CPU (non-blocking) before converting to numpy
+            masked_facie_cpu = device_manager.to_cpu(masked_facie, non_blocking=True)
+            masked_facie_arr = np.squeeze(masked_facie_cpu.numpy())
+            mask_index = np.argmax(np.sum(masked_facie_arr != 0, axis=0))
             # create figure and axes for plotting
             fig: Figure
             axes: Axes

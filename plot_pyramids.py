@@ -34,14 +34,15 @@ def main():
         if facies_batch.shape[0] == 0:
             continue
 
-        f = device_manager.to_cpu(facies_batch[idx])
+        # Move batch tensors to CPU using non-blocking transfers when possible
+        f = device_manager.to_cpu(facies_batch[idx], non_blocking=True)
         w = (
-            device_manager.to_cpu(wells_batch[idx])
+            device_manager.to_cpu(wells_batch[idx], non_blocking=True)
             if wells_batch.shape[0] > idx
             else None
         )
         s = (
-            device_manager.to_cpu(seismic_batch[idx])
+            device_manager.to_cpu(seismic_batch[idx], non_blocking=True)
             if seismic_batch.shape[0] > idx
             else None
         )

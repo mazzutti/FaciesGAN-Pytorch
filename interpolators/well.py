@@ -14,6 +14,7 @@ import logging
 
 import numpy as np
 import torch
+from device import device_manager
 
 from interpolators.base import BaseInterpolator
 from interpolators.config import InterpolatorConfig
@@ -107,7 +108,9 @@ class WellInterpolator(BaseInterpolator):
                 pooled_labels = torch.argmax(pooled_proportions.squeeze(0), dim=0)
 
                 # Insert the pooled trace into the output array
-                output[:, scaled_col] = pooled_labels.cpu().numpy()
+                output[:, scaled_col] = device_manager.to_cpu(
+                    pooled_labels, non_blocking=True
+                ).numpy()
 
             # Return the label indices directly (LongTensor)
             # Downstream consumers (e.g. datasets/utils.py) will map these to RGB.
