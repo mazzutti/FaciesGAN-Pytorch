@@ -303,9 +303,7 @@ class Trainer:
                 )
 
                 # Trigger discriminator traces
-                model_unwrapped = unwrap_ddp(self.model)
                 for scale in scales:
-                    model_unwrapped._mark_disc_compile_progress(scale)
                     self.model.discriminator.discs[scale](facies_pyramid[scale])
 
                 # Trigger a dummy call to compute_generator_metrics to satisfy linting
@@ -502,7 +500,7 @@ class Trainer:
         if len(self.model.rec_noise) >= scale + 1:
             if self.model.rec_noise[scale].shape[0] == real.shape[0]:
                 return
-            # If batch size mismatch (e.g. resume with different DDP config), 
+            # If batch size mismatch (e.g. resume with different DDP config),
             # we must re-initialize this scale's noise.
             z_rec = self._build_z_rec_for_positions(
                 scale, real, list(range(real.shape[0])), wells_pyramid, seismic_pyramid
@@ -1286,7 +1284,10 @@ class Trainer:
         # a progressive forward pass.
         max_scale = max(scales)
         for s in range(max_scale + 1):
-            if len(self.model.rec_noise) <= s or self.model.rec_noise[s].shape[0] != facies_pyramid[s].shape[0]:
+            if (
+                len(self.model.rec_noise) <= s
+                or self.model.rec_noise[s].shape[0] != facies_pyramid[s].shape[0]
+            ):
                 self.init_rec_noise_and_amp(
                     s, indexes, facies_pyramid[s], wells_pyramid, seismic_pyramid
                 )
@@ -1542,6 +1543,7 @@ class Trainer:
                             self._warmup_compile_traces(scales_to_train, first_batch)
                         # Chain first_batch back to the iterator without recreating it or spawning new workers
                         import itertools
+
                         batch_iterator = itertools.chain([first_batch], batch_iterator)
                     except StopIteration:
                         pass
