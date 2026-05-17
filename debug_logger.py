@@ -62,6 +62,7 @@ from typing import Any
 import torch
 
 from config import DomainConfig
+from device import device_manager
 
 
 class DebugLogger:
@@ -162,13 +163,27 @@ class DebugLogger:
             return
         with torch.no_grad():
             t = tensor.detach().float()
+            # Compute scalar tensors on device, then move them together to CPU
+            mean_t = t.mean()
+            std_t = t.std() if t.numel() > 1 else torch.tensor(0.0, device=t.device)
+            min_t = t.min()
+            max_t = t.max()
+            nan_t = t.isnan().sum()
+            inf_t = t.isinf().sum()
+
+            mean_cpu, std_cpu, min_cpu, max_cpu, nan_cpu, inf_cpu = (
+                device_manager.to_cpu(
+                    [mean_t, std_t, min_t, max_t, nan_t, inf_t], non_blocking=True
+                )
+            )
+
             stats: dict[str, float | int] = {
-                "mean": float(t.mean().item()),
-                "std": float(t.std().item()) if t.numel() > 1 else 0.0,
-                "min": float(t.min().item()),
-                "max": float(t.max().item()),
-                "nan": int(t.isnan().sum().item()),
-                "inf": int(t.isinf().sum().item()),
+                "mean": float(mean_cpu.item()),
+                "std": float(std_cpu.item()),
+                "min": float(min_cpu.item()),
+                "max": float(max_cpu.item()),
+                "nan": int(nan_cpu.item()),
+                "inf": int(inf_cpu.item()),
             }
             entry: dict[str, Any] = {
                 "event": "tensor_stats",
@@ -230,15 +245,32 @@ class DebugLogger:
                     tc = t[:, c, ...]
                 else:
                     tc = t[c, ...]
+                # Compute scalars on-device and move them together to CPU
+                mean_t = tc.mean()
+                std_t = (
+                    tc.std() if tc.numel() > 1 else torch.tensor(0.0, device=tc.device)
+                )
+                min_t = tc.min()
+                max_t = tc.max()
+                nan_t = tc.isnan().sum()
+                inf_t = tc.isinf().sum()
+
+                mean_cpu, std_cpu, min_cpu, max_cpu, nan_cpu, inf_cpu = (
+                    device_manager.to_cpu(
+                        [mean_t, std_t, min_t, max_t, nan_t, inf_t],
+                        non_blocking=True,
+                    )
+                )
+
                 ch_stats: dict[str, Any] = {
                     "ch": c,
                     "name": ch_name,
-                    "mean": float(tc.mean().item()),
-                    "std": float(tc.std().item()) if tc.numel() > 1 else 0.0,
-                    "min": float(tc.min().item()),
-                    "max": float(tc.max().item()),
-                    "nan": int(tc.isnan().sum().item()),
-                    "inf": int(tc.isinf().sum().item()),
+                    "mean": float(mean_cpu.item()),
+                    "std": float(std_cpu.item()),
+                    "min": float(min_cpu.item()),
+                    "max": float(max_cpu.item()),
+                    "nan": int(nan_cpu.item()),
+                    "inf": int(inf_cpu.item()),
                 }
                 if expected_range is not None:
                     lo, hi = expected_range

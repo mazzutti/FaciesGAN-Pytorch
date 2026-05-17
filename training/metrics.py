@@ -49,7 +49,10 @@ class DiscriminatorMetrics:
             Dictionary mapping metric names to their tensor values.
         """
         vals: list[float] = torch.stack(  # type: ignore[call-overload]
-            device_manager.to_cpu([self.total, self.real, self.fake, self.gp])
+            device_manager.to_cpu(
+                [self.total, self.real, self.fake, self.gp],
+                non_blocking=True,
+            )
         ).tolist()  # type: ignore[return-value]
         return {
             MetricKey.D_TOTAL: vals[0],
@@ -112,7 +115,8 @@ class GeneratorMetrics:
                     self.tv,
                     self.elastic,
                     self.seismic,
-                ]
+                ],
+                non_blocking=True,
             )
         ).tolist()  # type: ignore[return-value]
 

@@ -303,14 +303,19 @@ class TensorBoardVisualizer:
                     # dashboards and historical runs stay comparable.
                     names = ["Ip", "Is", "VpVs"]
                     cmaps = ["magma", "magma", "viridis"]
+                    # Batch-read normalization scalars from the PhysicsState
+                    # to avoid multiple GPU->CPU synchronizations in the loop.
+                    norm_min_t, norm_max_t = device_manager.to_cpu(
+                        [self.physics_state.norm_min, self.physics_state.norm_max],
+                        non_blocking=True,
+                    )
+                    norm_min_f = float(norm_min_t.item())
+                    norm_max_f = float(norm_max_t.item())
+                    lo = float(min(norm_min_f, norm_max_f))
+                    hi = float(max(norm_min_f, norm_max_f))
+                    span = hi - lo
                     for ch_idx, name in enumerate(names):
                         if rp_chw.shape[0] > ch_idx:
-                            norm_min, norm_max = float(
-                                self.physics_state.norm_min
-                            ), float(self.physics_state.norm_max)
-                            lo = float(min(norm_min, norm_max))
-                            hi = float(max(norm_min, norm_max))
-                            span = hi - lo
                             channel_raw = np.asarray(rp_chw[ch_idx], dtype=np.float32)
                             channel_raw = np.nan_to_num(
                                 channel_raw, nan=lo, posinf=hi, neginf=lo
@@ -407,17 +412,30 @@ class TensorBoardVisualizer:
         # center-preserving stretch for display only.
         synth_np = np.asarray(device_manager.to_numpy(synth[0, 0]), dtype=np.float32)
 
-        seis_min = float(torch.as_tensor(self.physics_state.seis_min).item())
-        seis_max = float(torch.as_tensor(self.physics_state.seis_max).item())
-        lo = float(min(norm_min, norm_max))
-        hi = float(max(norm_min, norm_max))
+        # Batch-read physics scalars to minimize device syncs
+        seis_min_t, seis_max_t, norm_min_t, norm_max_t = device_manager.to_cpu(
+            [
+                self.physics_state.seis_min,
+                self.physics_state.seis_max,
+                self.physics_state.norm_min,
+                self.physics_state.norm_max,
+            ],
+            non_blocking=True,
+        )
+        seis_min = float(seis_min_t.item())
+        seis_max = float(seis_max_t.item())
+        norm_min_f = float(norm_min_t.item())
+        norm_max_f = float(norm_max_t.item())
+
+        lo = float(min(norm_min_f, norm_max_f))
+        hi = float(max(norm_min_f, norm_max_f))
         center_norm = (0.0 - seis_min) / (seis_max - seis_min + DomainConfig.EPSILON)
         center_norm = lo + center_norm * (hi - lo)
         center_norm = float(np.clip(center_norm, lo, hi))
         synth_mapped = self._stretch_diverging_for_display(
             synth_np,
             center=center_norm,
-            normalization_range=(norm_min.item(), norm_max.item()),
+            normalization_range=(norm_min_f, norm_max_f),
             percentile=float(self.seismic_stretch_percentile),
         )
 
