@@ -64,12 +64,10 @@ class GradNorm(nn.Module):
         metrics_dict: dict[int, GeneratorMetrics] = {}
 
         for i, s in enumerate(self.scales):
-            # Cria um dicionário mapeando cada chave para seu valor na matriz
             keys = MetricKey.generator_keys()
             d: dict[MetricKey, torch.Tensor] = {
                 key: loss_matrix[i, j] for j, key in enumerate(keys)
             }
-            # Calcula o total para esta escala (soma da linha i)
             d[MetricKey.G_TOTAL] = loss_matrix[i].sum()
             metrics_dict[s] = GeneratorMetrics(
                 total=d[MetricKey.G_TOTAL],
@@ -85,41 +83,50 @@ class GradNorm(nn.Module):
 
         return metrics_dict
 
-    def update_weights_from_graph(
+    def update_weights_from_isolated_forward(
         self,
-        curr_losses: torch.Tensor,
-        shared_layer: nn.Module,
+        scale_block: nn.Module,
+        z_in: torch.Tensor,
+        task_losses_fn: Any,
         scale_idx: int,
     ) -> torch.Tensor:
-        """Ajusta os pesos w usando o grafo de autograd já existente (sem segundo forward pass).
+        """Ajusta os pesos w usando um forward pass mínimo e isolado pelo bloco do scale atual.
 
-        Calcula as normas de gradiente de cada task diretamente sobre ``curr_losses``
-        (que ainda possui grafo de autograd ativo) usando ``torch.autograd.grad`` com
-        ``retain_graph=True``.  Isso elimina o custo de um segundo forward pass
-        completo pelo gerador (sem ``functional_call`` / VJP).
-
-        Deve ser chamado **antes** de ``total_loss.backward()`` enquanto o grafo
-        de autograd do forward pass do generator ainda estiver ativo.
+        Estratégia eficiente: em vez de percorrer o grafo completo (discriminador +
+        pirâmide inteira), faz um forward pass mínimo somente pelo bloco do scale
+        atual, usando ``z_in`` já detachado de todos os scales anteriores.
+        Isso limita o backward a apenas 1 bloco convolucional, não à pirâmide toda.
 
         Parameters
         ----------
-        curr_losses : torch.Tensor
-            Vetor 1D de shape ``(num_tasks,)`` com as losses individuais, em float32,
-            **com grafo de autograd ativo** (i.e., sem `.detach()`).
-        shared_layer : nn.Module
-            Camada proxy cujos parâmetros serão usados para calcular as normas.
+        scale_block : nn.Module
+            Bloco de geração do scale atual (já desembrulhado de torch.compile/DDP).
+        z_in : torch.Tensor
+            Entrada do bloco do scale atual, já detachada dos scales anteriores
+            (``requires_grad=True`` para permitir backward).
+        task_losses_fn : callable
+            Função ``(fake_out: Tensor) -> Tensor`` que recebe a saída do gerador
+            e retorna o vetor 1D de losses ``(num_tasks,)`` em float32.
         scale_idx : int
-            Índice da escala atual (0-based) para indexar ``self.w`` e ``self.l0``.
+            Índice da escala atual para indexar ``self.w`` e ``self.l0``.
 
         Returns
         -------
         torch.Tensor
-            Escalar com a loss do GradNorm usada para atualizar os pesos.
+            Escalar com a loss do GradNorm.
         """
         self.optimizer.zero_grad()
 
-        # Garantir float32 para estabilidade numérica
-        curr_l_tensor = curr_losses.float()
+        params = list(scale_block.parameters())
+        if not params:
+            return torch.tensor(0.0, device=z_in.device, dtype=torch.float32)
+
+        # Forward pass mínimo: apenas pelo bloco atual, com z_in já detachado.
+        # O grafo de autograd é pequeno: z_in → scale_block → fake_local.
+        fake_local = scale_block(z_in)
+
+        # Computar as losses sobre fake_local (grafo pequeno, só 1 bloco)
+        curr_l_tensor = task_losses_fn(fake_local).float()
         w_flat = self.w[scale_idx]
 
         # Inicialização do L0
@@ -134,13 +141,7 @@ class GradNorm(nn.Module):
         l0_scale = self.l0[start:end].to(curr_l_tensor.device)
 
         # --- Calcular normas dos gradientes de cada task ---
-        # Usa o grafo existente de autograd (sem segundo forward pass).
-        # retain_graph=True é necessário pois iremos chamar backward() de várias tasks.
-        # A última chamada pode usar retain_graph=False (mas usamos True para segurança).
-        params = list(shared_layer.parameters())
-        if not params:
-            return torch.tensor(0.0, device=curr_losses.device, dtype=torch.float32)
-
+        # O grafo é pequeno (apenas 1 bloco), então retain_graph=True é barato.
         norms_list: list[torch.Tensor] = []
         n = len(curr_l_tensor)
         for i in range(n):
@@ -148,17 +149,17 @@ class GradNorm(nn.Module):
                 grads = torch.autograd.grad(
                     curr_l_tensor[i],
                     params,
-                    retain_graph=True,   # grafo será reutilizado para as próximas tasks e para total_loss.backward()
-                    create_graph=False,  # não precisa de segunda derivada
+                    retain_graph=(i < n - 1),  # libera o grafo na última task
+                    create_graph=False,
                     allow_unused=True,
                 )
                 sq_norms = [g.detach().pow(2).sum() for g in grads if g is not None]
                 if sq_norms:
                     norms_list.append(torch.sqrt(torch.stack(sq_norms).sum()).float())
                 else:
-                    norms_list.append(torch.tensor(0.0, device=curr_losses.device, dtype=torch.float32))
+                    norms_list.append(torch.tensor(0.0, device=z_in.device, dtype=torch.float32))
             except Exception:
-                norms_list.append(torch.tensor(0.0, device=curr_losses.device, dtype=torch.float32))
+                norms_list.append(torch.tensor(0.0, device=z_in.device, dtype=torch.float32))
 
         norms = torch.stack(norms_list)
 
@@ -170,7 +171,7 @@ class GradNorm(nn.Module):
             mean_norm: torch.Tensor = norms.mean()
             constant_term: torch.Tensor = mean_norm * (r_i**self.alpha)
 
-        # Loss do GradNorm (L_grad) — diferencia apenas w_flat
+        # Loss do GradNorm — diferencia apenas w_flat (não os parâmetros do bloco)
         loss_grad = torch.nn.functional.l1_loss(norms * w_flat, constant_term)
 
         loss_grad.backward()  # type: ignore

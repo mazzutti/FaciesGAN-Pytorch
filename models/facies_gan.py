@@ -639,32 +639,123 @@ class FaciesGAN(nn.Module):
                     )
                     total_loss = metrics.total
 
-                # zero_grad antes do GradNorm (que pode acumular grads em self.gradnorm.w)
+                # zero_grad
                 self.optimizer_zero_grad(optimizers[scale])
 
-                # GradNorm weights update happens BEFORE backward to reuse the live autograd graph,
-                # avoiding a costly second forward pass through the generator.
+                # GradNorm weights update: isolated single-block forward pass.
+                # Builds z_in with no_grad (all previous scales + noise construction),
+                # then activates grad only for the current block — giving a tiny autograd
+                # graph instead of traversing the full discriminator + pyramid.
                 if (
                     self.gradnorm is not None
                     and self.disc_step_counter % self.options.gradnorm_interval == 0
                 ):
-                    # Obter a camada proxy (última convolução compartilhada da escala)
-                    scale_block = self.generator.gens[scale]
-                    if hasattr(scale_block, "_orig_mod"):
-                        orig_block = scale_block._orig_mod
-                    else:
-                        orig_block = scale_block
+                    gen = self.generator
+                    # Unwrap compile/DDP to get the raw block
+                    scale_block = gen.gens[scale]
+                    while hasattr(scale_block, "_orig_mod") or hasattr(scale_block, "module"):
+                        scale_block = getattr(scale_block, "_orig_mod", None) or getattr(scale_block, "module")
 
-                    if scale == 0:
-                        last_shared_layer = orig_block.tail[1]
-                    else:
-                        last_shared_layer = orig_block[2][1]
+                    # Build z_in for the current scale with no_grad (no graph through pyramid)
+                    with torch.no_grad():
+                        noise_pyramid = self.get_pyramid_noise(scale, indexes, wells_pyramid, seismic_pyramid)
+                        amp = self.get_noise_amplitude(scale)
 
-                    # Usa o grafo de autograd existente — sem segundo forward pass!
-                    # curr_losses ainda possui grafo ativo; retain_graph=True internamente.
-                    self.gradnorm.update_weights_from_graph(
-                        curr_losses=curr_losses,
-                        shared_layer=last_shared_layer,
+                        # Forward through all PREVIOUS scales to get out_facie (no graph)
+                        if scale == 0:
+                            channels = gen.output_channels
+                            b_ = noise_pyramid[0].shape[0]
+                            h = noise_pyramid[0].shape[2] - gen.full_zero_padding
+                            w_ = noise_pyramid[0].shape[3] - gen.full_zero_padding
+                            out_facie = torch.zeros(
+                                (b_, channels, h, w_),
+                                device=noise_pyramid[0].device,
+                                dtype=noise_pyramid[0].dtype,
+                            )
+                        else:
+                            # Run scales 0..scale-1 with no_grad to get out_facie
+                            out_facie = gen(
+                                noise_pyramid,
+                                amp,
+                                in_noise=None,
+                                start_scale=0,
+                                stop_scale=scale - 1,
+                                use_uncompiled=True,
+                            )
+
+                        # Build z_in for the current scale
+                        z_s = noise_pyramid[scale]
+                        out_up = utils.interpolate(
+                            out_facie,
+                            (z_s.shape[2] - gen.full_zero_padding, z_s.shape[3] - gen.full_zero_padding),
+                        )
+                        n_in = gen.output_channels
+                        p = gen.zero_padding
+                        base_out = out_up[:, :n_in, ...]
+                        if p > 0:
+                            padded = torch.empty(
+                                (base_out.shape[0], base_out.shape[1],
+                                 base_out.shape[2] + 2 * p, base_out.shape[3] + 2 * p),
+                                dtype=base_out.dtype, device=base_out.device,
+                            ).fill_(gen.padding_value)
+                            padded[..., p:-p, p:-p] = base_out
+                        else:
+                            padded = base_out
+                        amp_s = amp[scale]
+                        z_in_detached = (amp_s * z_s[:, :n_in, ...] + padded)
+                        if gen.cond_channels > 0:
+                            z_in_detached = torch.cat([z_in_detached, z_s[:, n_in:, ...]], dim=1)
+                        # out_facie_detached for residual clamp
+                        out_facie_detached = out_up.detach()
+
+                    # Enable grad only on the current block input
+                    z_in_gn = z_in_detached.detach().requires_grad_(False)
+
+                    # Minimal task_losses_fn: only generator-local losses (no discriminator)
+                    real_s = facies_pyramid[scale]
+                    wells_s = wells_pyramid.get(scale)
+                    masks_s = masks_pyramid.get(scale)
+                    seismic_s_dict = seismic_pyramid
+                    opts = self.options
+                    phys = self.physics_state
+                    zero = self.zero_scalar
+                    _scale = scale
+                    _out_detached = out_facie_detached
+
+                    def _task_losses_fn(fake_local: torch.Tensor) -> torch.Tensor:
+                        # Residual clamp (same as Generator._residual_clamp_method)
+                        from models.generator import Generator as _Gen
+                        fake_full = _Gen.residual_clamp_fn(
+                            fake_local, _out_detached, gen.num_facies, gen.normalization_range
+                        )
+                        # 1. well loss
+                        wl = compute_masked_loss(fake_full, real_s, wells_s, masks_s, opts)
+                        # 2. TV + elastic + seismic
+                        tv_l, el_l, seis_l = compute_rock_physics_loss(
+                            fake_full, seismic_s_dict, _scale, opts, phys
+                        )
+                        # 3. diversity (single sample → zero)
+                        div_l = zero
+                        # 4. adv + rec approximated as zero (cannot compute efficiently here)
+                        adv_l = zero
+                        rec_fa_l = zero
+                        rec_rp_l = zero
+                        target_dtype = torch.float32
+                        return torch.stack([
+                            adv_l.to(dtype=target_dtype),
+                            rec_fa_l.to(dtype=target_dtype),
+                            wl.to(dtype=target_dtype),
+                            div_l.to(dtype=target_dtype),
+                            rec_rp_l.to(dtype=target_dtype),
+                            tv_l.to(dtype=target_dtype),
+                            el_l.to(dtype=target_dtype),
+                            seis_l.to(dtype=target_dtype),
+                        ])
+
+                    self.gradnorm.update_weights_from_isolated_forward(
+                        scale_block=scale_block,
+                        z_in=z_in_gn,
+                        task_losses_fn=_task_losses_fn,
                         scale_idx=scale,
                     )
 
