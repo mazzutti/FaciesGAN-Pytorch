@@ -55,8 +55,6 @@ class DeviceManager:
         """Initialize the global device with priority: CUDA > CPU."""
         self._refresh_distributed_state()
 
-        import inspect
-
         if manual_seed is not None:
             import utils
 
@@ -110,15 +108,6 @@ class DeviceManager:
             torch.cuda.set_device(gpu_id)
         else:
             self._thread_local.device = torch.device(DeviceType.CPU)
-
-        caller = inspect.stack()[1]
-        print(
-            "[device init] "
-            f"rank={self._rank} local_rank={self._local_rank} "
-            f"world_size={self._world_size} device={self._thread_local.device} "
-            f"caller={caller.filename}:{caller.lineno}:{caller.function}",
-            flush=True,
-        )
 
         return self._thread_local.device
 

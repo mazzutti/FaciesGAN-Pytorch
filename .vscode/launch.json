@@ -147,7 +147,7 @@
         "NCCL_ALGO": "Ring",
         "NCCL_PROTO": "Simple",
         "NCCL_DEBUG": "WARN",
-        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "0",
         "CUDA_LAUNCH_BLOCKING": "0",
         "TORCH_USE_CUDA_DSA": "0",
         "PYTHONUNBUFFERED": "1"
