@@ -357,12 +357,16 @@ class Trainer:
                         noises_tr = self.model.get_pyramid_noise(
                             scale, indexes, wells_pyramid, seismic_pyramid
                         )
-                        amps_tr = self.model.noise_amps[:scale+1]
-                        fake_tr = self.model.generator(noises_tr, amps_tr, stop_scale=scale)
+                        amps_tr = self.model.noise_amps[: scale + 1]
+                        fake_tr = self.model.generator(
+                            noises_tr, amps_tr, stop_scale=scale
+                        )
 
                         # Discriminator train trace
                         scores_fake = self.model.discriminator.discs[scale](fake_tr)
-                        scores_real = self.model.discriminator.discs[scale](facies_pyramid[scale])
+                        scores_real = self.model.discriminator.discs[scale](
+                            facies_pyramid[scale]
+                        )
 
                         # Backward trace
                         loss_tr = (scores_fake.mean() + scores_real.mean()) * 0.0
@@ -1108,13 +1112,17 @@ class Trainer:
         )
         os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
         import sys
-        print(f"\n  Saving epoch checkpoint at epoch {epoch} (batch {batch_id})...", end="", flush=True)
+
+        print(
+            f"\n  Saving epoch checkpoint at epoch {epoch} (batch {batch_id})...",
+            end="",
+            flush=True,
+        )
         try:
             torch.save(checkpoint.to_dict(), ckpt_path)
             print(" done.")
         except Exception as e:
             print(f" failed: {e}", file=sys.stderr)
-
 
     def load_epoch_checkpoint(
         self, scales: tuple[int, ...], scale_paths: dict[int, str]
@@ -1723,7 +1731,7 @@ class Trainer:
 
                 # End of batch loop
 
-                if device_manager.is_main_process:
+                if device_manager.is_main_process and self.time_unit == TimeUnit.EPOCH:
                     # ── Save Epoch Progress (Periodic or Final) ───────
                     interval = self.options.checkpoint_interval
                     is_final_epoch = epoch == self._num_passes - 1
@@ -1936,11 +1944,7 @@ class Trainer:
 
             # Log when learning rate decays (at every lr_decay interval,
             # before schedulers_step advances the count).
-            _decay_counter = (
-                global_step
-                if self.time_unit != TimeUnit.EPOCH
-                else epoch
-            )
+            _decay_counter = global_step if self.time_unit != TimeUnit.EPOCH else epoch
             if (
                 self.lr_decay > 0
                 and _decay_counter > 0
