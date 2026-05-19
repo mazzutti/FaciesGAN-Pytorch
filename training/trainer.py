@@ -2148,7 +2148,12 @@ class Trainer:
             )
 
             sm = self._table_smoother[scale]
-            v = [sm[i].update(raw[i]) for i in range(13)]
+            v = []
+            for i in range(13):
+                if i == 12 and raw[i] == 0.0:
+                    v.append(sm[i].value if sm[i].value is not None else 0.0)
+                else:
+                    v.append(sm[i].update(raw[i]))
             cached_v.append(v)
 
             lines.append(
