@@ -115,7 +115,12 @@ class NeuralSmoother(BaseInterpolator):
     def _compile_model(self) -> None:
         """Attempt to JIT/compile the model when supported."""
         try:
-            self.model = torch.compile(self.model)  # pyright: ignore
+            self.model = torch.compile(  # pyright: ignore
+                self.model,
+                mode="reduce-overhead",
+                fullgraph=True,
+                dynamic=True,
+            )
             logger.info("Model compiled with torch.compile()")
         except (AttributeError, RuntimeError, TypeError):
             logger.info("torch.compile() not available or failed; continuing")
@@ -437,7 +442,7 @@ class NeuralSmoother(BaseInterpolator):
 
             for i in range(0, coords.shape[0], self.config.chunk_size):
                 chunk = coords[i : i + self.config.chunk_size]
-                logits_chunks.append(self.model(chunk))
+                logits_chunks.append(self.model(chunk).clone())
 
             logits = torch.cat(logits_chunks, dim=0)
             probs = torch.softmax(logits, dim=1)

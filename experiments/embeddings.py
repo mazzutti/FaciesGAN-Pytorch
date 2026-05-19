@@ -2,18 +2,19 @@
 
 This module provides a robust, CPU-based pipeline for dimensionality reduction
 and manifold embedding (t-SNE, UMAP, MDS, Isomap). It enforces absolute
-reproducibility through deterministic seeding and optimizes performance for
-high-dimensional facies volumes using a 100-component PCA pre-reduction step.
+reproducibility through deterministic seeding.
 """
 
 from __future__ import annotations
 
 import logging
 import warnings
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     Any,
+    Callable,
     Dict,
     List,
     Optional,
@@ -27,8 +28,11 @@ from typing import (
 import numpy as np
 import torch
 import torch.nn.functional as F
-from joblib import Parallel, delayed  # type: ignore[import]
-from scipy.sparse import SparseEfficiencyWarning
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+
+# joblib removed: use ThreadPoolExecutor for parallelism to avoid multiprocessing issues
+from sklearn.metrics import euclidean_distances
+from scipy.sparse import SparseEfficiencyWarning, coo_matrix
 from sklearn.decomposition import PCA
 from sklearn.manifold import MDS, TSNE, Isomap
 from umap import UMAP  # type: ignore[import]
@@ -40,10 +44,33 @@ from enums import EmbeddingMethod
 
 # Suppress specific library warnings that clutter the console
 warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
+# Suppress sklearn MDS FutureWarnings about default `init` and deprecated `dissimilarity`
+warnings.filterwarnings(
+    "ignore",
+    message=r".*The default value of `init` will change.*",
+    category=FutureWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r".*The `dissimilarity` parameter is deprecated.*",
+    category=FutureWarning,
+)
 
 # --- Type Aliases ---
 # method_name -> (real_embedding, {variant_name: generated_embedding})
 _SharedEmbeddings = Dict[str, Tuple[np.ndarray, Dict[str, np.ndarray]]]
+
+# Future result type for threaded manifold fitting tasks
+_FutureResult = Tuple[
+    str,
+    Optional[
+        Union[
+            np.ndarray,
+            Tuple[Any, ...],
+            coo_matrix,
+        ]
+    ],
+]
 
 logger = logging.getLogger(__name__)
 
@@ -93,39 +120,42 @@ def get_manifold_estimator(
     """
     m = method.lower()
 
-    # Configuration rationale:
-    # - t-SNE: PCA init is more stable and preserves global structure better.
-    # - UMAP: Spectral init is faster and provides good initial layout.
-    # - MDS: n_init=1 since we are already in a low-dimensional PCA subspace.
-    # - Isomap: 30 neighbors provides a good balance between local/global connectivity.
-
-    estimator: Any = None
-    if m == EmbeddingMethod.TSNE:
-        estimator = TSNE(
-            n_components=n_components,
-            init="pca",
-            random_state=random_state,
-            n_jobs=1,
-        )
-    elif m == EmbeddingMethod.UMAP:
-        estimator = UMAP(
-            n_components=n_components,
-            init="spectral",
-            random_state=random_state,
-            n_jobs=1,
-        )
-    elif m == EmbeddingMethod.MDS:
-        estimator = MDS(
+    # Model factory to avoid if/elif chain
+    # Note: Using n_jobs=1 to avoid issues with debugger/multiprocessing on some systems
+    model_factories: dict[str, Callable[[], Any]] = {
+        EmbeddingMethod.MDS: lambda: MDS(
             n_components=n_components,
             n_init=1,
             max_iter=100,
             random_state=random_state,
-            normalized_stress="auto",
-            init="random",  # type: ignore[call-arg]
-        )
-    elif m == EmbeddingMethod.ISOMAP:
-        estimator = Isomap(n_neighbors=30, n_components=n_components, n_jobs=1)
+            n_jobs=1,
+        ),
+        EmbeddingMethod.TSNE: lambda: TSNE(
+            n_components=n_components,
+            n_jobs=1,
+            init="pca",
+            learning_rate="auto",
+            random_state=random_state,
+        ),
+        EmbeddingMethod.ISOMAP: lambda: Isomap(
+            n_components=n_components,
+            n_jobs=1,
+        ),
+        EmbeddingMethod.UMAP: lambda: (
+            UMAP(
+                n_components=n_components,
+                random_state=random_state,
+                n_jobs=1,
+            )
+            if UMAP
+            else None
+        ),
+    }
 
+    if m not in model_factories:
+        return None
+
+    estimator = model_factories[m]()
     return cast(Optional[ManifoldEstimator], estimator)
 
 
@@ -220,7 +250,7 @@ def prepare_features(
     if arr.ndim == 3:
         arr = np.expand_dims(arr, axis=1)
 
-    n_facies = int(dataset.options.num_facies_channels or 4)
+    n_facies = int(dataset.options.num_facies_channels or 3)
 
     if seismic_only:
         # Seismic is typically the last channel (-1)
@@ -257,21 +287,6 @@ def prepare_features(
         arr = device_manager.to_cpu(resized, non_blocking=True).numpy()
 
     return _flatten_data(arr)
-
-
-def _fit_single_method(
-    method: str, data: np.ndarray, seed: int
-) -> Tuple[str, Optional[np.ndarray]]:
-    """Helper for parallel execution. Fits a single manifold estimator to the data."""
-    estimator = get_manifold_estimator(method, random_state=seed)
-    if not estimator:
-        return method, None
-    try:
-        embedding = estimator.fit_transform(data)
-        return method, embedding
-    except Exception as e:
-        logger.error(f"Manifold fitting failed for {method.upper()}: {e}")
-        return method, None
 
 
 def compute_shared_embeddings(
@@ -340,32 +355,140 @@ def compute_shared_embeddings(
 
     all_data = np.concatenate([real_flat] + f_list, axis=0)
 
-    # 3. PCA Dimensionality Reduction (Stability Step)
-    n_pca = 100
-    if all_data.shape[1] > n_pca:
-        print(
-            f"    [PCA] Reducing {all_data.shape[1]} features → {n_pca} (seed={seed})",
-            flush=True,
-        )
-        pca = PCA(n_components=n_pca, svd_solver="randomized", random_state=seed)
-        all_data = pca.fit_transform(all_data)
+    # Apply sample-wise Z-score normalization to seismic features to ensure
+    # we compare structural geometry/phase independent of convolved amplitude/gain differences.
+    if seismic_only:
+        means = all_data.mean(axis=1, keepdims=True)
+        stds = all_data.std(axis=1, keepdims=True) + 1e-6
+        all_data = (all_data - means) / stds
 
-    # 4. Parallel Manifold Fitting
+    # 4. Parallel Manifold Fitting (aligned with remote `experiments.py`):
+    # - Use PCA(2) init for MDS
+    # - Precompute distances for MDS
+    # - Dynamic parameter selection for UMAP/TSNE/Isomap based on sample count
+    # - Run methods in parallel using threads to avoid multiprocessing deadlocks
+    n_samples = all_data.shape[0]
     print(
-        f"    Fitting {len(methods)} methods in parallel on {all_data.shape[0]} samples:",
+        f"    Fitting {len(methods)} methods in parallel on {n_samples} samples:",
         flush=True,
     )
     for m in methods:
         print(f"      → {m.upper()} ...", flush=True)
 
-    # We use n_jobs=1 (sequential) to avoid deadlocks that occur with threaded backends
-    # in some environments (e.g., when running inside a debugger).
-    results_raw = cast(
-        List[Tuple[str, Optional[np.ndarray]]],
-        Parallel(n_jobs=1)(
-            delayed(_fit_single_method)(m, all_data, seed) for m in methods
-        ),
-    )
+    # PCA init for MDS (deterministic seed chosen to match remote script)
+    pca_init = PCA(n_components=2, random_state=3).fit_transform(all_data)
+
+    # Precompute pairwise Euclidean distances only if MDS is requested
+    distances = None
+    if any(m.lower() == EmbeddingMethod.MDS for m in methods):
+        distances = euclidean_distances(all_data)
+
+    # Threaded execution to mirror remote script's ThreadPoolExecutor usage
+    results_raw: List[Tuple[str, Optional[np.ndarray]]] = []
+    with ThreadPoolExecutor(
+        max_workers=min(len(methods), (os.cpu_count() or 1))
+    ) as exe:
+        futures: Dict[Future[_FutureResult], str] = {}
+
+        def submit_method(method_name: str) -> Future[_FutureResult]:
+            m_lower = method_name.lower()
+
+            if m_lower == EmbeddingMethod.MDS:
+
+                def run_mds():
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore", FutureWarning)
+                            mds = MDS(
+                                n_components=2,
+                                dissimilarity="precomputed",
+                                init="random",  # type: ignore[assignment]
+                                n_init=1,
+                                max_iter=300,
+                                eps=1e-6,
+                                random_state=seed,
+                                n_jobs=1,
+                            )
+                            emb = mds.fit_transform(distances, init=pca_init)  # type: ignore[arg-type]
+                        return method_name, emb
+                    except Exception as e:
+                        logger.error(f"MDS fitting failed: {e}")
+                        return method_name, None
+
+                return cast(Future[_FutureResult], exe.submit(run_mds))
+
+            if m_lower == EmbeddingMethod.UMAP:
+
+                def run_umap():  # type: ignore
+                    try:
+                        n_nb = min(15, max(1, n_samples - 1))
+                        um = UMAP(
+                            n_components=2,
+                            n_neighbors=n_nb,
+                            min_dist=0.1,
+                            n_epochs=200,
+                            init="spectral",
+                            random_state=seed,
+                            n_jobs=1,
+                        )
+                        emb = um.fit_transform(all_data)  # type: ignore
+                        return method_name, emb  # type: ignore
+                    except Exception as e:
+                        logger.error(f"UMAP fitting failed: {e}")
+                        return method_name, None
+
+                return cast(Future[_FutureResult], exe.submit(run_umap))
+
+            if m_lower == EmbeddingMethod.ISOMAP:
+
+                def run_isomap():
+                    try:
+                        n_nb = min(10, max(1, n_samples - 1))
+                        iso = Isomap(n_components=2, n_neighbors=n_nb)
+                        emb = iso.fit_transform(all_data)
+                        return method_name, emb
+                    except Exception as e:
+                        logger.error(f"Isomap fitting failed: {e}")
+                        return method_name, None
+
+                return cast(Future[_FutureResult], exe.submit(run_isomap))
+
+            if m_lower == EmbeddingMethod.TSNE:
+
+                def run_tsne():
+                    try:
+                        perp = min(30.0, float(max(1, (n_samples - 1) / 3.0)))
+                        ts = TSNE(
+                            n_components=2,
+                            init="pca",
+                            learning_rate="auto",
+                            perplexity=perp,
+                            random_state=seed,
+                            n_jobs=1,
+                        )
+                        emb = ts.fit_transform(all_data)
+                        return method_name, emb
+                    except Exception as e:
+                        logger.error(f"t-SNE fitting failed: {e}")
+                        return method_name, None
+
+                return cast(Future[_FutureResult], exe.submit(run_tsne))
+
+            # Unknown method
+            return cast(Future[_FutureResult], exe.submit(lambda: (method_name, None)))
+
+        for m in methods:
+            fut = submit_method(m)
+            futures[fut] = m
+
+        for fut in as_completed(futures.keys()):
+            try:
+                # cast the (heterogeneous) future result into the expected
+                # Tuple[str, Optional[np.ndarray]] for downstream processing.
+                results_raw.append(cast(Tuple[str, Optional[np.ndarray]], fut.result()))
+            except Exception as e:
+                m = futures.get(fut, "?")
+                logger.error(f"Manifold fitting failed for {m}: {e}")
     parallel_results = results_raw
 
     # 5. Assemble and Split Results (Real vs Variants)

@@ -44,7 +44,13 @@ def _generate_samples(
 
     device = device_manager.get_or_initialize(gpu_id)
 
-    model = FaciesGAN(options=opts, channels=channels)
+    # Disable torch.compile for generation/inference to avoid the heavy compilation
+    # startup overhead and prevent concurrent thread-compilation crashes in ThreadPoolExecutor.
+    import copy
+    opts_eval = copy.deepcopy(opts)
+    opts_eval.compile_backend = False
+
+    model = FaciesGAN(options=opts_eval, channels=channels)
     model.load(model_path, load_discriminator=False, load_wells=False)
 
     has_rock_physics = opts.use_rock_physics
@@ -97,12 +103,12 @@ def _generate_samples(
         )
     wells_dict = (
         {i: wells_pyramid[i] for i in range(len(wells_pyramid))}
-        if wells_pyramid
+        if (wells_pyramid and opts.use_wells)
         else {}
     )
     seismic_dict = (
         {i: seismic_pyramid[i] for i in range(len(seismic_pyramid))}
-        if seismic_pyramid
+        if (seismic_pyramid and opts.use_seismic)
         else {}
     )
 
@@ -160,20 +166,21 @@ def _generate_samples(
                 )
 
                 if has_rock_physics and rp_t is not None:
-                    # rp_t: (1, 3, H, W) -> Ip, Is, VpVs
+                    # rp_t: (1, 3, H, W) -> Ip, Is, VpVs in the normalized range [-1, 1]
                     ip_norm = rp_t[:, 0:1, ...]
                     is_norm = rp_t[:, 1:2, ...]
                     vpvs_norm = rp_t[:, 2:3, ...]
 
-                    # Denormalize to physical units
-                    lo, hi = opts.normalization_range
-                    ip = ip_norm * (hi - lo) + lo
-                    is_data = is_norm * (hi - lo) + lo
-                    vpvs = vpvs_norm * (hi - lo) + lo
+                    # For manifold learning and embedding comparisons, keep features in normalized range [-1, 1]
+                    all_ip.append(device_manager.to_numpy(ip_norm.squeeze(0)))
+                    all_is.append(device_manager.to_numpy(is_norm.squeeze(0)))
+                    all_vpvs.append(device_manager.to_numpy(vpvs_norm.squeeze(0)))
 
-                    all_ip.append(device_manager.to_numpy(ip.squeeze(0)))
-                    all_is.append(device_manager.to_numpy(is_data.squeeze(0)))
-                    all_vpvs.append(device_manager.to_numpy(vpvs.squeeze(0)))
+                    # For disk saving, denormalize to actual physical units using centralized PhysicsState
+                    phys_dict = model.physics_state.denormalize_rock_physics(rp_t)
+                    ip_phys = device_manager.to_numpy(phys_dict[DataFiles.Ip.name].squeeze(0))
+                    is_phys = device_manager.to_numpy(phys_dict[DataFiles.Is.name].squeeze(0))
+                    vpvs_phys = device_manager.to_numpy(phys_dict[DataFiles.VP_VS.name].squeeze(0))
 
                     # Save as npy
                     np.save(
@@ -181,21 +188,21 @@ def _generate_samples(
                             ip_dir,
                             f"{DataFiles.Ip.name.lower()}_{idx:04d}.npy",
                         ),
-                        device_manager.to_numpy(ip.squeeze(0)),
+                        ip_phys,
                     )
                     np.save(
                         os.path.join(
                             is_dir,
                             f"{DataFiles.Is.name.lower()}_{idx:04d}.npy",
                         ),
-                        device_manager.to_numpy(is_data.squeeze(0)),
+                        is_phys,
                     )
                     np.save(
                         os.path.join(
                             vpvs_dir,
                             f"{DataFiles.VP_VS.name.lower()}_{idx:04d}.npy",
                         ),
-                        device_manager.to_numpy(vpvs.squeeze(0)),
+                        vpvs_phys,
                     )
 
                     # Also synthetic seismic

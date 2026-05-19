@@ -228,13 +228,14 @@ class FaciesGAN(nn.Module):
                 self.generator.color_quantizer,
                 fullgraph=True,
                 dynamic=True,
-                mode="default",
+                mode="reduce-overhead",
             )
             # noinspection PyTypeChecker
             self.generator._residual_clamp = torch.compile(  # type: ignore
                 self.generator._residual_clamp,  # type: ignore
                 fullgraph=True,
                 dynamic=True,
+                mode="reduce-overhead",
             )
 
         # Rank-0 compile progress indicator (useful with max-autotune mode).
@@ -1449,7 +1450,10 @@ class FaciesGAN(nn.Module):
         if self.use_compile and not self.generator.use_gradient_checkpointing:
             # noinspection PyTypeChecker
             self.generator.gens[scale] = torch.compile(  # type: ignore
-                self.generator.gens[scale], fullgraph=True, dynamic=True
+                self.generator.gens[scale],
+                fullgraph=True,
+                dynamic=True,
+                mode="default",
             )
 
     def finalize_discriminator_scale(self, scale: int) -> None:
@@ -1468,7 +1472,10 @@ class FaciesGAN(nn.Module):
         if self.use_compile:
             # noinspection PyTypeChecker
             self.discriminator.discs[scale] = torch.compile(  # type: ignore
-                self.discriminator.discs[scale], fullgraph=True, dynamic=False
+                self.discriminator.discs[scale],
+                fullgraph=True,
+                dynamic=False,
+                mode="reduce-overhead",
             )
 
     def freeze_generator_scales(self, active_scales: tuple[int, ...]) -> None:

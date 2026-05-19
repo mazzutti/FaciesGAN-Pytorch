@@ -367,6 +367,9 @@ class Generator(nn.Module):
             else:
                 gen_out = block(z_in)
 
+            if not use_uncompiled:
+                gen_out = gen_out.clone()
+
             # Fused residual add + clamp to [-1, 1].
             # When compiled, Inductor merges the add and clamp into a
             # single pointwise kernel, saving one kernel launch per scale.
@@ -375,6 +378,7 @@ class Generator(nn.Module):
                 out_facie = self._residual_clamp_method(gen_out, out_facie)
             else:
                 out_facie = self._residual_clamp(gen_out, out_facie)
+                out_facie = out_facie.clone()
 
         quantizer = self.color_quantizer
         if use_uncompiled:
@@ -389,10 +393,14 @@ class Generator(nn.Module):
             facies = out_facie[:, : self.num_facies, ...]
             imp = out_facie[:, self.num_facies :, ...]
             facies_q = quantizer(facies)
+            if not use_uncompiled:
+                facies_q = facies_q.clone()
             out_facie = torch.cat([facies_q, imp], dim=1)
         else:
             self._mark_compile_progress("facies_quantizer")
             out_facie = quantizer(out_facie)
+            if not use_uncompiled:
+                out_facie = out_facie.clone()
 
         return out_facie  # type: ignore[return-value]
 

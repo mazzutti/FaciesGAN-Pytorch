@@ -2,6 +2,7 @@ import os
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+import numpy as np
 
 import utils
 from datasets.dataset import PyramidsDataset
@@ -111,14 +112,22 @@ def main():
         ax.set_title(f"Scale {scale} Wells")
         ax.axis("off")
 
-        # 6. Seismic
+        # 6. Seismic (display-only symmetric stretch around zero)
         ax = axes[scale, 5]
         if s is not None:
             print(
                 f"Scale {scale} Seismic range (normalized): [{s.min():.4f}, {s.max():.4f}]"
             )
             s_np = s[0].numpy() if s.ndim == 3 else s.numpy()
-            ax.imshow(s_np, cmap="seismic")
+
+            # Robust symmetric stretch (2nd/98th percentiles) for visualization
+            p_lo = float(np.percentile(s_np, 2))
+            p_hi = float(np.percentile(s_np, 98))
+            max_abs = max(abs(p_lo), abs(p_hi), np.finfo(np.float32).eps)
+            s_norm = np.clip(s_np / max_abs, -1.0, 1.0)
+
+            # Show diverging map centered at zero with fixed vmin/vmax
+            ax.imshow(s_norm, cmap="seismic", vmin=-1.0, vmax=1.0)
         ax.set_title(f"Scale {scale} Seismic")
         ax.axis("off")
 

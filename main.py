@@ -62,13 +62,13 @@ def _setup_environment() -> None:
         "triton",
         "torch.cuda",
     ]:
-        logging.getLogger(name).setLevel(logging.WARNING)
+        logging.getLogger(name).setLevel(logging.ERROR)
     logging.getLogger("torch._inductor.select_algorithm").setLevel(logging.CRITICAL)
 
     # Only call set_logs when TORCH_LOGS env var is not already set
     if "TORCH_LOGS" not in os.environ:
         try:
-            torch._logging.set_logs(dynamo=logging.ERROR)  # type: ignore[attr-defined]
+            torch._logging.set_logs(dynamo=logging.ERROR, inductor=logging.ERROR)  # type: ignore[attr-defined]
         except Exception:
             pass
 

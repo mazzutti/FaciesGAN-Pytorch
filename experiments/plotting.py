@@ -20,16 +20,26 @@ from enums import DataFiles, ExperimentVariant
 
 def setup_imshow_for_kind(ax: Axes, img: np.ndarray, data_kind: str):
     """Helper to configure imshow with correct colormap and settings."""
-    cmap = (
-        "RdBu"
-        if data_kind == DataFiles.SEISMIC.name.lower()
-        else (
-            "magma"
-            if data_kind in [DataFiles.Ip.name.lower(), DataFiles.Is.name.lower()]
-            else ("viridis" if data_kind == DataFiles.VP_VS.name.lower() else None)
-        )
-    )
-    return ax.imshow(img, cmap=cmap, interpolation="nearest", aspect="auto")  # type: ignore
+    kwargs: dict[str, object] = {"interpolation": "nearest", "aspect": "auto"}
+
+    if data_kind == DataFiles.SEISMIC.name.lower():
+        kwargs["cmap"] = "RdBu"
+        # A diverging colormap must be symmetrically centered around zero
+        # We subtract the mean (DC bias) to ensure that the "zero amplitude" 
+        # is perfectly centered at white, compensating for dataset asymmetry.
+        img_plot = img - np.mean(img)
+        p_lo = float(np.percentile(img_plot, 2))
+        p_hi = float(np.percentile(img_plot, 98))
+        max_abs = max(abs(p_lo), abs(p_hi), 1e-6)
+        kwargs["vmin"] = -max_abs
+        kwargs["vmax"] = max_abs
+        return ax.imshow(img_plot, **kwargs)  # type: ignore
+    elif data_kind in [DataFiles.Ip.name.lower(), DataFiles.Is.name.lower()]:
+        kwargs["cmap"] = "magma"
+    elif data_kind == DataFiles.VP_VS.name.lower():
+        kwargs["cmap"] = "viridis"
+
+    return ax.imshow(img, **kwargs)  # type: ignore
 
 
 def get_method_label(method: str) -> str:
