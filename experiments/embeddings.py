@@ -8,6 +8,7 @@ reproducibility through deterministic seeding.
 from __future__ import annotations
 
 import logging
+import math
 import warnings
 import os
 from dataclasses import dataclass
@@ -368,12 +369,13 @@ def compute_shared_embeddings(
     # - Dynamic parameter selection for UMAP/TSNE/Isomap based on sample count
     # - Run methods in parallel using threads to avoid multiprocessing deadlocks
     n_samples = all_data.shape[0]
-    print(
-        f"    Fitting {len(methods)} methods in parallel on {n_samples} samples:",
-        flush=True,
+    logger.info(
+        "Fitting %s methods in parallel on %s samples:",
+        len(methods),
+        n_samples,
     )
     for m in methods:
-        print(f"      → {m.upper()} ...", flush=True)
+        logger.info(" -> %s ...", m.upper())
 
     # PCA init for MDS (deterministic seed chosen to match remote script)
     pca_init = PCA(n_components=2, random_state=3).fit_transform(all_data)
@@ -421,12 +423,15 @@ def compute_shared_embeddings(
 
                 def run_umap():  # type: ignore
                     try:
-                        n_nb = min(15, max(1, n_samples - 1))
+                        # Scale n_neighbors with sqrt(n_samples) to maintain connectivity
+                        # for large datasets (e.g. 4001 samples -> ~63 neighbors)
+                        n_nb = max(5, int(math.sqrt(n_samples)))
                         um = UMAP(
                             n_components=2,
                             n_neighbors=n_nb,
-                            min_dist=0.1,
-                            n_epochs=200,
+                            min_dist=0.05,
+                            n_epochs=500,
+                            metric="euclidean",
                             init="spectral",
                             random_state=seed,
                             n_jobs=1,
@@ -443,8 +448,16 @@ def compute_shared_embeddings(
 
                 def run_isomap():
                     try:
-                        n_nb = min(10, max(1, n_samples - 1))
-                        iso = Isomap(n_components=2, n_neighbors=n_nb)
+                        # Scale n_neighbors with sqrt(n_samples)/2 to maintain connectivity
+                        # for large datasets (e.g. 4001 samples -> ~32 neighbors)
+                        n_nb = max(5, int(math.sqrt(n_samples) / 2))
+                        iso = Isomap(
+                            n_components=2,
+                            n_neighbors=n_nb,
+                            eigen_solver="dense",
+                            neighbors_algorithm="kd_tree",
+                            metric="euclidean",
+                        )
                         emb = iso.fit_transform(all_data)
                         return method_name, emb
                     except Exception as e:
@@ -460,6 +473,7 @@ def compute_shared_embeddings(
                         perp = min(30.0, float(max(1, (n_samples - 1) / 3.0)))
                         ts = TSNE(
                             n_components=2,
+                            n_iter=1500,
                             init="pca",
                             learning_rate="auto",
                             perplexity=perp,

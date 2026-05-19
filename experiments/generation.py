@@ -1,6 +1,7 @@
 """Sample generation logic for experiments."""
 
-import os
+import logging
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -11,6 +12,8 @@ from enums import ChannelKey, DataFiles, SplitKey
 from models.facies_gan import FaciesGAN
 from models.utils import split_facies_rp
 from options import TrainingOptions
+
+logger = logging.getLogger(__name__)
 
 
 def _generate_samples(
@@ -47,6 +50,7 @@ def _generate_samples(
     # Disable torch.compile for generation/inference to avoid the heavy compilation
     # startup overhead and prevent concurrent thread-compilation crashes in ThreadPoolExecutor.
     import copy
+
     opts_eval = copy.deepcopy(opts)
     opts_eval.compile_backend = False
 
@@ -75,17 +79,18 @@ def _generate_samples(
     # Batch size for generation to avoid OOM
     batch_size = 20
 
-    facies_dir = os.path.join(gen_output, DataFiles.FACIES.name.lower())
-    ip_dir = os.path.join(gen_output, DataFiles.Ip.name.lower())
-    is_dir = os.path.join(gen_output, DataFiles.Is.name.lower())
-    vpvs_dir = os.path.join(gen_output, DataFiles.VP_VS.name.lower())
-    seismic_dir = os.path.join(gen_output, DataFiles.SEISMIC.name.lower())
-    os.makedirs(facies_dir, exist_ok=True)
+    gen_output_path = Path(gen_output)
+    facies_dir = gen_output_path / DataFiles.FACIES.name.lower()
+    ip_dir = gen_output_path / DataFiles.Ip.name.lower()
+    is_dir = gen_output_path / DataFiles.Is.name.lower()
+    vpvs_dir = gen_output_path / DataFiles.VP_VS.name.lower()
+    seismic_dir = gen_output_path / DataFiles.SEISMIC.name.lower()
+    facies_dir.mkdir(parents=True, exist_ok=True)
     if has_rock_physics:
-        os.makedirs(ip_dir, exist_ok=True)
-        os.makedirs(is_dir, exist_ok=True)
-        os.makedirs(vpvs_dir, exist_ok=True)
-        os.makedirs(seismic_dir, exist_ok=True)
+        ip_dir.mkdir(parents=True, exist_ok=True)
+        is_dir.mkdir(parents=True, exist_ok=True)
+        vpvs_dir.mkdir(parents=True, exist_ok=True)
+        seismic_dir.mkdir(parents=True, exist_ok=True)
 
     # These are constant for the entire generation run — build once outside the loop
     if seen_indices:
@@ -158,10 +163,7 @@ def _generate_samples(
                     .astype(np.int64)
                 )
                 np.save(
-                    os.path.join(
-                        facies_dir,
-                        f"{DataFiles.FACIES.name.lower()}_{idx:04d}.npy",
-                    ),
+                    facies_dir / f"{DataFiles.FACIES.name.lower()}_{idx:04d}.npy",
                     facies_idx,
                 )
 
@@ -178,30 +180,25 @@ def _generate_samples(
 
                     # For disk saving, denormalize to actual physical units using centralized PhysicsState
                     phys_dict = model.physics_state.denormalize_rock_physics(rp_t)
-                    ip_phys = device_manager.to_numpy(phys_dict[DataFiles.Ip.name].squeeze(0))
-                    is_phys = device_manager.to_numpy(phys_dict[DataFiles.Is.name].squeeze(0))
-                    vpvs_phys = device_manager.to_numpy(phys_dict[DataFiles.VP_VS.name].squeeze(0))
+                    ip_phys = device_manager.to_numpy(
+                        phys_dict[DataFiles.Ip.name].squeeze(0)
+                    )
+                    is_phys = device_manager.to_numpy(
+                        phys_dict[DataFiles.Is.name].squeeze(0)
+                    )
+                    vpvs_phys = device_manager.to_numpy(
+                        phys_dict[DataFiles.VP_VS.name].squeeze(0)
+                    )
 
                     # Save as npy
                     np.save(
-                        os.path.join(
-                            ip_dir,
-                            f"{DataFiles.Ip.name.lower()}_{idx:04d}.npy",
-                        ),
-                        ip_phys,
+                        ip_dir / f"{DataFiles.Ip.name.lower()}_{idx:04d}.npy", ip_phys
                     )
                     np.save(
-                        os.path.join(
-                            is_dir,
-                            f"{DataFiles.Is.name.lower()}_{idx:04d}.npy",
-                        ),
-                        is_phys,
+                        is_dir / f"{DataFiles.Is.name.lower()}_{idx:04d}.npy", is_phys
                     )
                     np.save(
-                        os.path.join(
-                            vpvs_dir,
-                            f"{DataFiles.VP_VS.name.lower()}_{idx:04d}.npy",
-                        ),
+                        vpvs_dir / f"{DataFiles.VP_VS.name.lower()}_{idx:04d}.npy",
                         vpvs_phys,
                     )
 
@@ -209,10 +206,7 @@ def _generate_samples(
                     seismic: torch.Tensor = model.get_synthetic_seismic(g.unsqueeze(0))
                     all_seismic.append(device_manager.to_numpy(seismic.squeeze(0)))
                     np.save(
-                        os.path.join(
-                            seismic_dir,
-                            f"{DataFiles.SEISMIC.name.lower()}_{idx:04d}.npy",
-                        ),
+                        seismic_dir / f"{DataFiles.SEISMIC.name.lower()}_{idx:04d}.npy",
                         device_manager.to_numpy(seismic.squeeze(0)),
                     )
 

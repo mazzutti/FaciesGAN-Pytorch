@@ -1,17 +1,20 @@
 """Training orchestration for experiments."""
 
-import os
+import logging
 import subprocess
 import sys
+from pathlib import Path
 
 # Removed legacy constants import
 from config import CheckpointFilenames
 
+logger = logging.getLogger(__name__)
+
 
 def _has_resumable_scale_artifacts(variant_output: str, scale: int) -> bool:
     """Return True if a scale has real resume artifacts, not just an empty folder."""
-    scale_dir = os.path.join(variant_output, str(scale))
-    if not os.path.isdir(scale_dir):
+    scale_dir = Path(variant_output) / str(scale)
+    if not scale_dir.is_dir():
         return False
 
     required_any = (
@@ -20,7 +23,7 @@ def _has_resumable_scale_artifacts(variant_output: str, scale: int) -> bool:
         CheckpointFilenames.EPOCH_CKPT,
         CheckpointFilenames.COMPLETED_EPOCH,
     )
-    return any(os.path.isfile(os.path.join(scale_dir, f)) for f in required_any)
+    return any((scale_dir / f).is_file() for f in required_any)
 
 
 def find_last_completed_scale(variant_output: str) -> int:
@@ -38,10 +41,10 @@ def find_last_completed_scale(variant_output: str) -> int:
 
 def read_completed_epochs(variant_output: str, scale: int) -> int:
     """Read the number of completed epochs for a specific scale from disk."""
-    path = os.path.join(variant_output, str(scale), CheckpointFilenames.COMPLETED_EPOCH)
-    if os.path.isfile(path):
+    path = Path(variant_output) / str(scale) / CheckpointFilenames.COMPLETED_EPOCH
+    if path.is_file():
         try:
-            with open(path, "r") as f:
+            with path.open("r") as f:
                 return int(f.read().strip())
         except (ValueError, OSError):
             return 0

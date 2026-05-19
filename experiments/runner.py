@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import os
+import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -31,6 +32,8 @@ from .generation import generate_variant
 from .plotting import plot_method_all_variants, plot_sample_grid
 from .training import find_last_completed_scale, read_completed_epochs, train_variant
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class PlotData:
@@ -43,14 +46,19 @@ class PlotData:
 
 def _has_loadable_scale(model_path: str, max_scan: int = 64) -> bool:
     """Return True when at least one scale folder contains CheckpointFilenames.NOISE_AMP."""
+    model_root = Path(model_path)
     for scale in range(max_scan):
-        amp_path = os.path.join(model_path, str(scale), CheckpointFilenames.NOISE_AMP)
-        if os.path.isfile(amp_path):
+        amp_path = model_root / str(scale) / CheckpointFilenames.NOISE_AMP
+        if amp_path.is_file():
             return True
     return False
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s:%(name)s: %(message)s",
+    )
     parser = get_arguments()
     args = parser.parse_args(namespace=ExperimentOptions())
 
@@ -70,7 +78,7 @@ def main() -> None:
                 "(wells_seismic, wells_only, seismic_only, unconditional)."
             )
         for ev, path in zip(ExperimentVariant, args.model_paths):
-            if not os.path.isdir(path):
+            if not Path(path).is_dir():
                 parser.error(f"Model path does not exist: {path}")
             if not _has_loadable_scale(path):
                 parser.error(
@@ -84,17 +92,16 @@ def main() -> None:
         print("FACIESGAN CONDITIONING-ABLATION EXPERIMENTS")
         print("=" * 70)
         print(
-            f"Device: GPU {args.gpu_device} for generation/plotting "
-            f"(DDP training runs in subprocesses with {nproc} GPUs)"
+            f"Device: GPU {args.gpu_device} for generation/plotting (DDP training runs in subprocesses with {nproc} GPUs)"
         )
         print(f"compile_backend: {'ON' if args.compile_backend else 'OFF'}")
         print(f"Variants: {', '.join(ev.id for ev in ExperimentVariant)}")
-        print(f"Output:   {base_output}")
+        print(f"Output: {base_output}")
         print("=" * 70 + "\n")
 
         for ev in ExperimentVariant:
             name = ev.id
-            variant_output = os.path.join(base_output, name)
+            variant_output = str(Path(base_output) / name)
             utils.create_dirs(variant_output)
             wells_flag = "ON" if ev.value.use_wells else "OFF"
             seismic_flag = "ON" if ev.value.use_seismic else "OFF"
@@ -135,36 +142,37 @@ def main() -> None:
                 and effective_start_epoch >= args.num_iter
             ):
                 model_paths[name] = variant_output
-                print(f"\n{'─' * 60}")
+                print("\n" + "─" * 60)
                 print(
-                    f"Skipping variant: {name} "
-                    f"(fully trained — scale {effective_start_scale}, epoch {effective_start_epoch}/{args.num_iter})"
+                    f"Skipping variant: {name} (fully trained - scale {effective_start_scale}, epoch {effective_start_epoch}/{args.num_iter})"
                 )
-                print(f"  {variant_output}")
-                print(f"{'─' * 60}")
+                print(variant_output)
+                print("─" * 60)
                 continue
 
             # 3. Resume logic
             resume_scale = effective_start_scale
             resume_epoch = effective_start_epoch
 
-            print(f"\n{'─' * 60}")
+            print("\n" + "─" * 60)
             print(f"Training variant: {name}")
-            print(f"  wells={wells_flag}  seismic={seismic_flag}")
-
+            print(f"wells={wells_flag}  seismic={seismic_flag}")
+ 
             if resume_epoch > 0:
-                print(f"  Resuming from scale {resume_scale}, epoch {resume_epoch}")
+                print(
+                    f"Resuming from scale {resume_scale}, epoch {resume_epoch}"
+                )
             elif resume_scale > 0:
                 print(
-                    f"  Starting from scale {resume_scale} (scales 0-{resume_scale-1} already done)"
+                    f"Starting from scale {resume_scale} (scales 0-{resume_scale - 1} already done)"
                 )
             else:
-                print("  Starting training from scratch (scale 0, epoch 0)")
-
+                print("Starting training from scratch (scale 0, epoch 0)")
+ 
             print(
-                f"  DDP: {nproc} GPUs  compile_backend: {'ON' if args.compile_backend else 'OFF'}"
+                f"DDP: {nproc} GPUs  compile_backend: {'ON' if args.compile_backend else 'OFF'}"
             )
-            print(f"{'─' * 60}")
+            print("─" * 60)
 
             variant_args = build_training_args(
                 args, ev.value, variant_output, start_scale=resume_scale
@@ -177,7 +185,7 @@ def main() -> None:
 
             # --output-fullpath places artifacts directly in variant_output
             model_paths[name] = variant_output
-            print(f"  Training complete ({elapsed}) -> {variant_output}")
+            print(f"Training complete ({elapsed}) -> {variant_output}")
 
             # ── Load base options & dataset (needed for plots and embeddings) ──
             device_manager.initialize(gpu_id=args.gpu_device, use_cpu=args.use_cpu)
@@ -198,12 +206,12 @@ def main() -> None:
     # Scan scales from finest to coarsest to find the most recent seen_indices
     last_scale = find_last_completed_scale(first_model)
     for s in range(last_scale, -1, -1):
-        ckpt_path = os.path.join(first_model, str(s), CheckpointFilenames.EPOCH_CKPT)
-        if os.path.exists(ckpt_path):
+        ckpt_path = Path(first_model) / str(s) / CheckpointFilenames.EPOCH_CKPT
+        if ckpt_path.exists():
             try:
                 from training.checkpoint import Checkpoint
 
-                ckpt = Checkpoint.load(ckpt_path)
+                ckpt = Checkpoint.load(str(ckpt_path))
                 seen_indices_raw = ckpt.seen_indices
                 if seen_indices_raw:
                     # Type hint for the analyzer to understand the pair indexing
@@ -222,8 +230,10 @@ def main() -> None:
                         f"\n[INFO] Loaded {len(seen_indices)} seen indices from checkpoint."
                     )
                     break
-            except Exception as e:
-                print(f"Warning: Could not load seen indices from {ckpt_path}: {e}")
+            except Exception:
+                logger.warning(
+                    "Could not load seen indices from %s", ckpt_path, exc_info=True
+                )
 
     # Pre-build pyramids for generation once
     wells_pyramid, seismic_pyramid = build_conditioning_pyramids(_base_opts)
@@ -264,16 +274,16 @@ def main() -> None:
             cached = None
     if cached is None:
         # ── Generate facies (and rock_physics) from all trained models ──
-        print(f"\n{'=' * 70}")
+        print("\n" + "=" * 70)
         print("GENERATING FACIES FROM TRAINED MODELS")
-        print(f"{'=' * 70}\n")
+        print("=" * 70 + "\n")
 
         from models.utils import calculate_channels
 
         for ev in ExperimentVariant:
             name = ev.id
             model_path = model_paths[name]
-            gen_output = os.path.join(base_output, name, "generated")
+            gen_output = str(Path(base_output) / name / "generated")
 
             print(f"Generating from variant: {name}")
             print(f"  model: {model_path}")
@@ -349,9 +359,9 @@ def main() -> None:
     emb_data_kinds: list[str] = list(args.embedding_data or ["facies", "rock_physics"])
 
     # ── 1. Comparison Grids ────────────────────────────────────────────────
-    print(f"\n{'=' * 70}")
+    print("\n" + "=" * 70)
     print("GENERATING COMPARISON GRIDS")
-    print(f"{'=' * 70}")
+    print("=" * 70)
 
     import utils as _utils
 
@@ -397,7 +407,7 @@ def main() -> None:
     for p in plots:
         if not p.data_dict:
             continue
-        print(f"\n{'-' * 70}")
+        print("\n" + "-" * 70)
         print(f"Generating {p.kind} comparison grid...")
         plot_sample_grid(
             p.data_dict,
@@ -411,9 +421,9 @@ def main() -> None:
 
     # ── 2. Embedding Plots ────────────────────────────────────────────────
     if not args.no_embeddings:
-        print(f"\n{'=' * 70}")
+        print("\n" + "=" * 70)
         print("GENERATING EMBEDDING PLOTS")
-        print(f"{'=' * 70}")
+        print("=" * 70)
 
         emb_data_map: dict[
             str,
@@ -514,9 +524,9 @@ def main() -> None:
                 )
 
     total_elapsed = format_time(int(time.time() - total_start))
-    print(f"\n{'=' * 70}")
+    print("\n" + "=" * 70)
     print(f"ALL EXPERIMENTS COMPLETE  ({total_elapsed})")
-    print(f"{'=' * 70}\n")
+    print("=" * 70 + "\n")
     print(f"\nOutputs in: {base_output}")
     for ev in ExperimentVariant:
         print(f"  {ev.id}: {model_paths.get(ev.id, 'N/A')}")

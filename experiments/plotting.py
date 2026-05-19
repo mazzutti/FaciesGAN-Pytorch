@@ -1,7 +1,8 @@
 """Visualization logic for experiments."""
 
-import os
+import logging
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, cast
 
 import matplotlib
@@ -17,6 +18,8 @@ import utils
 from device import device_manager
 from enums import DataFiles, ExperimentVariant
 
+logger = logging.getLogger(__name__)
+
 
 def setup_imshow_for_kind(ax: Axes, img: np.ndarray, data_kind: str):
     """Helper to configure imshow with correct colormap and settings."""
@@ -25,7 +28,7 @@ def setup_imshow_for_kind(ax: Axes, img: np.ndarray, data_kind: str):
     if data_kind == DataFiles.SEISMIC.name.lower():
         kwargs["cmap"] = "RdBu"
         # A diverging colormap must be symmetrically centered around zero
-        # We subtract the mean (DC bias) to ensure that the "zero amplitude" 
+        # We subtract the mean (DC bias) to ensure that the "zero amplitude"
         # is perfectly centered at white, compensating for dataset asymmetry.
         img_plot = img - np.mean(img)
         p_lo = float(np.percentile(img_plot, 2))
@@ -54,7 +57,7 @@ def get_data_kind_suffix(data_kind: str) -> str:
 
 def get_gen_output_dir(base_output: str, variant_name: str) -> str:
     """Return the standard path for generated artifacts of a variant."""
-    return os.path.join(base_output, variant_name, "generated")
+    return str(Path(base_output) / variant_name / "generated")
 
 
 def facies_to_rgb_img(img_arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
@@ -111,7 +114,7 @@ def plot_sample_grid(
         v for v in ExperimentVariant if v.id in all_generated and all_generated[v.id]
     ]
     if not active_variants:
-        print(f"  No {data_kind} data available; skipping comparison grid.")
+        print(f"No {data_kind} data available; skipping comparison grid.")
         return
 
     # Use the first active variant to determine sample count and indices
@@ -119,7 +122,7 @@ def plot_sample_grid(
     available_samples = len(all_generated[ref_name])
     actual_num_samples = min(num_samples, available_samples)
     if real_samples is not None:
-        print(f"    [Debug] real_samples count: {len(real_samples)}")
+        print(f"real_samples count: {len(real_samples)}")
 
     # 1. Determine which generated indices to plot (Random selection)
     rng = np.random.RandomState(seed if seed is not None else 42)
@@ -167,15 +170,17 @@ def plot_sample_grid(
         # unique_conds was sorted, so we use it as the reference for 'Conditioning ID'
         cond_ids = [unique_conds.index(int(v)) for v in abs_vals]
 
-        print(f"    [Plot] Selection: {len(indices_to_plot)} samples")
-        print(f"    [Plot] Conditioning ID (0-{len(unique_conds)-1}): {cond_ids}")
+        print(f"[Plot] Selection: {len(indices_to_plot)} samples")
         print(
-            f"    [Plot] Realization ID (0-{available_samples-1}): {indices_to_plot.tolist()}"
+            f"[Plot] Conditioning ID (0-{len(unique_conds) - 1}): {cond_ids}"
         )
-        print(f"    [Plot] Absolute Dataset Index: {abs_vals}")
+        print(
+            f"[Plot] Realization ID (0-{available_samples - 1}): {indices_to_plot.tolist()}"
+        )
+        print(f"[Plot] Absolute Dataset Index: {abs_vals}")
     else:
         print(
-            f"    [Plot] Selection: {len(indices_to_plot)} samples at indices {indices_to_plot.tolist()}"
+            f"[Plot] Selection: {len(indices_to_plot)} samples at indices {indices_to_plot.tolist()}"
         )
 
     rows: List[Tuple[str, Optional[np.ndarray], List[np.ndarray]]] = []
@@ -194,7 +199,7 @@ def plot_sample_grid(
         elif real_samples is not None and s_idx < len(real_samples):
             # Fallback to direct indexing if mask info is missing
             real_img = real_samples[s_idx]
-            print(f"    [Debug] Row for s_idx={s_idx} uses fallback real_idx={s_idx}")
+            logger.debug("Row for s_idx=%s uses fallback real_idx=%s", s_idx, s_idx)
 
         # Convert Real to RGB if facies
         if data_kind == DataFiles.FACIES.name.lower():
@@ -215,7 +220,7 @@ def plot_sample_grid(
         rows.append((f"Sample {s_idx + 1}", real_img, variant_imgs))
 
     if not rows:
-        print(f"  No {data_kind} data available; skipping comparison grid.")
+        print(f"No {data_kind} data available; skipping comparison grid.")
         return
 
     # Columns: 1 (Real) + one for each active variant
@@ -259,10 +264,10 @@ def plot_sample_grid(
         f"Real vs Generated {kind_title} — All Variants", fontsize=14
     )
     fig.tight_layout()
-    out_path = os.path.join(base_output, f"{data_kind}_comparison_all_variants.png")
+    out_path = Path(base_output) / f"{data_kind}_comparison_all_variants.png"
     plt.savefig(out_path, dpi=150, bbox_inches="tight")  # type: ignore
     plt.close(fig)
-    print(f"  {kind_title} comparison grid -> {out_path}")
+    print(f"{kind_title} comparison grid -> {out_path}")
 
 
 def plot_per_variant_embedding(
@@ -321,12 +326,15 @@ def plot_combined_embeddings(
 
     plt.tight_layout()
     epoch_tag = f"_epoch{num_iter}" if num_iter > 0 else ""
-    combined_path = os.path.join(
-        base_output, f"{method}_{data_kind}_comparison_all_variants{epoch_tag}.png"
+    combined_path = (
+        Path(base_output)
+        / f"{method}_{data_kind}_comparison_all_variants{epoch_tag}.png"
     )
     plt.savefig(combined_path, dpi=150, bbox_inches="tight")  # type: ignore
     plt.close(fig)
-    print(f"  Combined {get_method_label(method)} {kind_title} grid -> {combined_path}")
+    print(
+        f"Combined {get_method_label(method)} {kind_title} grid -> {combined_path}"
+    )
 
 
 def plot_per_facies_embedding(
@@ -392,8 +400,8 @@ def save_per_facies_embeddings(
         unique_idxs = sorted(set(mi_list.tolist()))
 
         gen_output = get_gen_output_dir(base_output, name)
-        per_emb_dir = os.path.join(gen_output, f"per_{data_kind}_embeddings")
-        os.makedirs(per_emb_dir, exist_ok=True)
+        per_emb_dir = Path(gen_output) / f"per_{data_kind}_embeddings"
+        per_emb_dir.mkdir(parents=True, exist_ok=True)
 
         for method in methods:
             if method not in shared:
@@ -408,20 +416,19 @@ def save_per_facies_embeddings(
                 fake_for_idx = fake_all[mask]
                 if fake_for_idx.shape[0] == 0:
                     continue
-                save_path = os.path.join(
-                    per_emb_dir,
-                    f"{method}_{data_kind}_crossline_{idx:04d}.png",
+                save_path = (
+                    per_emb_dir / f"{method}_{data_kind}_crossline_{idx:04d}.png"
                 )
                 plot_per_facies_embedding(
                     method,
                     real_reduced,
                     fake_for_idx,
                     idx,
-                    save_path,
+                    str(save_path),
                     data_kind=data_kind,
                 )
         n_plots = len(unique_idxs) * len(methods)
-        print(f"      → Per-{data_kind} embeddings ({name}): {n_plots} plots")
+        print(f"Per-{data_kind} embeddings ({name}): {n_plots} plots")
 
 
 def plot_method_all_variants(
@@ -450,7 +457,7 @@ def plot_method_all_variants(
         if name not in per_variant_fakes:
             continue
         gen_output = get_gen_output_dir(base_output, name)
-        plot_path = os.path.join(gen_output, f"{method}{suffix}_comparison.png")
+        plot_path = str(Path(gen_output) / f"{method}{suffix}_comparison.png")
         plot_per_variant_embedding(
             method,
             real_reduced,
@@ -458,7 +465,9 @@ def plot_method_all_variants(
             plot_path,
             data_kind=data_kind,
         )
-        print(f"      → {variant.value.label} plot: {os.path.basename(plot_path)}")
+        print(
+            f"    {variant.value.label} plot: {Path(plot_path).name}"
+        )
 
     # 2. Combined 2×2 grid
     plot_combined_embeddings(
