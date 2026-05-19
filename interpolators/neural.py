@@ -121,9 +121,9 @@ class NeuralSmoother(BaseInterpolator):
                 fullgraph=True,
                 dynamic=True,
             )
-            logger.info("Model compiled with torch.compile()")
+            print("Model compiled with torch.compile()")
         except (AttributeError, RuntimeError, TypeError):
-            logger.info("torch.compile() not available or failed; continuing")
+            print("torch.compile() not available or failed; continuing")
 
     def _load_model(self, model_path: Path) -> None:
         """Orchestrate model compilation, optional restore, and optimizer setup.
@@ -156,7 +156,7 @@ class NeuralSmoother(BaseInterpolator):
             # If model expects prefixed keys but checkpoint doesn't, add prefix
             if any_prefixed(model_keys, prefix) and not any_prefixed(ck_keys, prefix):
                 ms = {f"{prefix}{k}": v for k, v in ms.items()}
-                logger.info(
+                print(
                     "Adjusted checkpoint keys: added _orig_mod. prefix to match compiled model"
                 )
             # If checkpoint has prefix but model does not, strip it
@@ -165,7 +165,7 @@ class NeuralSmoother(BaseInterpolator):
                     (k[len(prefix) :] if k.startswith(prefix) else k): v
                     for k, v in ms.items()
                 }
-                logger.info(
+                print(
                     "Adjusted checkpoint keys: removed _orig_mod. prefix to match model"
                 )
 
@@ -177,7 +177,7 @@ class NeuralSmoother(BaseInterpolator):
                     "Strict load_state_dict failed: %s; retrying with strict=False", exc
                 )
                 self.model.load_state_dict(ms, strict=False)  # type: ignore[arg-type]
-            logger.info(
+            print(
                 f"Loaded model checkpoint from {model_path}; skipping training."
             )
         else:
@@ -253,11 +253,11 @@ class NeuralSmoother(BaseInterpolator):
             optimizer.step()  # type: ignore
             scheduler.step()
             if (epoch + 1) % 500 == 0:
-                logger.info("  epoch %d/%d  loss=%.4f", epoch + 1, epochs, loss.item())
+                print(f"  epoch {epoch + 1}/{epochs}  loss={loss.item():.4f}")
 
         out_model_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"model_state": model.state_dict()}, str(out_model_path))
-        logger.info("Saved checkpoint to %s", out_model_path)
+        print(f"Saved checkpoint to {out_model_path}")
 
     @classmethod
     def from_state_dict(
@@ -422,7 +422,7 @@ class NeuralSmoother(BaseInterpolator):
         resolutions: tuple[tuple[int, ...], ...],
     ) -> list[torch.Tensor]:
         """Core rendering logic shared by ``interpolate`` and ``interpolate_from_array``."""
-        logger.info("Rendering facies pyramid...")
+        print("Rendering facies pyramid...")
         native_h, native_w = self.config.geometry
         upsample: int | tuple[int, int] = self.config.upsample
         if isinstance(upsample, tuple):

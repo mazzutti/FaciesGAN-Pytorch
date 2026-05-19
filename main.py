@@ -9,9 +9,8 @@ import atexit
 import json
 import logging
 import os
+from pathlib import Path
 import signal
-import sys
-import traceback
 import warnings
 from argparse import ArgumentParser
 from datetime import datetime
@@ -28,6 +27,8 @@ from device import device_manager
 from log import init_output_logging
 from options import TrainingOptions
 from training import Trainer
+
+logger = logging.getLogger(__name__)
 
 
 def _setup_environment() -> None:
@@ -70,7 +71,7 @@ def _setup_environment() -> None:
         try:
             torch._logging.set_logs(dynamo=logging.ERROR, inductor=logging.ERROR)  # type: ignore[attr-defined]
         except Exception:
-            pass
+            logger.debug("Unable to configure torch logging", exc_info=True)
 
 
 def _silence_resource_tracker() -> None:
@@ -88,7 +89,7 @@ def _silence_resource_tracker() -> None:
             os.close(_resource_tracker._fd)  # type: ignore[arg-type]
             _resource_tracker._fd = None  # type: ignore[assignment]
     except Exception:
-        pass
+        logger.debug("Failed silencing resource tracker", exc_info=True)
 
 
 atexit.register(_silence_resource_tracker)
@@ -187,17 +188,18 @@ def _setup_output_dir(options: TrainingOptions) -> None:
         options.output_path = options.output_fullpath
     else:
         timestamp = datetime.now(tz.tzlocal()).strftime("%Y_%m_%d_%H_%M_%S")
-        options.output_path = os.path.join(options.output_path, timestamp)
+        options.output_path = str(Path(options.output_path) / timestamp)
 
     if device_manager.is_main_process:
         utils.create_dirs(options.output_path)
 
         # Save the input parameters options
-        options_file = os.path.join(options.output_path, CheckpointFilenames.OPTIONS)
-        with open(options_file, "w") as file:
+        output_path = Path(options.output_path)
+        options_file = output_path / CheckpointFilenames.OPTIONS
+        with options_file.open("w") as file:
             json.dump(vars(options), file, indent=4)  # type: ignore
 
-        init_output_logging(os.path.join(options.output_path, "log.txt"))
+        init_output_logging(str(output_path / "log.txt"))
 
     # Synchronise so non-zero ranks wait for rank 0 to create output dir
     if device_manager.is_distributed:
@@ -225,20 +227,20 @@ def _tune_performance() -> None:
                 obj = getattr(obj, p)
             setattr(obj, parts[-1], True)
         except (AttributeError, Exception):
-            pass
+            logger.debug("Failed to tune backend attribute %s", attr, exc_info=True)
 
     # Use TF32 precision globally for matmuls (Ampere+ GPUs)
     try:
         torch.set_float32_matmul_precision("high")  # type: ignore
     except (AttributeError, Exception):
-        pass
+        logger.debug("Failed to set float32 matmul precision", exc_info=True)
 
     # Reasonable default for intra-op threads to avoid oversubscription
     try:
         cpu_threads = min(4, max(1, (os.cpu_count() or 1) // 2))
         torch.set_num_threads(cpu_threads)
     except Exception:
-        pass
+        logger.debug("Failed to set CPU thread count", exc_info=True)
 
 
 def _report_failure(exc: Exception) -> None:
@@ -246,33 +248,34 @@ def _report_failure(exc: Exception) -> None:
     rank_label = (
         f"[rank {device_manager.rank}] " if device_manager.is_distributed else ""
     )
-    print(
-        f"\n{rank_label}{'=' * 60}\n"
-        f"{rank_label}TRAINING FAILED — cleaning up\n"
-        f"{rank_label}{'=' * 60}",
-        file=sys.stderr,
+    logger.error(
+        "\n%s%s\n%sTRAINING FAILED - cleaning up\n%s%s",
+        rank_label,
+        "=" * 60,
+        rank_label,
+        rank_label,
+        "=" * 60,
     )
-    traceback.print_exc(file=sys.stderr)
+    logger.exception("Unhandled exception during training")
 
     # Surface CUDA memory stats when the failure looks like OOM.
     if torch.cuda.is_available():
         try:
             dev = device_manager.device
-            alloc = torch.cuda.memory_allocated(dev) / (1024**3)
-            reserved = torch.cuda.memory_reserved(dev) / (1024**3)
-            peak = torch.cuda.max_memory_allocated(dev) / (1024**3)
-            total = torch.cuda.get_device_properties(dev).total_memory / (1024**3)  # type: ignore
-            print(
-                f"{rank_label}CUDA memory: "
-                f"alloc={alloc:.2f}G  reserved={reserved:.2f}G  "
-                f"peak={peak:.2f}G  total={total:.2f}G",
-                file=sys.stderr,
+            alloc = float(torch.cuda.memory_allocated(dev) / (1024**3))
+            reserved = float(torch.cuda.memory_reserved(dev) / (1024**3))
+            peak = float(torch.cuda.max_memory_allocated(dev) / (1024**3))
+            total = float(torch.cuda.get_device_properties(dev).total_memory / (1024**3))  # type: ignore
+            logger.error(
+                "%sCUDA memory: alloc=%.2fG  reserved=%.2fG  peak=%.2fG  total=%.2fG",
+                rank_label,
+                alloc,
+                reserved,
+                peak,
+                total,
             )
         except Exception:
-            pass
-
-    sys.stderr.flush()
-    sys.stdout.flush()
+            logger.debug("Failed collecting CUDA failure stats", exc_info=True)
 
 
 def main() -> None:
@@ -294,6 +297,13 @@ def main() -> None:
         manual_seed=options.manual_seed,
     )
 
+    # Ensure logger prints INFO+ to the console by default so user-facing
+    # informational messages (tables, progress, etc.) remain visible.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s:%(name)s: %(message)s",
+    )
+
     # 3. Output directory and logging
     _setup_output_dir(options)
 
@@ -305,7 +315,9 @@ def main() -> None:
         if device_manager.is_distributed:
             world_size = device_manager.world_size
             print(f"DDP training: {world_size} processes")
-        print(f"Training scales: {options.start_scale} to {options.stop_scale}")
+        print(
+            f"Training scales: {options.start_scale} to {options.stop_scale}"
+        )
         print(f"Output path: {options.output_path}")
         print("=" * 60 + "\n")
 
@@ -320,11 +332,11 @@ def main() -> None:
         # Load Inductor cache artifacts
         if getattr(options, "compile_backend", False):
             try:
-                cache_path = os.path.join(options.output_path, "inductor_cache.bin")
-                if os.path.isfile(cache_path):
+                cache_path = Path(options.output_path) / "inductor_cache.bin"
+                if cache_path.is_file():
                     torch.compiler.load_cache_artifacts(cache_path)  # type: ignore
             except Exception:
-                pass
+                logger.debug("Failed to load inductor cache artifacts", exc_info=True)
 
         # Resume from checkpoint
         if options.start_scale > 0:
@@ -337,7 +349,7 @@ def main() -> None:
         if getattr(options, "use_profiler", False):
             from torch.profiler import ProfilerActivity, profile
 
-            trace_file = os.path.join(options.output_path, "profiler_trace.json")
+            trace_file = str(Path(options.output_path) / "profiler_trace.json")
             activities = [ProfilerActivity.CPU]
             if torch.cuda.is_available():
                 activities.append(ProfilerActivity.CUDA)
@@ -350,7 +362,7 @@ def main() -> None:
                 prof.export_chrome_trace(trace_file)
                 print(f"Profiler trace saved to: {trace_file}")
             except Exception:
-                pass
+                logger.debug("Failed exporting profiler trace", exc_info=True)
         else:
             trainer.train()
 
@@ -361,7 +373,7 @@ def main() -> None:
         if device_manager.is_distributed:
             device_manager.synchronize()
             os._exit(1)
-        raise e
+        raise
 
     finally:
         # Background worker and DDP teardown
@@ -372,7 +384,7 @@ def main() -> None:
             bw.wait_pending(timeout=120.0)
             bw.shutdown(wait=False)
         except Exception:
-            pass
+            logger.debug("Background worker shutdown failed", exc_info=True)
 
         if device_manager.is_distributed:
             try:
@@ -390,7 +402,7 @@ def main() -> None:
                     dist.barrier()  # type: ignore
                 dist.destroy_process_group()
             except Exception:
-                pass
+                logger.debug("Distributed cleanup failed", exc_info=True)
 
             # Final process cleanup
             try:
@@ -398,7 +410,7 @@ def main() -> None:
 
                 atexit.unregister(shutdown_compile_workers)
             except Exception:
-                pass
+                logger.debug("Failed to unregister compile workers", exc_info=True)
             _kill_child_processes()
 
     if device_manager.is_main_process:
@@ -411,7 +423,7 @@ def main() -> None:
         try:
             torch.compiler.save_cache_artifacts()
         except Exception:
-            pass
+            logger.debug("Failed saving inductor cache artifacts", exc_info=True)
 
 
 if __name__ == "__main__":

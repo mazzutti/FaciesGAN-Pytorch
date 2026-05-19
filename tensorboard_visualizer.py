@@ -7,8 +7,10 @@ Much more responsive than matplotlib with better interactivity.
 from __future__ import annotations
 
 # pyright: reportUnknownMemberType=false
+import logging
 import os
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import matplotlib.cm as cm
@@ -27,6 +29,9 @@ from physics.seismic import calculate_synthetic_seismic
 if TYPE_CHECKING:
     from physics.physics import PhysicsState
     from training.metrics import ScaleMetrics
+
+
+logger = logging.getLogger(__name__)
 
 
 class TensorBoardVisualizer:
@@ -101,7 +106,7 @@ class TensorBoardVisualizer:
 
         # Setup TensorBoard logging
         if not log_dir:
-            log_dir = os.path.join(output_dir, DirectoryConfig.TENSORBOARD_LOGS)
+            log_dir = str(Path(output_dir) / DirectoryConfig.TENSORBOARD_LOGS)
 
         # Ensure directories exist; guard against empty strings and race conditions.
         if log_dir:
@@ -123,8 +128,8 @@ class TensorBoardVisualizer:
             "Training/Scales", f"Training {num_scales} scales in parallel", 0
         )
 
-        print(f"✅ TensorBoard initialized.")
-        print(f"   tensorboard --logdir={log_dir} --port=6006 --bind_all")
+        print("TensorBoard initialized.")
+        print(f"tensorboard --logdir={log_dir} --port=6006 --bind_all")
 
     def update(
         self,
@@ -270,18 +275,17 @@ class TensorBoardVisualizer:
                     # Also save to disk
                     try:
                         # Organize by scale
-                        scale_dir = os.path.join(self.output_dir, f"Scale_{scale}")
-                        os.makedirs(scale_dir, exist_ok=True)
+                        scale_dir = Path(self.output_dir) / f"Scale_{scale}"
+                        scale_dir.mkdir(parents=True, exist_ok=True)
 
-                        out_path = os.path.join(
-                            scale_dir, f"Facies_epoch_{epoch:05d}.png"
-                        )
+                        out_path = scale_dir / f"Facies_epoch_{epoch:05d}.png"
                         # facies_rgb_chw is already a numpy array (3, H, W) from utils.facies_to_rgb
                         rgb_hwc = facies_rgb_chw.transpose(1, 2, 0)
-                        submit_save_image(rgb_hwc, out_path)
-                    except Exception as e:
-                        print(
-                            f"Warning: Could not submit facies image for background save: {e}"
+                        submit_save_image(rgb_hwc, str(out_path))
+                    except Exception:
+                        logger.warning(
+                            "Could not submit facies image for background save",
+                            exc_info=True,
                         )
 
                 if rp_img is not None and self.physics_state is not None:
@@ -419,7 +423,7 @@ class TensorBoardVisualizer:
 
         # Remove DC bias so the zero amplitude is perfectly centered
         synth_np = synth_np - np.mean(synth_np)
-        
+
         # Symmetric stretch around zero — 2nd/98th percentile gives robustness
         # against outliers while fully utilising the diverging colour range.
         p_lo = float(np.percentile(synth_np, 2))
@@ -456,16 +460,19 @@ class TensorBoardVisualizer:
             scale_name = parts[1] if len(parts) > 1 else "Global"
 
             # Create scale-specific directory
-            scale_dir = os.path.join(self.output_dir, scale_name)
-            os.makedirs(scale_dir, exist_ok=True)
+            scale_dir = Path(self.output_dir) / scale_name
+            scale_dir.mkdir(parents=True, exist_ok=True)
 
-            out_path = os.path.join(scale_dir, f"{category}_epoch_{epoch:05d}.png")
+            out_path = scale_dir / f"{category}_epoch_{epoch:05d}.png"
 
             # Offload to background thread
-            submit_save_image(rgb_hwc, out_path)
-        except Exception as e:
+            submit_save_image(rgb_hwc, str(out_path))
+        except Exception:
             # Don't crash training if image saving fails
-            print(f"Warning: Could not submit visualization for background save: {e}")
+            logger.warning(
+                "Could not submit visualization for background save",
+                exc_info=True,
+            )
 
     def close(self):
         """Close the TensorBoard writer."""

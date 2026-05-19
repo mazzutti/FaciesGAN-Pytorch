@@ -369,13 +369,11 @@ def compute_shared_embeddings(
     # - Dynamic parameter selection for UMAP/TSNE/Isomap based on sample count
     # - Run methods in parallel using threads to avoid multiprocessing deadlocks
     n_samples = all_data.shape[0]
-    logger.info(
-        "Fitting %s methods in parallel on %s samples:",
-        len(methods),
-        n_samples,
+    print(
+        f"Fitting {len(methods)} methods in parallel on {n_samples} samples:"
     )
     for m in methods:
-        logger.info(" -> %s ...", m.upper())
+        print(f" -> {m.upper()} ...")
 
     # PCA init for MDS (deterministic seed chosen to match remote script)
     pca_init = PCA(n_components=2, random_state=3).fit_transform(all_data)

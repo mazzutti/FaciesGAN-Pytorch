@@ -1,4 +1,5 @@
 import argparse
+import logging
 import json
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from matplotlib.image import imread
 
 # Use relative imports if needed, but since this is usually run as a script:
 from config import DirectoryConfig
+
+logger = logging.getLogger(__name__)
 
 VARIANTS = ["wells_seismic", "wells_only", "seismic_only", "unconditional"]
 VARIANT_LABELS = {

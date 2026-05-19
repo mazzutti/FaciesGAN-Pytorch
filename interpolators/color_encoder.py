@@ -65,7 +65,7 @@ class ColorEncoder:
             self.palette_tensor = torch.tensor(self.palette, dtype=torch.float32).to(
                 self.device
             )
-        logger.info(f"Detected {self.num_classes} unique facies classes.")
+        print(f"Detected {self.num_classes} unique facies classes.")
 
     def rgb_to_labels(self, img_tensor: torch.Tensor) -> torch.Tensor:
         """Convert an RGB tensor to label indices using the encoder palette.
@@ -121,6 +121,6 @@ class ColorEncoder:
             rounded = device_manager.to_numpy(weights).round(2).astype(float).tolist()
         except (RuntimeError, TypeError, ValueError):
             rounded = [float(x) for x in device_manager.to_cpu(weights).reshape(-1)]
-        logger.info(f"Auto-calculated Class Weights: {rounded}")
+        print(f"Auto-calculated Class Weights: {rounded}")
 
         return weights.to(self.device).float()

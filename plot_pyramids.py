@@ -1,4 +1,5 @@
-import os
+import logging
+from pathlib import Path
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
@@ -9,6 +10,8 @@ from datasets.dataset import PyramidsDataset
 from device import device_manager
 from models.palette import PALETTE_RGB
 from options import TrainingOptions
+
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -60,7 +63,7 @@ def main():
         f_idx = utils.rgb_to_facies(f_rgb)
 
         print(
-            f"Scale {scale} Facies raw range (normalized): [{f.min():.4f}, {f.max():.4f}]"
+            f"Scale {scale} Facies raw range (normalized): [{float(f.min()):.4f}, {float(f.max()):.4f}]"
         )
         # facies_to_rgb maps back to RGB [0,1] using PALETTE_RGB
         ax.imshow(utils.facies_to_rgb(f_idx).transpose(1, 2, 0))
@@ -71,7 +74,7 @@ def main():
         ax = axes[scale, 1]
         if ip is not None:
             print(
-                f"Scale {scale} Ip range (normalized): [{ip.min():.4f}, {ip.max():.4f}]"
+                f"Scale {scale} Ip range (normalized): [{float(ip.min()):.4f}, {float(ip.max()):.4f}]"
             )
             ax.imshow(ip, cmap="magma")
         ax.set_title(f"Scale {scale} Ip")
@@ -81,7 +84,7 @@ def main():
         ax = axes[scale, 2]
         if is_ is not None:
             print(
-                f"Scale {scale} Is range (normalized): [{is_.min():.4f}, {is_.max():.4f}]"
+                f"Scale {scale} Is range (normalized): [{float(is_.min()):.4f}, {float(is_.max()):.4f}]"
             )
             ax.imshow(is_, cmap="magma")
         ax.set_title(f"Scale {scale} Is")
@@ -91,7 +94,7 @@ def main():
         ax = axes[scale, 3]
         if vpvs is not None:
             print(
-                f"Scale {scale} Vp/Vs range (normalized): [{vpvs.min():.4f}, {vpvs.max():.4f}]"
+                f"Scale {scale} Vp/Vs range (normalized): [{float(vpvs.min()):.4f}, {float(vpvs.max()):.4f}]"
             )
             ax.imshow(vpvs, cmap="viridis")
         ax.set_title(f"Scale {scale} Vp/Vs")
@@ -101,7 +104,7 @@ def main():
         ax = axes[scale, 4]
         if w is not None:
             print(
-                f"Scale {scale} Wells raw range (normalized): [{w.min():.4f}, {w.max():.4f}]"
+                f"Scale {scale} Wells raw range (normalized): [{float(w.min()):.4f}, {float(w.max()):.4f}]"
             )
             well_cmap = mcolors.ListedColormap(PALETTE_RGB)
             w_plot = w  # (3, H, W) RGB
@@ -116,7 +119,7 @@ def main():
         ax = axes[scale, 5]
         if s is not None:
             print(
-                f"Scale {scale} Seismic range (normalized): [{s.min():.4f}, {s.max():.4f}]"
+                f"Scale {scale} Seismic range (normalized): [{float(s.min()):.4f}, {float(s.max()):.4f}]"
             )
             s_np = s[0].numpy() if s.ndim == 3 else s.numpy()
 
@@ -132,12 +135,12 @@ def main():
         ax.axis("off")
 
     plt.tight_layout()
-    out_dir = "outputs"
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "pyramid_verification.png")
+    out_dir = Path("outputs")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "pyramid_verification.png"
     plt.savefig(out_path, dpi=150)  # type: ignore
     plt.close()
-    print(f"✅ Pyramid verification plot saved to {out_path}")
+    print(f"Pyramid verification plot saved to {out_path}")
 
 
 if __name__ == "__main__":

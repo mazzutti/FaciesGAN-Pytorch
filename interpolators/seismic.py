@@ -83,7 +83,7 @@ class SeismicInterpolator(BaseInterpolator):
 
         smooth_seismic: list[torch.Tensor] = []
 
-        logger.info("Rendering with Lanczos seismic interpolation and blur...")
+        print("Rendering with Lanczos seismic interpolation and blur...")
 
         for _, resolution in enumerate(resolutions):
             if self.config.channels_last:

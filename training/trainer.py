@@ -17,10 +17,12 @@ Notes
 from __future__ import annotations
 
 import math
+from pathlib import Path
 import os
 import sys
 import threading
 import time
+import logging
 from collections.abc import Iterator
 from typing import IO, Any, cast
 
@@ -59,6 +61,9 @@ from training.metrics import (
     compute_masked_loss,
 )
 from typedefs import Batch, IDataLoader, PyramidsBatch, RawBatch
+
+# Module logger
+logger = logging.getLogger(__name__)
 
 
 class DummyProgress:
@@ -211,8 +216,8 @@ class Trainer:
         self.enable_tensorboard = options.enable_tensorboard
         self.enable_plot_outputs = options.enable_plot_outputs
         if self.enable_tensorboard and device_manager.is_main_process:
-            viz_path = os.path.join(self.output_path, "training_visualizations")
-            log_dir = os.path.join(self.output_path, "tensorboard_logs")
+            viz_path = str(Path(self.output_path) / "training_visualizations")
+            log_dir = str(Path(self.output_path) / "tensorboard_logs")
             dataset_info = f"{len(self.dataset)} pyramids, {self.batch_size} batch size"
             if len(options.wells_mask_columns) > 0:
                 dataset_info += f", wells: {options.wells_mask_columns}"
@@ -380,14 +385,14 @@ class Trainer:
         if device_manager.is_main_process:
             # Force the compilation bar to finish cleanly if it hasn't reached 100% yet
             unwrap_ddp(self.model).finish_compile_progress()  # type: ignore
-            print("  [warmup] JIT compilation traces completed.\n")
+            print("  [warmup] JIT compilation traces completed.")
 
     def _ddp_barrier(self) -> None:
         """Synchronize DDP ranks via NCCL barrier."""
         if device_manager.is_distributed and dist.is_initialized():
             dist.barrier()  # type: ignore
 
-    def create_dataloader(self) -> IDataLoader:
+    def create_dataloader(self) -> DataLoader[RawBatch]:
         sampler: DistributedSampler[RawBatch] | None = None
         do_shuffle = getattr(self.options, "shuffle", True)
         shuffle = False
@@ -623,7 +628,7 @@ class Trainer:
 
         return dataset, dataset.scales
 
-    def load_model(self, scale: int) -> None:
+    def load_model(self, scale: int, strict: bool = False) -> None:
         """Load generator and discriminator state dicts for a specific scale.
 
         Parameters
@@ -632,20 +637,30 @@ class Trainer:
             Scale index to load models for.
         """
         try:
-            generator_path = os.path.join(
-                str(self.checkpoint_path), str(scale), CheckpointFilenames.GENERATOR
+            generator_path = (
+                Path(self.checkpoint_path) / str(scale) / CheckpointFilenames.GENERATOR
             )
-            discriminator_path = os.path.join(
-                str(self.checkpoint_path), str(scale), CheckpointFilenames.DISCRIMINATOR
+            discriminator_path = (
+                Path(self.checkpoint_path)
+                / str(scale)
+                / CheckpointFilenames.DISCRIMINATOR
             )
 
             gen = unwrap_ddp(self.model.generator.gens[scale])
-            gen.load_state_dict(model_utils.load(generator_path))
+            gen.load_state_dict(model_utils.load(str(generator_path)))
             disc = unwrap_ddp(self.model.discriminator.discs[scale])
-            disc.load_state_dict(model_utils.load(discriminator_path))
+            disc.load_state_dict(model_utils.load(str(discriminator_path)))
         except (FileNotFoundError, RuntimeError, KeyError, ValueError, OSError) as e:
-            print(f"Error loading models from {self.checkpoint_path}/{scale}: {e}")
-            raise
+            logger.exception(
+                "Error loading models from %s/%s: %s", self.checkpoint_path, scale, e
+            )
+            if strict:
+                raise
+            logger.warning(
+                "Continuing despite failed model load for scale %s (strict=False)",
+                scale,
+            )
+            return
 
     def load_optimizers(
         self,
@@ -678,19 +693,19 @@ class Trainer:
         """
         try:
             generator_optimizer.load_state_dict(
-                model_utils.load(os.path.join(scale_path, CheckpointFilenames.OPT_G))
+                model_utils.load(str(Path(scale_path) / CheckpointFilenames.OPT_G))
             )
             discriminator_optimizer.load_state_dict(
-                model_utils.load(os.path.join(scale_path, CheckpointFilenames.OPT_D))
+                model_utils.load(str(Path(scale_path) / CheckpointFilenames.OPT_D))
             )
             generator_scheduler.load_state_dict(
-                model_utils.load(os.path.join(scale_path, CheckpointFilenames.SCH_G))
+                model_utils.load(str(Path(scale_path) / CheckpointFilenames.SCH_G))
             )
             discriminator_scheduler.load_state_dict(
-                model_utils.load(os.path.join(scale_path, CheckpointFilenames.SCH_D))
+                model_utils.load(str(Path(scale_path) / CheckpointFilenames.SCH_D))
             )
         except (FileNotFoundError, RuntimeError, KeyError, ValueError, OSError) as e:
-            print(f"Warning: Could not load optimizers for scale {scale}: {e}")
+            logger.warning("Could not load optimizers for scale %s: %s", scale, e)
 
     def create_batch_iterator(
         self, loader: IDataLoader, scales: tuple[int, ...]
@@ -887,7 +902,9 @@ class Trainer:
                         f"[diagnostic] Scale_{scale} VP_VS real      range: [{lo_r:.6f}, {hi_r:.6f}] mean={mean_r:.6f}"
                     )
                 except Exception as _e:
-                    print(f"[diagnostic] Could not compute VP/VS numeric summary: {_e}")
+                    logger.exception(
+                        "[diagnostic] Could not compute VP/VS numeric summary: %s", _e
+                    )
                 bw.submit_plot_generated_outputs(
                     utils.torch2np(
                         rp_cpu[:, :, 2:3, ...].clamp(lo, hi),
@@ -923,10 +940,8 @@ class Trainer:
                 betas=(self.beta1, 0.999),
                 set_grad_none=True,
             )
-            self.discriminator_schedulers[scale] = torch.optim.lr_scheduler.StepLR(
-                self.discriminator_optimizers[scale],
-                step_size=self.lr_decay,
-                gamma=self.gamma,
+            self.discriminator_schedulers[scale] = self._make_discriminator_scheduler(
+                self.discriminator_optimizers[scale]
             )
 
             self.generator_optimizers[scale] = FusedAdam(
@@ -935,16 +950,8 @@ class Trainer:
                 betas=(self.beta1, 0.999),
                 set_grad_none=True,
             )
-
-            self.generator_schedulers[scale] = (
-                torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    self.generator_optimizers[scale],
-                    mode="min",
-                    factor=self.options.lr_g_factor,
-                    patience=self.options.lr_patience,
-                    min_lr=self.options.lr_min,
-                    threshold=1e-4,
-                )
+            self.generator_schedulers[scale] = self._make_generator_scheduler(
+                self.generator_optimizers[scale]
             )
 
     def reset_schedulers(self, scales: tuple[int, ...]) -> None:
@@ -963,24 +970,34 @@ class Trainer:
             for pg in self.discriminator_optimizers[scale].param_groups:
                 pg["lr"] = self.lr_d
 
-            self.generator_schedulers[scale] = (
-                torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    self.generator_optimizers[scale],
-                    mode="min",
-                    factor=self.options.lr_g_factor,
-                    patience=self.options.lr_patience,
-                    min_lr=self.options.lr_min,
-                    threshold=1e-4,
-                )
+            self.generator_schedulers[scale] = self._make_generator_scheduler(
+                self.generator_optimizers[scale]
             )
-            self.discriminator_schedulers[scale] = torch.optim.lr_scheduler.StepLR(
-                self.discriminator_optimizers[scale],
-                step_size=self.lr_decay,
-                gamma=self.gamma,
+            self.discriminator_schedulers[scale] = self._make_discriminator_scheduler(
+                self.discriminator_optimizers[scale]
             )
             # Reset the smoother for this scale so it starts fresh
             if scale in self._g_loss_smoother:
                 self._g_loss_smoother[scale].reset()
+
+    def _make_discriminator_scheduler(
+        self, optimizer: torch.optim.Optimizer
+    ) -> LRScheduler:
+        return torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=self.lr_decay, gamma=self.gamma
+        )
+
+    def _make_generator_scheduler(
+        self, optimizer: torch.optim.Optimizer
+    ) -> LRScheduler:
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=self.options.lr_g_factor,
+            patience=self.options.lr_patience,
+            min_lr=self.options.lr_min,
+            threshold=1e-4,
+        )
 
     @staticmethod
     def save_optimizers(
@@ -1008,19 +1025,19 @@ class Trainer:
         os.makedirs(scale_path, exist_ok=True)
         torch.save(
             generator_optimizer.state_dict(),
-            os.path.join(scale_path, CheckpointFilenames.OPT_G),
+            str(Path(scale_path) / CheckpointFilenames.OPT_G),
         )
         torch.save(
             discriminator_optimizer.state_dict(),
-            os.path.join(scale_path, CheckpointFilenames.OPT_D),
+            str(Path(scale_path) / CheckpointFilenames.OPT_D),
         )
         torch.save(
             generator_scheduler.state_dict(),
-            os.path.join(scale_path, CheckpointFilenames.SCH_G),
+            str(Path(scale_path) / CheckpointFilenames.SCH_G),
         )
         torch.save(
             discriminator_scheduler.state_dict(),
-            os.path.join(scale_path, CheckpointFilenames.SCH_D),
+            str(Path(scale_path) / CheckpointFilenames.SCH_D),
         )
 
     def save_progress(
@@ -1049,10 +1066,9 @@ class Trainer:
                 self.discriminator_schedulers[s],
             )
             # Record the actual next completed epoch
-            meta_path = os.path.join(
-                scale_paths[s], CheckpointFilenames.COMPLETED_EPOCH
-            )
-            with open(meta_path, "w") as f:
+            meta_path = Path(scale_paths[s]) / CheckpointFilenames.COMPLETED_EPOCH
+            meta_path.parent.mkdir(parents=True, exist_ok=True)
+            with meta_path.open("w") as f:
                 f.write(str(next_epoch))
 
         # Save the monolithic epoch checkpoint
@@ -1107,33 +1123,27 @@ class Trainer:
         )
 
         # Save into the first scale's directory (arbitrary but deterministic)
-        ckpt_path = os.path.join(
-            scale_paths[min(scales)], CheckpointFilenames.EPOCH_CKPT
-        )
-        os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
-        import sys
-
+        ckpt_path = Path(scale_paths[min(scales)]) / CheckpointFilenames.EPOCH_CKPT
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
         print(
-            f"\n  Saving epoch checkpoint at epoch {epoch} (batch {batch_id})...",
-            end="",
-            flush=True,
+            f"Saving epoch checkpoint at epoch {epoch} (batch {batch_id})..."
         )
         try:
-            torch.save(checkpoint.to_dict(), ckpt_path)
-            print(" done.")
+            torch.save(checkpoint.to_dict(), str(ckpt_path))
+            print(f"Epoch checkpoint saved: {ckpt_path}")
         except Exception as e:
-            print(f" failed: {e}", file=sys.stderr)
+            logger.exception("Failed saving epoch checkpoint: %s", e)
 
     def load_epoch_checkpoint(
         self, scales: tuple[int, ...], scale_paths: dict[int, str]
     ) -> tuple[int, int]:
         """Restore training state from a saved epoch checkpoint."""
         anchor_scale = min(scales)
-        checkpoint_path = os.path.join(
-            scale_paths[anchor_scale], CheckpointFilenames.EPOCH_CKPT
+        checkpoint_path = str(
+            Path(scale_paths[anchor_scale]) / CheckpointFilenames.EPOCH_CKPT
         )
 
-        if not os.path.isfile(checkpoint_path):
+        if not Path(checkpoint_path).is_file():
             return 0, 0
 
         # 1. Load Checkpoint
@@ -1208,7 +1218,7 @@ class Trainer:
             try:
                 self.model.grad_scaler_g.load_state_dict(ckpt.grad_scaler_g)
             except Exception:
-                pass
+                logger.debug("Failed restoring grad_scaler_g state", exc_info=True)
 
         # 4. Restore RNG States
         device_manager.set_rng_state_dict(ckpt.rng_state)
@@ -1466,9 +1476,9 @@ class Trainer:
 
             scales_to_train = tuple(range(scale, scale + num_scales_in_group))
             if device_manager.is_main_process:
-                print(f"\n{'=' * 60}")
+                print("\n" + "=" * 60)
                 print(f"Training scales {scales_to_train} in parallel")
-                print(f"{'=' * 60}\n")
+                print("=" * 60 + "\n")
 
             group_start_time = time.time()
 
@@ -1504,10 +1514,10 @@ class Trainer:
 
             # Create directories for all scales (use dict to map scale -> path)
             scale_paths: dict[int, str] = {
-                s: os.path.join(self.output_path, str(s)) for s in scales_to_train
+                s: str(Path(self.output_path) / str(s)) for s in scales_to_train
             }
             outputs_paths: dict[int, str] = {
-                s: os.path.join(scale_paths[s], ExperimentPaths.FACIES)
+                s: str(Path(scale_paths[s]) / ExperimentPaths.FACIES)
                 for s in scales_to_train
             }
 
@@ -1561,18 +1571,17 @@ class Trainer:
                 if device_manager.is_main_process:
                     resume_step = resume_epoch * len(self.data_loader) + resume_batch_id
                     print(
-                        f"Epoch checkpoint loaded: resuming from batch {resume_batch_id}, "
-                        f"epoch {resume_epoch}, step {resume_step}"
+                        f"Epoch checkpoint loaded: resuming from batch {resume_batch_id}, epoch {resume_epoch}, step {resume_step}"
                     )
             if resume_batch_id > 0:
                 # Optional: Verify or override base_epoch from completed_epoch.txt
 
-                meta_path = os.path.join(
-                    scale_paths[min(scales_to_train)],
-                    CheckpointFilenames.COMPLETED_EPOCH,
+                meta_path = (
+                    Path(scale_paths[min(scales_to_train)])
+                    / CheckpointFilenames.COMPLETED_EPOCH
                 )
-                if os.path.isfile(meta_path):
-                    with open(meta_path) as f:
+                if meta_path.is_file():
+                    with meta_path.open() as f:
                         # The file contains the last FULLY completed epoch.
                         # We want to start the next iteration at base_epoch + 1
                         # if the checkpoint and file are consistent.
@@ -1597,9 +1606,9 @@ class Trainer:
                     try:
                         self.visualizer.close()
                     except Exception:
-                        pass
+                        logger.debug("Visualizer close failed", exc_info=True)
                     self.visualizer.writer = SummaryWriter(
-                        log_dir=os.path.join(self.output_path, "tensorboard_logs"),
+                        log_dir=str(Path(self.output_path) / "tensorboard_logs"),
                         purge_step=_purge,
                     )
             progress_total = self._num_passes * total_batches
@@ -1766,7 +1775,9 @@ class Trainer:
 
                     BackgroundWorker().wait_pending()
                 except Exception:
-                    pass
+                    logger.debug(
+                        "BackgroundWorker.wait_pending() failed", exc_info=True
+                    )
 
             # Synchronise so non-zero ranks wait for rank 0 to finish
             # saving before proceeding to the next scale group (or to
@@ -1792,15 +1803,14 @@ class Trainer:
             group_end_time = time.time()
             elapsed = log.format_time(int(group_end_time - group_start_time))
             if device_manager.is_main_process:
-                print(f"\nScales {scales_to_train} training time: {elapsed}")
+                print(f"Scales {scales_to_train} training time: {elapsed}")
 
             scale += num_scales_in_group
 
         end_train_time = time.time()
         if device_manager.is_main_process:
             print(
-                "\nTotal training time:",
-                log.format_time(int(end_train_time - start_train_time)),
+                f"Total training time: {log.format_time(int(end_train_time - start_train_time))}"
             )
 
         # Close TensorBoard writer
@@ -2151,11 +2161,13 @@ class Trainer:
                 g, d, _cached=(_cached_floats or {}).get(scale)
             )
 
-            sm = self._table_smoother[scale]
-            v = []
+            sm: list[MetricSmoother] = self._table_smoother[scale]
+            v: list[float] = []
             for i in range(13):
                 if i == 12 and raw[i] == 0.0:
-                    v.append(sm[i].value if sm[i].value is not None else 0.0)
+                    v.append(
+                        cast(float, sm[i].value) if sm[i].value is not None else 0.0
+                    )
                 else:
                     v.append(sm[i].update(raw[i]))
             cached_v.append(v)
@@ -2188,7 +2200,9 @@ class Trainer:
                 )
             )
         lines.append("  └" + "─" * 59 + "┘")
-        print("\n".join(lines), flush=True)
+        # Use plain print so the loss table is always shown on stdout
+        # (user preference) rather than relying on logging configuration.
+        print("\n".join(lines))
 
     def _print_facie_shapes_table(self) -> None:
         """Print an ASCII table of the generated facies dimensions across scales."""
@@ -2211,7 +2225,7 @@ class Trainer:
                 )
             )
         lines.append("╚══════════╩══════════╩══════════╩══════════╩══════════╝")
-        print("\n".join(lines), flush=True)
+        print("\n".join(lines))
 
     @staticmethod
     def _get_metric_floats(

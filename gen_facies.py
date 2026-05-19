@@ -7,7 +7,8 @@ convenience script used offline after training.
 """
 
 import json
-import os
+import logging
+from pathlib import Path
 import random
 import time
 import warnings
@@ -35,6 +36,8 @@ from log import format_time
 from models import FaciesGAN
 from models.utils import calculate_channels
 from options import TrainingOptions
+
+logger = logging.getLogger(__name__)
 
 
 def generate_facies(
@@ -576,15 +579,13 @@ if __name__ == "__main__":
         arguments.out_path = arguments.model_path
 
     # Place generated images in a dedicated subdirectory
-    gen_output = os.path.join(arguments.out_path, "generated")
-    os.makedirs(gen_output, exist_ok=True)
+    gen_output = Path(arguments.out_path) / "generated"
+    gen_output.mkdir(parents=True, exist_ok=True)
 
     # Global device initialization using DeviceManager singleton
     device_manager.initialize(gpu_id=arguments.gpu_device)
 
-    with open(
-        os.path.join(arguments.model_path, CheckpointFilenames.OPTIONS), "r"
-    ) as f:
+    with (Path(arguments.model_path) / CheckpointFilenames.OPTIONS).open("r") as f:
         json_data = json.load(f)
 
     # Build a proper TrainingOptions from the saved JSON and CLI overrides,
@@ -617,13 +618,13 @@ if __name__ == "__main__":
 
     if arguments.comparison_plots:
         # Generate comparison plots instead of individual facies
-        comparison_out = os.path.join(gen_output, "comparison_plots")
-        os.makedirs(comparison_out, exist_ok=True)
+        comparison_out = gen_output / "comparison_plots"
+        comparison_out.mkdir(parents=True, exist_ok=True)
         generate_comparison_plots(
             faciesGAN,
             dataset,
             arguments.model_path,
-            comparison_out,
+            str(comparison_out),
             options=args,
             num_generated=arguments.num_generated,
             num_real=arguments.num_real,
@@ -675,13 +676,13 @@ if __name__ == "__main__":
             axes.set_yticks([])  # type: ignore
             axes.axis("off")  # type: ignore
 
-            out_file = os.path.join(gen_output, f"generated_facie_{i}.tif")
-            fig.savefig(out_file)  # type: ignore
+            out_file = gen_output / f"generated_facie_{i}.tif"
+            fig.savefig(out_file)  # type: ignore[arg-type]
             plt.close(fig)
     else:
         for i, facie in enumerate(facies, 1):
-            tif.imwrite(os.path.join(gen_output, f"generated_facie_{i}.tif"), facie)  # type: ignore
+            tif.imwrite(gen_output / f"generated_facie_{i}.tif", facie)  # type: ignore[arg-type]
 
-    generated_pattern = os.path.join(gen_output, "generated_facie_[1, 2, ...].tif")
+    generated_pattern = gen_output / "generated_facie_[1, 2, ...].tif"
     print(f"Facies generated at '{generated_pattern}'.")
     print(f"Total time: {format_time(int(time.time() - start_time))}")

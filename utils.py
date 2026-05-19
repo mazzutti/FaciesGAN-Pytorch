@@ -21,6 +21,10 @@ from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
 
 from device import device_manager
+import logging
+
+# Module logger
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Normalization Helpers
@@ -184,7 +188,10 @@ class ExtractUniqueColors:
                 try:
                     t0 = device_manager.to_device(t0)
                 except Exception:
-                    pass
+                    logger.debug(
+                        "device_manager.to_device failed for thumbnail prep",
+                        exc_info=True,
+                    )
 
                 small = torch.nn.functional.interpolate(
                     t0.unsqueeze(0), size=(16, 16), mode="bilinear", align_corners=False
@@ -206,8 +213,10 @@ class ExtractUniqueColors:
             try:
                 thumb_hash = hashlib.sha1(thumb_np.tobytes()).hexdigest()[:12]
             except Exception:
+                logger.debug("Failed to compute thumb hash", exc_info=True)
                 thumb_hash = "nohash"
         except Exception:
+            logger.debug("Thumbnail preparation failed", exc_info=True)
             thumb_hash = "nohash"
 
         key = (tuple(facies_tensor.shape), thumb_hash, float(tolerance))
@@ -309,6 +318,7 @@ class PreprocessWellMask:
         try:
             content_hash = hashlib.sha1(mask_2d.tobytes()).hexdigest()[:12]
         except Exception:
+            logger.debug("Failed to hash mask bytes", exc_info=True)
             content_hash = "nohash"
 
         cache_key = (mask_2d.shape, target_shape, content_hash)
@@ -534,6 +544,7 @@ def apply_well_mask(
         try:
             mask_bool = mask > 0.5
         except Exception:
+            logger.debug("Failed converting mask to boolean", exc_info=True)
             mask_bool = np.asarray(mask, dtype=bool)
 
     # Find the specific columns where the well is present using boolean mask

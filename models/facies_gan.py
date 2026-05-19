@@ -8,6 +8,8 @@ optimized PyTorch logic (AMP, DDP, torch.compile).
 import math
 import os
 import time
+import logging
+from pathlib import Path
 from typing import cast
 
 import torch
@@ -62,6 +64,10 @@ def unwrap_ddp(module: nn.Module) -> nn.Module:
         if hasattr(curr, "_orig_mod"):
             curr = getattr(curr, "_orig_mod")
     return curr
+
+
+# Module logger
+logger = logging.getLogger(__name__)
 
 
 # noinspection PyDefaultArgument
@@ -1641,11 +1647,9 @@ class FaciesGAN(nn.Module):
             self.profile_collective_total_s / self.profile_all_reduce_calls
         )
         avg_elems = self.profile_all_reduce_total_elems / self.profile_all_reduce_calls
-        print(f"\n[ALLREDUCE_PROFILE] coalesced gradient sync summary")
+        print("[ALLREDUCE_PROFILE] coalesced gradient sync summary")
         print(
-            f"[ALLREDUCE_PROFILE] mode=ddp_all_reduce profiling=detailed calls={self.profile_all_reduce_calls} "
-            f"avg_total_time={avg_s:.6f}s avg_collective_time={avg_collective_s:.6f}s avg_elems={avg_elems:.0f} "
-            f"total_time={self.profile_all_reduce_total_s:.6f}s collective_time={self.profile_collective_total_s:.6f}s"
+            f"[ALLREDUCE_PROFILE] mode=ddp_all_reduce profiling=detailed calls={self.profile_all_reduce_calls} avg_total_time={avg_s:.6fs} avg_collective_time={avg_collective_s:.6fs} avg_elems={avg_elems:.0f} total_time={self.profile_all_reduce_total_s:.6fs} collective_time={self.profile_collective_total_s:.6fs}"
         )
 
     # ---------------------------------------------------------------------------
@@ -1683,18 +1687,19 @@ class FaciesGAN(nn.Module):
         if not load_discriminator and self._compile_progress_enabled:
             planned_scales = int(getattr(self.options, "stop_scale", 0)) + 1
             self._compile_progress_total -= planned_scales
-        while os.path.exists(os.path.join(path, str(scale))):
+        base_path = Path(path)
+        while (base_path / str(scale)).exists():
             if until_scale is not None and scale > until_scale:
                 break
 
-            scale_path = os.path.join(path, str(scale))
-            ckpt_path = os.path.join(scale_path, CheckpointFilenames.EPOCH_CKPT)
+            scale_path = base_path / str(scale)
+            ckpt_path = scale_path / CheckpointFilenames.EPOCH_CKPT
 
-            if os.path.isfile(ckpt_path):
+            if ckpt_path.is_file():
                 # Load from structured epoch checkpoint
                 from training.checkpoint import Checkpoint
 
-                ckpt = Checkpoint.load(ckpt_path)
+                ckpt = Checkpoint.load(str(ckpt_path))
 
                 # Restore global training state from the monolithic checkpoint
                 if ckpt.noise_amps:
@@ -1728,22 +1733,24 @@ class FaciesGAN(nn.Module):
                     continue
             else:
                 # Fallback to legacy individual file loading
-                if self.has_generator_checkpoint(scale_path):
+                if self.has_generator_checkpoint(str(scale_path)):
                     self.init_generator_for_scale(scale)
-                    self.load_generator_state(scale_path, scale)
+                    self.load_generator_state(str(scale_path), scale)
 
-                if load_discriminator and self.has_discriminator_checkpoint(scale_path):
+                if load_discriminator and self.has_discriminator_checkpoint(
+                    str(scale_path)
+                ):
                     self.init_discriminator_for_scale(scale)
-                    self.load_discriminator_state(scale_path, scale)
+                    self.load_discriminator_state(str(scale_path), scale)
 
-            if self.has_amp_file(scale_path):
-                self.load_amp(scale_path)
+            if self.has_amp_file(str(scale_path)):
+                self.load_amp(str(scale_path))
 
-            if load_shapes and self.has_shape_file(scale_path):
-                self.load_shape(scale_path)
+            if load_shapes and self.has_shape_file(str(scale_path)):
+                self.load_shape(str(scale_path))
 
-            if load_wells and self.has_wells_file(scale_path):
-                self.load_wells(scale_path)
+            if load_wells and self.has_wells_file(str(scale_path)):
+                self.load_wells(str(scale_path))
 
             scale += 1
 
@@ -1759,19 +1766,19 @@ class FaciesGAN(nn.Module):
 
     def load_generator_state(self, scale_path: str, scale: int) -> None:
         """Load generator state dict for a scale."""
-        gen_path = os.path.join(scale_path, CheckpointFilenames.GENERATOR)
-        if os.path.exists(gen_path):
+        gen_path = Path(scale_path) / CheckpointFilenames.GENERATOR
+        if gen_path.exists():
             state = torch.load(
-                gen_path, map_location=device_manager.device, weights_only=False
+                str(gen_path), map_location=device_manager.device, weights_only=False
             )
             self.load_state_dict_compat(unwrap_ddp(self.generator.gens[scale]), state)  # type: ignore
 
     def load_discriminator_state(self, scale_path: str, scale: int) -> None:
         """Load discriminator state dict for a scale."""
-        disc_path = os.path.join(scale_path, CheckpointFilenames.DISCRIMINATOR)
-        if os.path.exists(disc_path):
+        disc_path = Path(scale_path) / CheckpointFilenames.DISCRIMINATOR
+        if disc_path.exists():
             state = torch.load(
-                disc_path, map_location=device_manager.device, weights_only=False
+                str(disc_path), map_location=device_manager.device, weights_only=False
             )
             self.load_state_dict_compat(  # type: ignore
                 unwrap_ddp(self.discriminator.discs[scale]), state
@@ -1800,7 +1807,7 @@ class FaciesGAN(nn.Module):
         if scale < len(self.generator.gens):
             torch.save(
                 unwrap_ddp(self.generator.gens[scale]).state_dict(),
-                os.path.join(scale_path, CheckpointFilenames.GENERATOR),
+                str(Path(scale_path) / CheckpointFilenames.GENERATOR),
             )
 
     def save_discriminator_state(self, scale_path: str, scale: int) -> None:
@@ -1808,14 +1815,14 @@ class FaciesGAN(nn.Module):
         if scale < len(self.discriminator.discs):
             torch.save(
                 unwrap_ddp(self.discriminator.discs[scale]).state_dict(),
-                os.path.join(scale_path, CheckpointFilenames.DISCRIMINATOR),
+                str(Path(scale_path) / CheckpointFilenames.DISCRIMINATOR),
             )
 
     def load_amp(self, scale_path: str) -> None:
         """Load noise amplitude from file."""
-        amp_path = os.path.join(scale_path, CheckpointFilenames.NOISE_AMP)
-        if os.path.exists(amp_path):
-            with open(amp_path, "r") as f:
+        amp_path = Path(scale_path) / CheckpointFilenames.NOISE_AMP
+        if amp_path.exists():
+            with amp_path.open("r") as f:
                 self.noise_amps.append(
                     torch.tensor(float(f.read().strip()), device=device_manager.device)
                 )
@@ -1823,17 +1830,19 @@ class FaciesGAN(nn.Module):
     def save_amp(self, scale_path: str, scale: int) -> None:
         """Save noise amplitude to file."""
         if scale < len(self.noise_amps):
-            amp_path = os.path.join(scale_path, CheckpointFilenames.NOISE_AMP)
-            with open(amp_path, "w") as f:
+            amp_path = Path(scale_path) / CheckpointFilenames.NOISE_AMP
+            with amp_path.open("w") as f:
                 f.write(str(float(self.noise_amps[scale])))
 
     def load_shape(self, scale_path: str) -> None:
         """Load shape metadata for a scale."""
-        shape_path = os.path.join(scale_path, CheckpointFilenames.SHAPE)
-        if os.path.exists(shape_path):
+        shape_path = Path(scale_path) / CheckpointFilenames.SHAPE
+        if shape_path.exists():
             self.shapes += tuple(
                 torch.load(
-                    shape_path, map_location=device_manager.device, weights_only=False
+                    str(shape_path),
+                    map_location=device_manager.device,
+                    weights_only=False,
                 )
             )
 
@@ -1841,12 +1850,12 @@ class FaciesGAN(nn.Module):
         """Save shape metadata for a scale."""
         if scale < len(self.shapes):
             torch.save(
-                self.shapes[scale], os.path.join(scale_path, CheckpointFilenames.SHAPE)
+                self.shapes[scale], str(Path(scale_path) / CheckpointFilenames.SHAPE)
             )
 
     def load_wells(self, scale_path: str) -> None:
         """Load well conditioning data for a scale."""
-        loaded = utils.load(os.path.join(scale_path, CheckpointFilenames.MASKS))
+        loaded = utils.load(str(Path(scale_path) / CheckpointFilenames.MASKS))
         wells = [
             (
                 loaded
@@ -1860,26 +1869,24 @@ class FaciesGAN(nn.Module):
     @staticmethod
     def has_generator_checkpoint(scale_path: str) -> bool:
         """Return True if generator checkpoint exists."""
-        return os.path.exists(os.path.join(scale_path, CheckpointFilenames.GENERATOR))
+        return (Path(scale_path) / CheckpointFilenames.GENERATOR).exists()
 
     @staticmethod
     def has_discriminator_checkpoint(scale_path: str) -> bool:
         """Return True if discriminator checkpoint exists."""
-        return os.path.exists(
-            os.path.join(scale_path, CheckpointFilenames.DISCRIMINATOR)
-        )
+        return (Path(scale_path) / CheckpointFilenames.DISCRIMINATOR).exists()
 
     @staticmethod
     def has_amp_file(scale_path: str) -> bool:
         """Return True if amplitude file exists."""
-        return os.path.exists(os.path.join(scale_path, CheckpointFilenames.NOISE_AMP))
+        return (Path(scale_path) / CheckpointFilenames.NOISE_AMP).exists()
 
     @staticmethod
     def has_shape_file(scale_path: str) -> bool:
         """Return True if shape file exists."""
-        return os.path.exists(os.path.join(scale_path, CheckpointFilenames.SHAPE))
+        return (Path(scale_path) / CheckpointFilenames.SHAPE).exists()
 
     @staticmethod
     def has_wells_file(scale_path: str) -> bool:
         """Return True if wells file exists."""
-        return os.path.exists(os.path.join(scale_path, CheckpointFilenames.MASKS))
+        return (Path(scale_path) / CheckpointFilenames.MASKS).exists()

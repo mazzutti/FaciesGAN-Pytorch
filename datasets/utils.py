@@ -163,7 +163,7 @@ def get_global_stats(data_dir: str | None = None) -> dict[str, dict[str, float]]
             logger.warning("Failed to load stats from %s: %e", stats_path, e)
 
     # Compute and save if not exists
-    logger.info("Computing global dataset statistics from .npz archives...")
+    print("Computing global dataset statistics from .npz archives...")
     stats: dict[str, dict[str, float]] = {}
 
     # We care about continuous numeric components
@@ -241,12 +241,8 @@ def get_effective_global_stats(
     vp_vs_stats[StatKey.MIN] = float(pmin)
     vp_vs_stats[StatKey.MAX] = float(pmax)
     stats[DataFiles.VP_VS.name] = vp_vs_stats
-    logger.info(
-        "Using robust VP/VS stats from percentiles %.2f/%.2f: [%.6f, %.6f]",
-        low,
-        high,
-        pmin,
-        pmax,
+    print(
+        f"Using robust VP/VS stats from percentiles {low:.2f}/{high:.2f}: [{pmin:.6f}, {pmax:.6f}]"
     )
     return stats
 
@@ -371,7 +367,7 @@ def _build_pyramid_batch(
 
     pyramids_list: list[list[torch.Tensor]] = [[] for _ in range(len(scale_list))]
 
-    logger.info(f"Loading {data_file.name} from {npz_path}")
+    print(f"Loading {data_file.name} from {npz_path}")
     with np.load(npz_path) as data_dict:
         for key in sorted(data_dict.files):
             data = data_dict[key]
@@ -661,7 +657,7 @@ def _to_derived_pyramid(
     )
 
     pyramids_list: list[list[torch.Tensor]] = [[] for _ in range(len(scale_list))]
-    logger.info(f"Deriving {component.name} from VP, VS, RHO...")
+    print(f"Deriving {component.name} from VP, VS, RHO...")
 
     for name, vp_data in vp_samples.items():
         derived = _derive_rock_physics_component(
