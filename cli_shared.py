@@ -11,7 +11,7 @@ from argparse import ArgumentParser
 from typing import Any, Optional, cast
 
 from config import DirectoryConfig, PhysicsConfig
-from enums import AmpDtype, LrDecayUnit
+from enums import AmpDtype, TimeUnit
 from options import NORMALIZATION_RANGE
 
 
@@ -67,13 +67,13 @@ def add_io_args(
     parser.add_argument(
         "--save-interval",
         type=int,
-        help="save log interval",
+        help="Interval (in units specified by --time-unit) between saving generated outputs and plots (default: 100).",
         default=d.get("save_interval", 100),
     )
     parser.add_argument(
         "--checkpoint-interval",
         type=int,
-        help="Interval (in epochs) between saving training state checkpoints for resume (default: 1).",
+        help="Interval (in units specified by --time-unit) between saving training state checkpoints for resume (default: 1).",
         default=d.get("checkpoint_interval", 1),
     )
     parser.add_argument(
@@ -84,6 +84,12 @@ def add_io_args(
         default=cast(
             int, d.get("num_workers", min(4, max(1, (os.cpu_count() or 1) // 2)))
         ),
+    )
+    parser.add_argument(
+        "--prefetch-factor",
+        type=int,
+        help="Number of batches loaded in advance by each worker (default: 4).",
+        default=d.get("prefetch_factor", 4),
     )
     parser.add_argument(
         "--no-shuffle",
@@ -160,23 +166,22 @@ def add_optimization_args(
     parser.add_argument(
         "--lr-decay",
         type=int,
-        default=d.get("lr_decay", 1000),
-        help="number of epochs (or steps if --lr-decay-unit=step) before lr decay (used by discriminator StepLR)",
+        default=d.get("lr_decay", 100),
+        help="learning rate decay interval (in units specified by --time-unit, used by discriminator StepLR)",
     )
     parser.add_argument(
-        "--lr-decay-unit",
+        "--time-unit",
         type=str,
-        choices=[u.value for u in LrDecayUnit],
-        default=d.get("lr_decay_unit", LrDecayUnit.EPOCH),
-        help="unit for --lr-decay: 'epoch' decays per-batch epoch count (reset each batch), "
-        "'step' decays by global optimisation step across all batches, "
-        "'batch' decays once every N dataset batches (schedulers accumulate across batches, default: epoch)",
+        choices=[u.value for u in TimeUnit],
+        default=d.get("time_unit", TimeUnit.STEP),
+        help="unit for all training intervals (lr-decay, lr-patience, save-interval, checkpoint-interval): "
+        "'epoch' measures in epochs, 'step'/'batch' measures in optimization steps/iterations (default: step)",
     )
     parser.add_argument(
         "--lr-patience",
         type=int,
         default=d.get("lr_patience", 400),
-        help="ReduceLROnPlateau patience: epochs with no improvement before reducing generator LR (default: 400)",
+        help="ReduceLROnPlateau patience: training units (specified by --time-unit) with no improvement before reducing generator LR (default: 400)",
     )
     parser.add_argument(
         "--lr-min",

@@ -239,6 +239,9 @@ def gather_seen_indices(prefetcher: DataPrefetcher) -> List[Tuple[int, ...]]:
     local_indices: List[torch.Tensor] = prefetcher.seen_indices
     if not local_indices:
         return []
+        
+    # Clear the list so we don't accumulate forever across epochs!
+    prefetcher.seen_indices = []
 
     # Concatenate all local batches into one [N, 2] or [N] tensor/array
     local_data = device_manager.to_numpy(torch.cat(local_indices))

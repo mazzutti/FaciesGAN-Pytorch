@@ -81,8 +81,8 @@ class DdpBackend(StrEnum):
     GLOO = "gloo"
 
 
-class LrDecayUnit(StrEnum):
-    """Unit of time for learning-rate decay scheduling."""
+class TimeUnit(StrEnum):
+    """Unit of time for intervals and scheduling (epochs or batch steps/iterations)."""
 
     EPOCH = "epoch"
     BATCH = "batch"

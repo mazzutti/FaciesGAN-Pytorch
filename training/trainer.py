@@ -43,7 +43,7 @@ from config import CheckpointFilenames, ExperimentPaths
 from datasets.data_prefetcher import DataPrefetcher, gather_seen_indices
 from datasets.dataset import PyramidsDataset
 from device import device_manager
-from enums import DeviceType, LrDecayUnit
+from enums import DeviceType, TimeUnit
 from models import utils as model_utils
 from models.facies_gan import FaciesGAN, unwrap_ddp
 from models.utils import ChannelKey
@@ -192,8 +192,8 @@ class Trainer:
         self.min_noise_amp = self.model.min_noise_amp
         self.scale0_noise_amp = self.model.scale0_noise_amp
 
-        # learning rate decay unit: 'epoch' or 'step' or 'batch'
-        self.lr_decay_unit: str = getattr(options, "lr_decay_unit", LrDecayUnit.EPOCH)
+        # Time unit for scheduling and intervals: 'epoch' or 'step'/'batch'
+        self.time_unit: str = getattr(options, "time_unit", TimeUnit.STEP)
         self.gamma = options.gamma
 
         self.generator_optimizers: dict[int, torch.optim.Optimizer] = {}
@@ -251,6 +251,37 @@ class Trainer:
         self._g_loss_smoother: dict[int, MetricSmoother] = {}
         self._compile_warmed_up_scales: set[tuple[int, ...]] = set()
         self._batch_prefetcher: DataPrefetcher | None = None
+
+    def _is_time_to_act(
+        self, epoch: int, batch_id: int, interval: int, is_final: bool
+    ) -> bool:
+        """Check if the current iteration/epoch matches the interval under the configured TimeUnit.
+
+        Parameters
+        ----------
+        epoch : int
+            Current epoch (0-indexed).
+        batch_id : int
+            Current batch index (0-indexed).
+        interval : int
+            The configuration interval parameter.
+        is_final : bool
+            True if this is the final step/epoch of training.
+        """
+        if interval <= 0:
+            return is_final
+
+        if self.time_unit == TimeUnit.EPOCH:
+            # Epoch-based: only check at the end of an epoch
+            is_epoch_end = batch_id == self._total_batches - 1
+            if not is_epoch_end:
+                return False
+            completed_epochs = epoch + 1
+            return (completed_epochs % interval == 0) or is_final
+        else:
+            # Step/Batch-based: check at every iteration
+            completed_steps = epoch * self._total_batches + batch_id + 1
+            return (completed_steps % interval == 0) or is_final
 
     def _warmup_compile_traces(
         self, scales: tuple[int, ...], batch: PyramidsBatch
@@ -317,6 +348,28 @@ class Trainer:
                             masks_pyramid.get(0),
                             self.options,
                         )
+
+                # Trigger training-mode forward and backward JIT traces with CUDAGraphs
+                self.model.train()
+                with torch.enable_grad():
+                    for scale in scales:
+                        # Generator train trace
+                        noises_tr = self.model.get_pyramid_noise(
+                            scale, indexes, wells_pyramid, seismic_pyramid
+                        )
+                        amps_tr = self.model.noise_amps[:scale+1]
+                        fake_tr = self.model.generator(noises_tr, amps_tr, stop_scale=scale)
+
+                        # Discriminator train trace
+                        scores_fake = self.model.discriminator.discs[scale](fake_tr)
+                        scores_real = self.model.discriminator.discs[scale](facies_pyramid[scale])
+
+                        # Backward trace
+                        loss_tr = (scores_fake.mean() + scores_real.mean()) * 0.0
+                        loss_tr.backward()
+
+                self.model.generator.zero_grad(set_to_none=True)
+                self.model.discriminator.zero_grad(set_to_none=True)
             finally:
                 self.model.train()
 
@@ -355,7 +408,7 @@ class Trainer:
             num_workers=self.options.num_workers,
             pin_memory=device_manager.is_cuda,
             persistent_workers=has_workers,
-            prefetch_factor=2 if has_workers else None,
+            prefetch_factor=self.options.prefetch_factor if has_workers else None,
             drop_last=False,
             timeout=120 if has_workers else 0,
         )
@@ -521,7 +574,7 @@ class Trainer:
                 ),
                 self.model.noise_amps + [torch.tensor(0.0, device=real.device)],
                 stop_scale=scale,
-            )
+            ).clone()
 
         use_rp = self.options.use_rock_physics
         res_real = model_utils.split_facies_rp(
@@ -966,6 +1019,43 @@ class Trainer:
             os.path.join(scale_path, CheckpointFilenames.SCH_D),
         )
 
+    def save_progress(
+        self,
+        epoch: int,
+        batch_id: int,
+        total_batches: int,
+        scales_to_train: tuple[int, ...],
+        scale_paths: dict[int, str],
+    ) -> None:
+        """Save training progress models, optimizers, and checkpoint."""
+        # Determine the next epoch and batch to resume from
+        next_batch_id = batch_id + 1
+        next_epoch = epoch
+        if next_batch_id >= total_batches:
+            next_batch_id = 0
+            next_epoch = epoch + 1
+
+        for s in scales_to_train:
+            self.model.save_scale(s, scale_paths[s])
+            self.save_optimizers(
+                scale_paths[s],
+                self.generator_optimizers[s],
+                self.discriminator_optimizers[s],
+                self.generator_schedulers[s],
+                self.discriminator_schedulers[s],
+            )
+            # Record the actual next completed epoch
+            meta_path = os.path.join(
+                scale_paths[s], CheckpointFilenames.COMPLETED_EPOCH
+            )
+            with open(meta_path, "w") as f:
+                f.write(str(next_epoch))
+
+        # Save the monolithic epoch checkpoint
+        self.save_epoch_checkpoint(
+            scales_to_train, scale_paths, next_epoch, next_batch_id
+        )
+
     def save_epoch_checkpoint(
         self,
         scales: tuple[int, ...],
@@ -1017,15 +1107,14 @@ class Trainer:
             scale_paths[min(scales)], CheckpointFilenames.EPOCH_CKPT
         )
         os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
-        # Join any in-flight save before spawning a new one so we never
-        # have two concurrent writes to the same path.
-        if self._ckpt_thread is not None and self._ckpt_thread.is_alive():
-            self._ckpt_thread.join()
-        self._ckpt_thread = threading.Thread(
-            target=torch.save, args=(checkpoint.to_dict(), ckpt_path), daemon=True
-        )
-        self._ckpt_thread.start()
-        print(f"\n  Epoch checkpoint save started at epoch {epoch} (batch {batch_id})")
+        import sys
+        print(f"\n  Saving epoch checkpoint at epoch {epoch} (batch {batch_id})...", end="", flush=True)
+        try:
+            torch.save(checkpoint.to_dict(), ckpt_path)
+            print(" done.")
+        except Exception as e:
+            print(f" failed: {e}", file=sys.stderr)
+
 
     def load_epoch_checkpoint(
         self, scales: tuple[int, ...], scale_paths: dict[int, str]
@@ -1596,6 +1685,30 @@ class Trainer:
                         )
                         progress.update(1)
 
+                    # Save checkpoint mid-epoch if step-based and the interval matches!
+                    if self.time_unit != TimeUnit.EPOCH:
+                        is_final_step = (
+                            epoch == self._num_passes - 1
+                            and batch_id == total_batches - 1
+                        )
+                        if self._is_time_to_act(
+                            epoch,
+                            batch_id,
+                            self.options.checkpoint_interval,
+                            is_final_step,
+                        ):
+                            # Synchronize all processes under DDP before main rank performs file IO
+                            self._ddp_barrier()
+                            if device_manager.is_main_process:
+                                self.save_progress(
+                                    epoch,
+                                    batch_id,
+                                    total_batches,
+                                    scales_to_train,
+                                    scale_paths,
+                                )
+                            self._ddp_barrier()
+
                 # End of batch loop
 
                 # Gather all seen indices for this epoch across all ranks
@@ -1614,31 +1727,17 @@ class Trainer:
                     # ── Save Epoch Progress (Periodic or Final) ───────
                     interval = self.options.checkpoint_interval
                     is_final_epoch = epoch == self._num_passes - 1
-                    should_save = (
-                        interval > 0 and (epoch + 1) % interval == 0
-                    ) or is_final_epoch
+                    should_save = self._is_time_to_act(
+                        epoch, total_batches - 1, interval, is_final_epoch
+                    )
 
                     if should_save:
-                        for s in scales_to_train:
-                            self.model.save_scale(s, scale_paths[s])
-                            self.save_optimizers(
-                                scale_paths[s],
-                                self.generator_optimizers[s],
-                                self.discriminator_optimizers[s],
-                                self.generator_schedulers[s],
-                                self.discriminator_schedulers[s],
-                            )
-                            # Record the actual last epoch completed
-
-                            meta_path = os.path.join(
-                                scale_paths[s], CheckpointFilenames.COMPLETED_EPOCH
-                            )
-                            with open(meta_path, "w") as f:
-                                f.write(str(epoch + 1))
-
-                        # Save the monolithic epoch checkpoint
-                        self.save_epoch_checkpoint(
-                            scales_to_train, scale_paths, epoch + 1, 0
+                        self.save_progress(
+                            epoch,
+                            total_batches - 1,
+                            total_batches,
+                            scales_to_train,
+                            scale_paths,
                         )
             # After processing all batches for this group, save models (rank 0 only)
             if device_manager.is_main_process:
@@ -1759,10 +1858,8 @@ class Trainer:
         # ── All ranks participation ──────────────────────────────────
         # Check if we need to gather indices for plotting (all ranks must agree
         # to avoid hanging during the collective all_gather).
-        _should_gather = (
-            (epoch % self.save_interval == 0 or epoch == self._num_passes - 1)
-            and (epoch != 0 or self._num_passes == 1)
-            and (self._current_batch_id == self._total_batches - 1)
+        _should_gather = self._is_time_to_act(
+            epoch, self._current_batch_id, self.save_interval, _is_last_step
         )
         if _should_gather:
             self._seen_indices_for_save = self.collect_seen_indices()
@@ -1841,8 +1938,8 @@ class Trainer:
             # before schedulers_step advances the count).
             _decay_counter = (
                 global_step
-                if self.lr_decay_unit == "step"
-                else self._current_batch_id if self.lr_decay_unit == "batch" else epoch
+                if self.time_unit != TimeUnit.EPOCH
+                else epoch
             )
             if (
                 self.lr_decay > 0
@@ -1853,12 +1950,8 @@ class Trainer:
                 lr_d_after = lr_d_before * self.gamma  # type: ignore[operator]
                 _unit_label = (
                     f"step {global_step}"
-                    if self.lr_decay_unit == "step"
-                    else (
-                        f"batch {self._current_batch_id}"
-                        if self.lr_decay_unit == "batch"
-                        else f"epoch {epoch}"
-                    )
+                    if self.time_unit != TimeUnit.EPOCH
+                    else f"epoch {epoch}"
                 )
                 progress.write(  # type: ignore
                     f"\n  ⚡ LR decay at {_unit_label}: "
@@ -1873,9 +1966,16 @@ class Trainer:
                 )
 
         # ── All ranks ─────────────────────────────────────────────────
-        # Step schedulers — generator uses smoothed loss via
-        # ReduceLROnPlateau, discriminator uses StepLR (epoch or step based).
-        self.schedulers_step(scales, scale_metrics)
+        # Step schedulers at configured frequency
+        should_step_schedulers = False
+        if self.time_unit == TimeUnit.EPOCH:
+            if self._current_batch_id == self._total_batches - 1:
+                should_step_schedulers = True
+        else:
+            should_step_schedulers = True
+
+        if should_step_schedulers:
+            self.schedulers_step(scales, scale_metrics)
 
     def schedulers_step(
         self, scales: tuple[int, ...], scale_metrics: ScaleMetrics | None = None
@@ -2142,7 +2242,7 @@ class Trainer:
             available scales. Defaults to None.
         """
         self.start_scale = self.model.load(
-            path, load_shapes=False, until_scale=until_scale
+            path, load_shapes=False, until_scale=until_scale, load_discriminator=True
         )
 
     def collect_seen_indices(self) -> list[tuple[int, ...]]:

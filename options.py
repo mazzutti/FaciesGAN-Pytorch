@@ -12,7 +12,7 @@ from typing import Any
 from dataclasses import dataclass
 
 from config import DirectoryConfig, DomainConfig
-from enums import EmbeddingMethod, FeatureKey, LrDecayUnit
+from enums import EmbeddingMethod, FeatureKey, TimeUnit
 
 NORMALIZATION_RANGE: tuple[float, float] = (-1.0, 1.0)
 
@@ -67,6 +67,7 @@ class TrainingOptions(argparse.Namespace):
         num_train_pyramids: int = 200,
         num_parallel_scales: int = 2,
         num_workers: int = min(4, max(1, (os.cpu_count() or 1) // 2)),
+        prefetch_factor: int = 4,
         output_path: str = DirectoryConfig.OUTPUTS,
         normalization_range: tuple[float, ...] = NORMALIZATION_RANGE,
         padding_size: int = 0,
@@ -101,7 +102,7 @@ class TrainingOptions(argparse.Namespace):
         lr_min: float = 1e-4,
         lr_smoothing_alpha: float = 0.95,
         lr_g_factor: float = 0.8,
-        lr_decay_unit: str = LrDecayUnit.EPOCH,
+        time_unit: str = TimeUnit.STEP,
         compile_backend: bool = True,
         seismic_stretch_percentile: int = 98,
         scale0_padding_size: int | None = None,
@@ -280,6 +281,7 @@ class TrainingOptions(argparse.Namespace):
         self.num_parallel_scales = num_parallel_scales
         self.noise_channels = noise_channels
         self.num_workers = num_workers
+        self.prefetch_factor = prefetch_factor
         self.output_path = output_path
         self.normalization_range = tuple(normalization_range)
         self.padding_size = padding_size
@@ -315,7 +317,7 @@ class TrainingOptions(argparse.Namespace):
         self.lr_min = lr_min
         self.lr_smoothing_alpha = lr_smoothing_alpha
         self.lr_g_factor = lr_g_factor
-        self.lr_decay_unit = lr_decay_unit
+        self.time_unit = time_unit
         self.compile_backend = compile_backend
         self.seismic_stretch_percentile = seismic_stretch_percentile
         # Discriminator padding override for scale 0 only (None = use global padding_size).
