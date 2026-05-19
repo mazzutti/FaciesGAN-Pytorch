@@ -157,6 +157,7 @@ class FaciesGAN(nn.Module):
 
         self.disc_step_counter: int = 0
         self.extra_disc_step_counter: int = 0
+        self.last_gp_value: dict[int, torch.Tensor] = {}
 
         self.padding_value: float = get_padding_value(options.normalization_range)
         self.zero_padding = int(options.num_layer * math.floor(options.kernel_size / 2))
@@ -478,7 +479,9 @@ class FaciesGAN(nn.Module):
                     else self.options.gradient_loss_penalty
                 )
                 gp = compute_gradient_penalty(disc, real, fake.detach(), lambda_gp)
-                last_gp[scale] = gp.detach()
+                gp_det = gp.detach()
+                last_gp[scale] = gp_det
+                self.last_gp_value[scale] = gp_det
             else:
                 gp = self.zero_scalar
 
@@ -529,11 +532,10 @@ class FaciesGAN(nn.Module):
                 )
                 if is_final_step:
                     rl, fl = raw_losses[scale]
-                    # last_gp is reset to {} at the start of this call, so it only
-                    # contains GP values computed during the current forward() pass.
-                    # Report whatever fired this call (may be zero if GP interval
-                    # did not coincide with any step in this call).
-                    gp_val = last_gp.get(scale, self.zero_scalar)
+                    # Retrieve the last computed gradient penalty from self.last_gp_value
+                    # to ensure it is always populated in console logs and Tensorboard
+                    # even during lazy GP interval steps.
+                    gp_val = self.last_gp_value.get(scale, self.zero_scalar)
                     step_metrics[sorted_scales.index(scale)] = DiscriminatorMetrics(
                         total=rl + fl + gp_val, real=rl, fake=fl, gp=gp_val
                     )
