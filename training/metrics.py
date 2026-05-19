@@ -474,9 +474,10 @@ def compute_seismic_loss(
 
     # 2. Soft-RMS Normalization (Safe floor to prevent division by tiny noise)
     # Using a larger epsilon (1e-4) to prevent gradient explosions on flat patches.
+    # Specify dim=(2, 3) to compute RMS per-sample, not across the whole batch!
     eps_safe = 1e-4
-    synth_rms = torch.sqrt(torch.mean(synth_zero**2) + eps_safe)
-    real_rms = torch.sqrt(torch.mean(real_zero**2) + eps_safe)
+    synth_rms = torch.sqrt(torch.mean(synth_zero**2, dim=(2, 3), keepdim=True) + eps_safe)
+    real_rms = torch.sqrt(torch.mean(real_zero**2, dim=(2, 3), keepdim=True) + eps_safe)
 
     synth_norm = synth_zero / synth_rms
     real_norm = real_zero / real_rms
@@ -510,12 +511,18 @@ def total_variation_loss(
     if facies is None:
         return diff_z.mean() + diff_x.mean()
 
-    hard = facies.argmax(dim=1, keepdim=True)
-    same_z = (hard[:, :, 1:, :] == hard[:, :, :-1, :]).float()
-    same_x = (hard[:, :, :, 1:] == hard[:, :, :, :-1]).float()
+    # Usamos softmax para obter uma distribuição de probabilidade contínua e diferenciável
+    probs = torch.softmax(facies, dim=1)
 
-    tv_z = (diff_z * same_z).sum() / (same_z.sum() * rock_physics.shape[1] + eps)
-    tv_x = (diff_x * same_x).sum() / (same_x.sum() * rock_physics.shape[1] + eps)
+    # Máscara contínua: produto interno das probabilidades adjacentes.
+    # Se os pixels tiverem a mesma distribuição, sim ~ 1.0. Se forem diferentes, sim ~ 0.0.
+    sim_z = (probs[:, :, 1:, :] * probs[:, :, :-1, :]).sum(dim=1, keepdim=True)
+    sim_x = (probs[:, :, :, 1:] * probs[:, :, :, :-1]).sum(dim=1, keepdim=True)
+
+    # Multiplicamos a variação pela máscara suave e tiramos a média diretamente.
+    # Isso evita a divisão por somas dinâmicas que desestabilizam os gradientes no DDP.
+    tv_z = (diff_z * sim_z).mean()
+    tv_x = (diff_x * sim_x).mean()
 
     return tv_z + tv_x
 

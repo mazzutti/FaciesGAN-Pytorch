@@ -64,7 +64,7 @@ class TensorBoardVisualizer:
         has_rp: bool = False,
         physics_state: "PhysicsState | None" = None,
         normalization_range: tuple[float, float] = (-1.0, 1.0),
-        seismic_stretch_percentile: int = 98,
+        seismic_stretch_percentile: int = 98,  # kept for call-site compatibility, no longer used
     ):
         """Initialize the TensorBoard visualizer.
 
@@ -81,8 +81,10 @@ class TensorBoardVisualizer:
         dataset_info : str, optional
             Information about the dataset being used.
         seismic_stretch_percentile : int, optional
-            Percentile used in robust seismic contrast stretch for TensorBoard
-            display. Allowed values are 95, 98, and 99. Default is 98.
+            Deprecated. Percentile parameter is no longer used; the
+            visualizer applies a fixed 2/98 robust stretch to the synthetic
+            seismic's own distribution. Kept for backwards-compatible call
+            sites but has no effect.
         """
         self.num_scales = num_scales
         self.output_dir = output_dir
@@ -95,11 +97,6 @@ class TensorBoardVisualizer:
         self.normalization_range = (
             float(normalization_range[0]),
             float(normalization_range[1]),
-        )
-        self.seismic_stretch_percentile = (
-            int(seismic_stretch_percentile)
-            if int(seismic_stretch_percentile) in {95, 98, 99}
-            else 98
         )
 
         # Setup TensorBoard logging
@@ -404,92 +401,38 @@ class TensorBoardVisualizer:
         )
 
         # 3. Log Generated Seismic
-        # Convert to RGB with a diverging colormap centered at physical zero.
-        # Training seismic is normalized to normalization_range using
-        # dataset min/max, but
-        # seismic amplitudes are naturally signed. If values cluster near the
-        # center, direct mapping can look washed out; we apply a robust
-        # center-preserving stretch for display only.
+        # Normalize the synthetic seismic using its own robust percentile
+        # statistics so the full colormap range is used at every training stage,
+        # regardless of how the generator's amplitude scale compares to the
+        # real-data statistics stored in physics_state.
+        #
+        # The physical sign convention is preserved:
+        #   RC > 0  (impedance increases downward) → red
+        #   RC < 0  (impedance decreases downward) → blue
+        #   RC = 0  (no interface)                 → white (centre of RdBu)
+        #
+        # Using dataset seis_min/seis_max as a normalisation reference fails
+        # when the synthetic amplitudes are much smaller than the real-data
+        # range, causing all values to cluster near the centre and produce a
+        # "ghost / translucent" appearance.
         synth_np = np.asarray(device_manager.to_numpy(synth[0, 0]), dtype=np.float32)
 
-        # Batch-read physics scalars to minimize device syncs
-        seis_min_t, seis_max_t, norm_min_t, norm_max_t = device_manager.to_cpu(
-            [
-                self.physics_state.seis_min,
-                self.physics_state.seis_max,
-                self.physics_state.norm_min,
-                self.physics_state.norm_max,
-            ],
-            non_blocking=True,
-        )
-        seis_min = float(seis_min_t.item())
-        seis_max = float(seis_max_t.item())
-        norm_min_f = float(norm_min_t.item())
-        norm_max_f = float(norm_max_t.item())
+        # Remove DC bias so the zero amplitude is perfectly centered
+        synth_np = synth_np - np.mean(synth_np)
+        
+        # Symmetric stretch around zero — 2nd/98th percentile gives robustness
+        # against outliers while fully utilising the diverging colour range.
+        p_lo = float(np.percentile(synth_np, 2))
+        p_hi = float(np.percentile(synth_np, 98))
+        max_abs = max(abs(p_lo), abs(p_hi), DomainConfig.EPSILON)
+        synth_norm = np.clip(synth_np / max_abs, -1.0, 1.0)
 
-        lo = float(min(norm_min_f, norm_max_f))
-        hi = float(max(norm_min_f, norm_max_f))
-        center_norm = (0.0 - seis_min) / (seis_max - seis_min + DomainConfig.EPSILON)
-        center_norm = lo + center_norm * (hi - lo)
-        center_norm = float(np.clip(center_norm, lo, hi))
-        synth_mapped = self._stretch_diverging_for_display(
-            synth_np,
-            center=center_norm,
-            normalization_range=(norm_min_f, norm_max_f),
-            percentile=float(self.seismic_stretch_percentile),
-        )
+        # Map [-1, 1] → [0, 1]: zero amplitude lands at 0.5 (white in RdBu).
+        synth_mapped = ((synth_norm + 1.0) / 2.0).astype(np.float32)
 
         self._add_image_with_cmap(
             f"Samples_Seismic/Scale_{scale}", synth_mapped, "RdBu", epoch
         )
-
-    @staticmethod
-    def _stretch_diverging_for_display(
-        data_hw: np.ndarray,
-        center: float,
-        normalization_range: tuple[float, float],
-        percentile: float = 98.0,
-    ) -> np.ndarray:
-        """Increase visual contrast around a diverging center for plotting.
-
-        Parameters
-        ----------
-        data_hw : np.ndarray
-            2-D normalized array in ``normalization_range``.
-        center : float
-            Normalized value that should map to the neutral colormap color
-            (e.g. physical zero amplitude).
-        percentile : float, optional
-            Robust scale percentile for |x-center|, default 98.
-
-        Returns
-        -------
-        np.ndarray
-            Contrast-stretched array in the unit interval suitable for
-            diverging colormaps.
-        """
-        norm_min, norm_max = normalization_range
-        lo = float(min(norm_min, norm_max))
-        hi = float(max(norm_min, norm_max))
-        span = hi - lo
-
-        arr = np.asarray(data_hw, dtype=np.float32)
-        arr = np.nan_to_num(arr, nan=center, posinf=hi, neginf=lo)
-        arr = np.clip(arr, lo, hi)
-
-        if span <= DomainConfig.EPSILON:
-            return np.zeros_like(arr, dtype=np.float32)
-
-        arr01 = (arr - lo) / span
-        center01 = float(np.clip((float(center) - lo) / span, 0.0, 1.0))
-
-        delta = arr01 - center01
-        robust = float(np.percentile(np.abs(delta), percentile))
-        if not np.isfinite(robust) or robust < DomainConfig.EPSILON:
-            return arr01
-
-        stretched = 0.5 + 0.5 * (delta / robust)
-        return np.clip(stretched, 0.0, 1.0).astype(np.float32, copy=False)
 
     def _add_image_with_cmap(
         self, tag: str, data_hw: np.ndarray, cmap_name: str, epoch: int

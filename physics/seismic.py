@@ -280,6 +280,7 @@ def calculate_synthetic_seismic(
     vp_mean: torch.Tensor,
     dz_pixel: torch.Tensor,
     physics_state: PhysicsState,
+    clip_output: bool = False,
 ) -> torch.Tensor:
     """Perform Geophysical Modeling to produce normalized synthetic seismic.
 
@@ -293,6 +294,9 @@ def calculate_synthetic_seismic(
         Depth sampling interval (m).
     physics_state : PhysicsState
         Object containing all physics-related buffers and logic.
+    clip_output : bool, optional
+        Whether to clamp the output to normalization_range. Must be False
+        during training to prevent dead gradients. Defaults to False.
 
     Returns
     -------
@@ -319,6 +323,9 @@ def calculate_synthetic_seismic(
     padding_z = physics_state.fixed_kernel_size // 2
     synth = torch.nn.functional.conv2d(rc, wavelet_z, padding=(int(padding_z), 0))
 
+    # Apply global physical gain calibration to align synthetic amplitudes with dataset scale
+    synth = synth * PhysicsConfig.SEISMIC_GAIN
+
     # 5. Normalization using Dataset Statistics, then remap to normalization_range.
     synth = (synth - physics_state.seis_min) / (
         physics_state.seis_max - physics_state.seis_min + DomainConfig.EPSILON
@@ -326,4 +333,7 @@ def calculate_synthetic_seismic(
     lo = torch.min(physics_state.norm_min, physics_state.norm_max)
     hi = torch.max(physics_state.norm_min, physics_state.norm_max)
     synth = synth * (hi - lo) + lo
-    return torch.clamp(synth, lo, hi)
+    
+    if clip_output:
+        return torch.clamp(synth, lo, hi)
+    return synth

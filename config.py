@@ -45,6 +45,7 @@ class _PhysicsConfig:
     WAVELET_LENGTH: float = 0.128
     VP_MIN: float = 2000.0
     VP_MS_SCALE: float = 1000.0
+    SEISMIC_GAIN: float = 6.0
 
     @property
     def DZ_PIXEL(self) -> torch.Tensor:
