@@ -11,6 +11,7 @@ import logging
 import math
 import warnings
 import os
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -37,6 +38,15 @@ from scipy.sparse import SparseEfficiencyWarning, coo_matrix
 from sklearn.decomposition import PCA
 from sklearn.manifold import MDS, TSNE, Isomap
 from umap import UMAP  # type: ignore[import]
+
+try:
+    import numba
+
+    _NUMBA_THREADS = int(numba.config.NUMBA_NUM_THREADS)
+except Exception:
+    _NUMBA_THREADS = os.cpu_count() or 1
+
+_MAX_JOBS = min(12, _NUMBA_THREADS)
 
 from config import CheckpointFilenames
 from datasets.dataset import PyramidsDataset
@@ -129,24 +139,25 @@ def get_manifold_estimator(
             n_init=1,
             max_iter=100,
             random_state=random_state,
-            n_jobs=1,
+            n_jobs=_MAX_JOBS,
         ),
         EmbeddingMethod.TSNE: lambda: TSNE(
             n_components=n_components,
-            n_jobs=1,
+            n_jobs=_MAX_JOBS,
             init="pca",
             learning_rate="auto",
             random_state=random_state,
         ),
         EmbeddingMethod.ISOMAP: lambda: Isomap(
             n_components=n_components,
-            n_jobs=1,
+            n_jobs=_MAX_JOBS,
+            eigen_solver="arpack",
         ),
         EmbeddingMethod.UMAP: lambda: (
             UMAP(
                 n_components=n_components,
-                random_state=random_state,
-                n_jobs=1,
+                random_state=None,
+                n_jobs=_MAX_JOBS,
             )
             if UMAP
             else None
@@ -369,11 +380,18 @@ def compute_shared_embeddings(
     # - Dynamic parameter selection for UMAP/TSNE/Isomap based on sample count
     # - Run methods in parallel using threads to avoid multiprocessing deadlocks
     n_samples = all_data.shape[0]
-    print(
-        f"Fitting {len(methods)} methods in parallel on {n_samples} samples:"
-    )
+    print(f"Fitting {len(methods)} methods in parallel on {n_samples} samples:")
     for m in methods:
         print(f" -> {m.upper()} ...")
+
+    # PCA pre-reduction: for high-dimensional data (e.g. flattened 256×256 = 65536-dim
+    # volumes) all manifold methods benefit from a dimensionality reduction step.
+    # UMAP docs explicitly recommend this; it also makes MDS/Isomap/t-SNE faster.
+    # Cap at min(50, n_samples-1) to stay well within scikit-learn's constraints.
+    if all_data.shape[1] > 50:
+        n_pca_pre = min(50, n_samples - 1)
+        all_data = PCA(n_components=n_pca_pre, random_state=42).fit_transform(all_data)
+        print(f"  PCA pre-reduction: -> {all_data.shape[1]} components", flush=True)
 
     # PCA init for MDS (deterministic seed chosen to match remote script)
     pca_init = PCA(n_components=2, random_state=3).fit_transform(all_data)
@@ -383,11 +401,9 @@ def compute_shared_embeddings(
     if any(m.lower() == EmbeddingMethod.MDS for m in methods):
         distances = euclidean_distances(all_data)
 
-    # Threaded execution to mirror remote script's ThreadPoolExecutor usage
+    # Threaded execution with max_workers=1 to run sequentially and avoid heavy thread contention / OOM / deadlocks
     results_raw: List[Tuple[str, Optional[np.ndarray]]] = []
-    with ThreadPoolExecutor(
-        max_workers=min(len(methods), (os.cpu_count() or 1))
-    ) as exe:
+    with ThreadPoolExecutor(max_workers=1) as exe:
         futures: Dict[Future[_FutureResult], str] = {}
 
         def submit_method(method_name: str) -> Future[_FutureResult]:
@@ -407,12 +423,15 @@ def compute_shared_embeddings(
                                 max_iter=300,
                                 eps=1e-6,
                                 random_state=seed,
-                                n_jobs=1,
+                                n_jobs=_MAX_JOBS,
                             )
                             emb = mds.fit_transform(distances, init=pca_init)  # type: ignore[arg-type]
                         return method_name, emb
                     except Exception as e:
-                        logger.error(f"MDS fitting failed: {e}")
+                        msg = f"MDS fitting failed: {type(e).__name__}: {e}"
+                        logger.error(msg)
+                        traceback.print_exc()
+                        print(f"[ERROR] {msg}", flush=True)
                         return method_name, None
 
                 return cast(Future[_FutureResult], exe.submit(run_mds))
@@ -424,20 +443,43 @@ def compute_shared_embeddings(
                         # Scale n_neighbors with sqrt(n_samples) to maintain connectivity
                         # for large datasets (e.g. 4001 samples -> ~63 neighbors)
                         n_nb = max(5, int(math.sqrt(n_samples)))
-                        um = UMAP(
-                            n_components=2,
-                            n_neighbors=n_nb,
-                            min_dist=0.05,
-                            n_epochs=500,
-                            metric="euclidean",
-                            init="spectral",
-                            random_state=seed,
-                            n_jobs=1,
-                        )
-                        emb = um.fit_transform(all_data)  # type: ignore
+                        try:
+                            um = UMAP(
+                                n_components=2,
+                                n_neighbors=n_nb,
+                                min_dist=0.05,
+                                n_epochs=500,
+                                metric="euclidean",
+                                init="spectral",
+                                random_state=None,
+                                n_jobs=_MAX_JOBS,
+                            )
+                            emb = um.fit_transform(all_data)  # type: ignore
+                        except Exception as spectral_err:
+                            print(
+                                f"[WARNING] UMAP spectral initialization failed: {spectral_err}. "
+                                "Retrying with random initialization...",
+                                flush=True,
+                            )
+                            um = UMAP(
+                                n_components=2,
+                                n_neighbors=n_nb,
+                                min_dist=0.05,
+                                n_epochs=500,
+                                metric="euclidean",
+                                init="random",
+                                random_state=None,
+                                n_jobs=_MAX_JOBS,
+                            )
+                            emb = um.fit_transform(all_data)  # type: ignore
                         return method_name, emb  # type: ignore
                     except Exception as e:
-                        logger.error(f"UMAP fitting failed: {e}")
+                        # Use print() as well: runner.py disables logging at CRITICAL
+                        # so logger.error() would be silently swallowed.
+                        msg = f"UMAP fitting failed: {type(e).__name__}: {e}"
+                        logger.error(msg)
+                        traceback.print_exc()
+                        print(f"[ERROR] {msg}", flush=True)
                         return method_name, None
 
                 return cast(Future[_FutureResult], exe.submit(run_umap))
@@ -452,14 +494,18 @@ def compute_shared_embeddings(
                         iso = Isomap(
                             n_components=2,
                             n_neighbors=n_nb,
-                            eigen_solver="dense",
+                            eigen_solver="arpack",
                             neighbors_algorithm="kd_tree",
                             metric="euclidean",
+                            n_jobs=_MAX_JOBS,
                         )
                         emb = iso.fit_transform(all_data)
                         return method_name, emb
                     except Exception as e:
-                        logger.error(f"Isomap fitting failed: {e}")
+                        msg = f"Isomap fitting failed: {type(e).__name__}: {e}"
+                        logger.error(msg)
+                        traceback.print_exc()
+                        print(f"[ERROR] {msg}", flush=True)
                         return method_name, None
 
                 return cast(Future[_FutureResult], exe.submit(run_isomap))
@@ -471,17 +517,20 @@ def compute_shared_embeddings(
                         perp = min(30.0, float(max(1, (n_samples - 1) / 3.0)))
                         ts = TSNE(
                             n_components=2,
-                            n_iter=1500,
+                            max_iter=1500,
                             init="pca",
                             learning_rate="auto",
                             perplexity=perp,
                             random_state=seed,
-                            n_jobs=1,
+                            n_jobs=_MAX_JOBS,
                         )
                         emb = ts.fit_transform(all_data)
                         return method_name, emb
                     except Exception as e:
-                        logger.error(f"t-SNE fitting failed: {e}")
+                        msg = f"t-SNE fitting failed: {type(e).__name__}: {e}"
+                        logger.error(msg)
+                        traceback.print_exc()
+                        print(f"[ERROR] {msg}", flush=True)
                         return method_name, None
 
                 return cast(Future[_FutureResult], exe.submit(run_tsne))
@@ -500,7 +549,9 @@ def compute_shared_embeddings(
                 results_raw.append(cast(Tuple[str, Optional[np.ndarray]], fut.result()))
             except Exception as e:
                 m = futures.get(fut, "?")
-                logger.error(f"Manifold fitting failed for {m}: {e}")
+                msg = f"Manifold fitting failed for {m}: {type(e).__name__}: {e}"
+                logger.error(msg)
+                print(f"[ERROR] {msg}", flush=True)
     parallel_results = results_raw
 
     # 5. Assemble and Split Results (Real vs Variants)
