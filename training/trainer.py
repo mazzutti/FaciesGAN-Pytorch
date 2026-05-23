@@ -1226,10 +1226,8 @@ class Trainer:
                             self.discriminator_optimizers[s].param_groups
                         )
 
-                from tqdm import tqdm
-
-                tqdm.write(
-                    f"  [info] scale {s} discriminator LR overridden to {new_lr_d}"
+                logger.debug(
+                    "scale %d discriminator LR overridden to %s", s, new_lr_d
                 )
 
             if s in self.generator_optimizers:
