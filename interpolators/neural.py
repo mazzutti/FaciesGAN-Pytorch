@@ -121,9 +121,9 @@ class NeuralSmoother(BaseInterpolator):
                 fullgraph=True,
                 dynamic=True,
             )
-            print("Model compiled with torch.compile()")
+            logger.debug("Model compiled with torch.compile()")
         except (AttributeError, RuntimeError, TypeError):
-            print("torch.compile() not available or failed; continuing")
+            logger.debug("torch.compile() not available or failed; continuing")
 
     def _load_model(self, model_path: Path) -> None:
         """Orchestrate model compilation, optional restore, and optimizer setup.
@@ -422,7 +422,7 @@ class NeuralSmoother(BaseInterpolator):
         resolutions: tuple[tuple[int, ...], ...],
     ) -> list[torch.Tensor]:
         """Core rendering logic shared by ``interpolate`` and ``interpolate_from_array``."""
-        print("Rendering facies pyramid...")
+        logger.debug("Rendering facies pyramid...")
         native_h, native_w = self.config.geometry
         upsample: int | tuple[int, int] = self.config.upsample
         if isinstance(upsample, tuple):

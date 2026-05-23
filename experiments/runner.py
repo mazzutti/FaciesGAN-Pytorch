@@ -55,12 +55,16 @@ def _has_loadable_scale(model_path: str, max_scan: int = 64) -> bool:
 
 
 def main() -> None:
+    parser = get_arguments()
+    args = parser.parse_args(namespace=ExperimentOptions())
+
+    if not getattr(args, "enable_logging", False):
+        logging.disable(logging.CRITICAL)
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s:%(name)s: %(message)s",
     )
-    parser = get_arguments()
-    args = parser.parse_args(namespace=ExperimentOptions())
 
     base_output = args.output_path
     nproc = args.nproc_per_node
@@ -157,18 +161,16 @@ def main() -> None:
             print("\n" + "─" * 60)
             print(f"Training variant: {name}")
             print(f"wells={wells_flag}  seismic={seismic_flag}")
- 
+
             if resume_epoch > 0:
-                print(
-                    f"Resuming from scale {resume_scale}, epoch {resume_epoch}"
-                )
+                print(f"Resuming from scale {resume_scale}, epoch {resume_epoch}")
             elif resume_scale > 0:
                 print(
                     f"Starting from scale {resume_scale} (scales 0-{resume_scale - 1} already done)"
                 )
             else:
                 print("Starting training from scratch (scale 0, epoch 0)")
- 
+
             print(
                 f"DDP: {nproc} GPUs  compile_backend: {'ON' if args.compile_backend else 'OFF'}"
             )

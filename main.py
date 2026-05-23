@@ -199,7 +199,8 @@ def _setup_output_dir(options: TrainingOptions) -> None:
         with options_file.open("w") as file:
             json.dump(vars(options), file, indent=4)  # type: ignore
 
-        init_output_logging(str(output_path / "log.txt"))
+        if getattr(options, "enable_logging", False):
+            init_output_logging(str(output_path / "log.txt"))
 
     # Synchronise so non-zero ranks wait for rank 0 to create output dir
     if device_manager.is_distributed:
@@ -245,9 +246,19 @@ def _tune_performance() -> None:
 
 def _report_failure(exc: Exception) -> None:
     """Log training failure details including tracebacks and GPU memory stats."""
+    import traceback
+
     rank_label = (
         f"[rank {device_manager.rank}] " if device_manager.is_distributed else ""
     )
+    # Always print to stderr directly — logging may be partially disabled.
+    print(
+        f"\n{rank_label}{'=' * 60}\n"
+        f"{rank_label}TRAINING FAILED - cleaning up\n"
+        f"{rank_label}{'=' * 60}",
+        flush=True,
+    )
+    traceback.print_exc()
     logger.error(
         "\n%s%s\n%sTRAINING FAILED - cleaning up\n%s%s",
         rank_label,
@@ -266,6 +277,11 @@ def _report_failure(exc: Exception) -> None:
             reserved = float(torch.cuda.memory_reserved(dev) / (1024**3))
             peak = float(torch.cuda.max_memory_allocated(dev) / (1024**3))
             total = float(torch.cuda.get_device_properties(dev).total_memory / (1024**3))  # type: ignore
+            msg = (
+                f"{rank_label}CUDA memory: alloc={alloc:.2f}G  "
+                f"reserved={reserved:.2f}G  peak={peak:.2f}G  total={total:.2f}G"
+            )
+            print(msg, flush=True)
             logger.error(
                 "%sCUDA memory: alloc=%.2fG  reserved=%.2fG  peak=%.2fG  total=%.2fG",
                 rank_label,
@@ -288,6 +304,12 @@ def main() -> None:
     parser = get_arguments()
     options = parser.parse_args(namespace=TrainingOptions())
     _post_process_args(options)
+
+    # When file logging is disabled, suppress INFO/DEBUG noise but keep
+    # WARNING+ visible so _report_failure (which uses logger.error/exception)
+    # always surfaces tracebacks on the console.
+    if not getattr(options, "enable_logging", False):
+        logging.disable(logging.INFO)
 
     # 2. Global signals and device initialization
     signal.signal(signal.SIGTERM, lambda *_: os._exit(1))  # type: ignore
@@ -315,9 +337,7 @@ def main() -> None:
         if device_manager.is_distributed:
             world_size = device_manager.world_size
             print(f"DDP training: {world_size} processes")
-        print(
-            f"Training scales: {options.start_scale} to {options.stop_scale}"
-        )
+        print(f"Training scales: {options.start_scale} to {options.stop_scale}")
         print(f"Output path: {options.output_path}")
         print("=" * 60 + "\n")
 

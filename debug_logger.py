@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import threading
 import time
 from typing import Any
@@ -90,9 +91,10 @@ class DebugLogger:
         self._fh: Any = None
 
         if self._enabled:
-            os.makedirs(output_path, exist_ok=True)
-            fpath = os.path.join(output_path, "debug_train.jsonl")
-            self._fh = open(fpath, "a", buffering=1)  # line-buffered
+            output_dir = Path(output_path)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            fpath = output_dir / "debug_train.jsonl"
+            self._fh = fpath.open("a", buffering=1)  # line-buffered
             self._raw_write(
                 {
                     "event": "session_start",

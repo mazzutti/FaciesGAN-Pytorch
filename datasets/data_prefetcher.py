@@ -15,6 +15,11 @@ import torch.distributed as dist
 from device import device_manager
 from typedefs import Batch, IDataLoader, PyramidsBatch, RawBatch
 
+import logging
+
+# Module logger
+logger = logging.getLogger(__name__)
+
 
 class DataPrefetcher:
     """Wraps a :class:`torch.utils.data.DataLoader` and preloads the next
@@ -239,7 +244,7 @@ def gather_seen_indices(prefetcher: DataPrefetcher) -> List[Tuple[int, ...]]:
     local_indices: List[torch.Tensor] = prefetcher.seen_indices
     if not local_indices:
         return []
-        
+
     # Clear the list so we don't accumulate forever across epochs!
     prefetcher.seen_indices = []
 

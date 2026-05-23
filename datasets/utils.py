@@ -163,7 +163,7 @@ def get_global_stats(data_dir: str | None = None) -> dict[str, dict[str, float]]
             logger.warning("Failed to load stats from %s: %e", stats_path, e)
 
     # Compute and save if not exists
-    print("Computing global dataset statistics from .npz archives...")
+    logger.info("Computing global dataset statistics from .npz archives...")
     stats: dict[str, dict[str, float]] = {}
 
     # We care about continuous numeric components
@@ -241,8 +241,12 @@ def get_effective_global_stats(
     vp_vs_stats[StatKey.MIN] = float(pmin)
     vp_vs_stats[StatKey.MAX] = float(pmax)
     stats[DataFiles.VP_VS.name] = vp_vs_stats
-    print(
-        f"Using robust VP/VS stats from percentiles {low:.2f}/{high:.2f}: [{pmin:.6f}, {pmax:.6f}]"
+    logger.debug(
+        "Using robust VP/VS stats from percentiles %.2f/%.2f: [%.6f, %.6f]",
+        low,
+        high,
+        pmin,
+        pmax,
     )
     return stats
 
@@ -367,7 +371,7 @@ def _build_pyramid_batch(
 
     pyramids_list: list[list[torch.Tensor]] = [[] for _ in range(len(scale_list))]
 
-    print(f"Loading {data_file.name} from {npz_path}")
+    logger.info("Loading %s from %s", data_file.name, npz_path)
     with np.load(npz_path) as data_dict:
         for key in sorted(data_dict.files):
             data = data_dict[key]
@@ -657,7 +661,7 @@ def _to_derived_pyramid(
     )
 
     pyramids_list: list[list[torch.Tensor]] = [[] for _ in range(len(scale_list))]
-    print(f"Deriving {component.name} from VP, VS, RHO...")
+    logger.info("Deriving %s from VP, VS, RHO...", component.name)
 
     for name, vp_data in vp_samples.items():
         derived = _derive_rock_physics_component(
@@ -793,19 +797,24 @@ def to_wells_pyramids(
 
     if not wells_path.exists():
         logger.warning("Wells file %s not found. Returning empty pyramids.", wells_path)
-        return tuple(_empty_pyramid_tensor(scale, channels_last) for scale in scale_list)
+        return tuple(
+            _empty_pyramid_tensor(scale, channels_last) for scale in scale_list
+        )
 
     # Standard RGB palette for facies classes (0:Black, 1:Red, 2:Blue, 3:Green)
     # Scaled to [0, 1] for processing.
-    palette = torch.tensor(
-        [
-            [0, 0, 0],  # 0: Floodplain
-            [255, 0, 0],  # 1: Point bar
-            [0, 0, 255],  # 2: Channel
-            [0, 255, 0],  # 3: Boundary
-        ],
-        dtype=torch.float32,
-    ) / 255.0
+    palette = (
+        torch.tensor(
+            [
+                [0, 0, 0],  # 0: Floodplain
+                [255, 0, 0],  # 1: Point bar
+                [0, 0, 255],  # 2: Channel
+                [0, 255, 0],  # 3: Boundary
+            ],
+            dtype=torch.float32,
+        )
+        / 255.0
+    )
 
     wells_data = dict(np.load(str(wells_path)))
 
@@ -842,7 +851,9 @@ def to_wells_pyramids(
 
             # 3. Mask non-well columns (Zero RGB = Black)
             well_width = float(well_labels.shape[1])
-            scaled_indices = (nonzero_cols.astype(np.float32) * new_w / well_width).astype(np.int32)
+            scaled_indices = (
+                nonzero_cols.astype(np.float32) * new_w / well_width
+            ).astype(np.int32)
             scaled_cols = np.unique(np.clip(scaled_indices, 0, new_w - 1))
             col_mask = torch.zeros(new_w, dtype=torch.bool, device=labels.device)
             col_mask[scaled_cols] = True
@@ -859,7 +870,9 @@ def to_wells_pyramids(
             pyramids_list[scale_idx].append(rgb)
 
     if not pyramids_list[0]:
-        return tuple(_empty_pyramid_tensor(scale, channels_last) for scale in scale_list)
+        return tuple(
+            _empty_pyramid_tensor(scale, channels_last) for scale in scale_list
+        )
 
     return tuple(torch.stack(pyramid, dim=0) for pyramid in pyramids_list)
 

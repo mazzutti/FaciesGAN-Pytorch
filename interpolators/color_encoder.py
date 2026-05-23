@@ -65,7 +65,7 @@ class ColorEncoder:
             self.palette_tensor = torch.tensor(self.palette, dtype=torch.float32).to(
                 self.device
             )
-        print(f"Detected {self.num_classes} unique facies classes.")
+        logger.debug("Detected %d unique facies classes.", self.num_classes)
 
     def rgb_to_labels(self, img_tensor: torch.Tensor) -> torch.Tensor:
         """Convert an RGB tensor to label indices using the encoder palette.

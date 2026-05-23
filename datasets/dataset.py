@@ -78,7 +78,7 @@ class PyramidsDataset(Dataset[RawBatch]):
 
         fp, wp, mp, sp = self.generate_pyramids()
 
-        n_samples = fp[0].shape[0] if fp and fp[0].numel() > 0 else 0
+        n_samples: int = fp[0].shape[0] if fp and fp[0].numel() > 0 else 0
         self.indices = torch.arange(n_samples, dtype=torch.long)
 
         if n_samples > 0:
