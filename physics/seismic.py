@@ -21,7 +21,10 @@ if TYPE_CHECKING:
 
 
 def ricker_wavelet(
-    f_peak: float, dt: float, length: float = PhysicsConfig.WAVELET_LENGTH
+    f_peak: float,
+    dt: float,
+    length: float = PhysicsConfig.WAVELET_LENGTH,
+    invert_polarity: bool = PhysicsConfig.INVERT_POLARITY,
 ) -> np.ndarray:
     """
     Generate a Ricker (zero-phase) wavelet.
@@ -34,6 +37,9 @@ def ricker_wavelet(
         Sampling interval in seconds.
     length : float, optional
         Total length of the wavelet in seconds. Default is PhysicsConfig.WAVELET_LENGTH.
+    invert_polarity : bool, optional
+        Whether to invert the wavelet polarity to match dataset convention.
+        Default is PhysicsConfig.INVERT_POLARITY.
 
     Returns
     -------
@@ -48,7 +54,14 @@ def ricker_wavelet(
     # Ricker wavelet formula: (1 - 2*pi^2*f^2*t^2) * exp(-pi^2*f^2*t^2)
     term1 = 1 - 2 * pi_sq * f_sq * t_sq
     term2 = np.exp(-pi_sq * f_sq * t_sq)
-    return term1 * term2
+    wavelet = term1 * term2
+    
+    # Apply zero-mean correction to remove truncation DC bias
+    wavelet = wavelet - np.mean(wavelet)
+    
+    if invert_polarity:
+        wavelet = -wavelet
+    return wavelet
 
 
 def normal_incidence_reflection(ip: np.ndarray, axis: int = 0) -> np.ndarray:
@@ -134,6 +147,7 @@ def torch_ricker_wavelet(
     f_peak: float,
     dt: float,
     length: float = PhysicsConfig.WAVELET_LENGTH,
+    invert_polarity: bool = PhysicsConfig.INVERT_POLARITY,
 ) -> torch.Tensor:
     """
     Generate a Ricker (zero-phase) wavelet as a torch Tensor.
@@ -146,6 +160,9 @@ def torch_ricker_wavelet(
         Sampling interval in seconds.
     length : float, optional
         Total length in seconds. Default is PhysicsConfig.WAVELET_LENGTH.
+    invert_polarity : bool, optional
+        Whether to invert the wavelet polarity to match dataset convention.
+        Default is PhysicsConfig.INVERT_POLARITY.
 
     Returns
     -------
@@ -160,7 +177,14 @@ def torch_ricker_wavelet(
 
     term1 = 1 - 2 * pi_sq * f_sq * t_sq
     term2 = torch.exp(-pi_sq * f_sq * t_sq)
-    return term1 * term2
+    wavelet = term1 * term2
+    
+    # Apply zero-mean correction to remove truncation DC bias
+    wavelet = wavelet - torch.mean(wavelet)
+    
+    if invert_polarity:
+        wavelet = -wavelet
+    return wavelet
 
 
 def ip_to_reflectivity(ip: torch.Tensor, padding_value: torch.Tensor) -> torch.Tensor:
@@ -265,6 +289,9 @@ def resample_wavelet_to_depth(
         align_corners=True,
     )
 
+    # Apply zero-mean correction to eliminate truncation/resampling DC bias
+    w_z = w_z - torch.mean(w_z)
+
     # Normalize by L1-norm (sum of absolute values) to ensure consistent convolution
     # gain across different sampling densities (dz).
     w_l1 = torch.sum(torch.abs(w_z.to(torch.float32)))
@@ -281,6 +308,7 @@ def calculate_synthetic_seismic(
     dz_pixel: torch.Tensor,
     physics_state: PhysicsState,
     clip_output: bool = False,
+    normalize_output: bool = True,
 ) -> torch.Tensor:
     """Perform Geophysical Modeling to produce normalized synthetic seismic.
 
@@ -297,11 +325,23 @@ def calculate_synthetic_seismic(
     clip_output : bool, optional
         Whether to clamp the output to normalization_range. Must be False
         during training to prevent dead gradients. Defaults to False.
+    normalize_output : bool, optional
+        When True (default), maps the synthetic amplitude into the dataset
+        normalization range using ``seis_min`` / ``seis_max`` statistics.
+        Set to False when the caller will apply its own stretch (e.g. the
+        TensorBoard visualizer), so that the raw physical-amplitude signal
+        is returned instead.  Using the dataset-statistics path on a
+        synthetic whose amplitude scale differs from the training data
+        collapses all values toward one end of the colormap and causes the
+        Ip spatial pattern to bleed through as a "ghost" in the seismic
+        image.
 
     Returns
     -------
     torch.Tensor
-        Normalized synthetic seismic tensor in ``normalization_range``.
+        Synthetic seismic tensor.  When ``normalize_output`` is True the
+        values are mapped to ``normalization_range``; otherwise the tensor
+        carries raw convolution amplitudes scaled by ``SEISMIC_GAIN``.
     """
 
     # 1. Denormalize IP from ``norm_range`` to physical units (e.g., GPa·m/s).
@@ -327,13 +367,18 @@ def calculate_synthetic_seismic(
     synth = synth * PhysicsConfig.SEISMIC_GAIN
 
     # 5. Normalization using Dataset Statistics, then remap to normalization_range.
-    synth = (synth - physics_state.seis_min) / (
-        physics_state.seis_max - physics_state.seis_min + DomainConfig.EPSILON
-    )
-    lo = torch.min(physics_state.norm_min, physics_state.norm_max)
-    hi = torch.max(physics_state.norm_min, physics_state.norm_max)
-    synth = synth * (hi - lo) + lo
-    
-    if clip_output:
-        return torch.clamp(synth, lo, hi)
+    # Skip when the caller requests raw amplitudes (e.g. visualization paths
+    # that apply their own percentile stretch) to avoid collapsing all values
+    # into a tiny sub-range that lets the Ip spatial pattern ghost through.
+    if normalize_output:
+        synth = (synth - physics_state.seis_min) / (
+            physics_state.seis_max - physics_state.seis_min + DomainConfig.EPSILON
+        )
+        lo = torch.min(physics_state.norm_min, physics_state.norm_max)
+        hi = torch.max(physics_state.norm_min, physics_state.norm_max)
+        synth = synth * (hi - lo) + lo
+
+        if clip_output:
+            return torch.clamp(synth, lo, hi)
+
     return synth

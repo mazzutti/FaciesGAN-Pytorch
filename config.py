@@ -40,12 +40,13 @@ class _DomainConfig:
 class _PhysicsConfig:
     FIXED_KERNEL_SIZE: int = 255
     INTERP_GEOMETRY: tuple[int, int] = (150, 120)
-    WAVELET_F_PEAK: float = 8.0
+    WAVELET_F_PEAK: float = 26.0
     WAVELET_DT: float = 0.001
     WAVELET_LENGTH: float = 0.128
     VP_MIN: float = 2000.0
     VP_MS_SCALE: float = 1000.0
     SEISMIC_GAIN: float = 6.0
+    INVERT_POLARITY: bool = True
 
     @property
     def DZ_PIXEL(self) -> torch.Tensor:

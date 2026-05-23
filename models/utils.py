@@ -7,6 +7,7 @@ from config import DomainConfig
 from device import device_manager
 from enums import ChannelKey, DeviceType, LossFn, SplitKey
 from options import TrainingOptions
+from pathlib import Path
 
 
 def weights_init(m: torch.nn.Module) -> None:
@@ -95,13 +96,12 @@ def calc_gradient_penalty(
 
 def load(path: str) -> Any:
     """Load a torch file from disk, automatically mapping to the managed device.
-    
-    Uses the device_manager to ensure tensors are loaded onto the correct 
+
+    Uses the device_manager to ensure tensors are loaded onto the correct
     local rank or CPU, regardless of where they were originally saved.
     """
-    import os
 
-    if not os.path.exists(path):
+    if not Path(path).exists():
         return None
     return torch.load(path, map_location=device_manager.device, weights_only=False)
 
