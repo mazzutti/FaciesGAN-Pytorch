@@ -480,8 +480,8 @@ class FaciesGAN(nn.Module):
                     disc_mod = self.discriminator.discs[scale]
                 disc = unwrap_ddp(disc_mod)
                 lambda_gp = (
-                    self.options.scale0_gp_alpha
-                    if scale == 0 and self.options.scale0_gp_alpha > 0.0
+                    self.options.scale0_gradient_loss_penalty
+                    if scale == 0 and self.options.scale0_gradient_loss_penalty > 0.0
                     else self.options.gradient_loss_penalty
                 )
                 gp = compute_gradient_penalty(disc, real, fake.detach(), lambda_gp)
@@ -1380,6 +1380,11 @@ class FaciesGAN(nn.Module):
             self.physics_state.vp_ref,
             self.physics_state.dz_pyramid[scale],
             self.physics_state,
+            normalize_output=False,  # Return raw RC*wavelet amplitudes.
+            # The caller (generation.py / plotting.py) applies its own
+            # percentile stretch for display.  Using normalize_output=True
+            # collapses values against seis_min/seis_max and lets the Ip
+            # spatial pattern ghost through the seismic image.
         )
 
     def generate_padding(self, z: torch.Tensor, value: float) -> torch.Tensor:

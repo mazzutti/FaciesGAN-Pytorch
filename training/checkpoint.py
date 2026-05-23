@@ -65,6 +65,7 @@ class Checkpoint:
     rec_noise: List[torch.Tensor] = field(default_factory=_default_rec_noise)
     rng_state: Dict[str, Any] = field(default_factory=_default_rng_state)
     seen_indices: List[Any] = field(default_factory=_default_seen_indices)
+    last_gp_value: Dict[int, torch.Tensor] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the checkpoint to a plain dictionary for torch.save."""
@@ -78,6 +79,7 @@ class Checkpoint:
             "rec_noise": self.rec_noise,
             "rng_state": self.rng_state,
             "seen_indices": self.seen_indices,
+            "last_gp_value": {s: v.cpu() for s, v in self.last_gp_value.items()},
             "scales": {
                 s: {
                     "generator": sc.generator,
@@ -125,6 +127,7 @@ class Checkpoint:
                 rec_noise=data.get("rec_noise", []),
                 rng_state=data.get("rng_state", {}),
                 seen_indices=data.get("seen_indices", []),
+                last_gp_value={int(s): v for s, v in data.get("last_gp_value", {}).items()},
                 scales=scales,
             )
 
@@ -164,5 +167,6 @@ class Checkpoint:
             rec_noise=data.get("rec_noise", []),
             rng_state=data.get("rng_state", {}),
             seen_indices=data.get("seen_indices", []),
+            last_gp_value={int(s): v for s, v in data.get("last_gp_value", {}).items()},
             scales=scales,
         )

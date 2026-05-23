@@ -179,7 +179,9 @@ Below is the complete `TrainingOptions` field list and defaults (authoritative s
 - `crop_size` (int): 256
 - `discriminator_steps` (int): 3
 - `num_img_channels` (int): 3
-- `gamma` (float): 0.9
+- `lr_d_factor` (float): 0.9
+- `scheduler_g` (str): "plateau"
+- `scheduler_d` (str): "step"
 - `generator_steps` (int): 3
 - `gpu_device` (int): 0
 - `img_color_range` (tuple[int,int]): (0, 255)
@@ -223,6 +225,27 @@ Below is the complete `TrainingOptions` field list and defaults (authoritative s
 - `enable_plot_facies` (bool): True
 
 If you rely on these defaults programmatically, prefer importing `TrainingOptions` from `options.py` to ensure you always have the authoritative values.
+
+### Learning Rate Schedulers
+
+FaciesGAN allows dynamic configuration of learning rate schedulers independently for the Generator (G) and Discriminator (D) via the `--scheduler-g` and `--scheduler-d` CLI arguments.
+
+The supported scheduler types are:
+* **`plateau`** (`ReduceLROnPlateau`): Reduces learning rate when the monitored loss plateaus.
+* **`step`** (`StepLR`): Reduces learning rate by a multiplicative factor at regular step/epoch intervals.
+* **`none`** (`ConstantLR`): Keeps the learning rate constant throughout training.
+
+The behavior and parameter mapping for each scheduler type are summarized below:
+
+| Scheduler Type (`--scheduler-g` / `-d`) | Step/Frequency Parameter | Decay Factor Parameter | Target Metric / Trigger |
+| :--- | :--- | :--- | :--- |
+| **`plateau`** | `--lr-patience` (patience steps/epochs) | `--lr-g-factor` (for G) <br> `--lr-d-factor` (for D) | Smoothed generator or discriminator total loss |
+| **`step`** | `--lr-decay` (step size in steps/epochs) | `--lr-g-factor` (for G) <br> `--lr-d-factor` (for D) | Automatic decay at fixed intervals |
+| **`none`** | N/A | N/A | Constant rate throughout training |
+
+#### Scale 0 Specific Behavior
+* **Scale 0 Discriminator Initial LR**: Configured via `--scale0-disc-lr-factor` (default: `1.0`), which scales the initial learning rate (`--lr-d`) specifically for the first scale (e.g. with `0.5`, the initial LR is `2.5e-4` instead of `5e-4`).
+* **LR Decay and Minimums**: The global minimum learning rate threshold is set by `--lr-min` (default: `5e-5`). While `ReduceLROnPlateau` respects this boundary natively, the `StepLR` scheduler will continue decaying past `--lr-min` to allow exact decay counts to match configured values (e.g. $2.5 \times 10^{-4} \times 0.56234^4 = 2.5 \times 10^{-5}$ after 4 decays of D on scale 0).
 
 ### Generating New Facies
 Generate new facies realizations from trained models:

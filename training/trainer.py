@@ -45,7 +45,7 @@ from config import CheckpointFilenames, ExperimentPaths
 from datasets.data_prefetcher import DataPrefetcher, gather_seen_indices
 from datasets.dataset import PyramidsDataset
 from device import device_manager
-from enums import DeviceType, TimeUnit
+from enums import DeviceType, SchedulerType, TimeUnit
 from models import utils as model_utils
 from models.facies_gan import FaciesGAN, unwrap_ddp
 from models.utils import ChannelKey
@@ -173,7 +173,7 @@ class Trainer:
         self.lr_d: float = options.lr_d
         self.beta1: float = options.beta1
         self.lr_decay: int = options.lr_decay
-        self.gamma: float = options.gamma
+        self.lr_d_factor: float = options.lr_d_factor
 
         self.residual_padding: int = options.num_layer * math.floor(
             options.kernel_size / 2
@@ -199,7 +199,7 @@ class Trainer:
 
         # Time unit for scheduling and intervals: 'epoch' or 'step'/'batch'
         self.time_unit: str = getattr(options, "time_unit", TimeUnit.STEP)
-        self.gamma = options.gamma
+        self.lr_d_factor = options.lr_d_factor
 
         self.generator_optimizers: dict[int, torch.optim.Optimizer] = {}
         self.discriminator_optimizers: dict[int, torch.optim.Optimizer] = {}
@@ -376,6 +376,11 @@ class Trainer:
                         # Backward trace
                         loss_tr = (scores_fake.mean() + scores_real.mean()) * 0.0
                         loss_tr.backward()
+
+                        # Tick the compile progress bar for this discriminator scale.
+                        # The actual JIT compilation for the disc fires here (train-mode
+                        # backward), so this is the correct place to report progress.
+                        self.model._mark_disc_compile_progress(scale)
 
                 self.model.generator.zero_grad(set_to_none=True)
                 self.model.discriminator.zero_grad(set_to_none=True)
@@ -934,9 +939,14 @@ class Trainer:
             Tuple of scale indices to set up.
         """
         for scale in scales:
+            lr_d_scale = (
+                self.lr_d * self.options.scale0_disc_lr_factor
+                if scale == 0
+                else self.lr_d
+            )
             self.discriminator_optimizers[scale] = FusedAdam(
                 self.model.discriminator.discs[scale].parameters(),
-                lr=self.lr_d,
+                lr=lr_d_scale,
                 betas=(self.beta1, 0.999),
                 set_grad_none=True,
             )
@@ -967,8 +977,13 @@ class Trainer:
             # creating new schedulers.
             for pg in self.generator_optimizers[scale].param_groups:
                 pg["lr"] = self.lr_g
+            lr_d_scale = (
+                self.lr_d * self.options.scale0_disc_lr_factor
+                if scale == 0
+                else self.lr_d
+            )
             for pg in self.discriminator_optimizers[scale].param_groups:
-                pg["lr"] = self.lr_d
+                pg["lr"] = lr_d_scale
 
             self.generator_schedulers[scale] = self._make_generator_scheduler(
                 self.generator_optimizers[scale]
@@ -980,23 +995,40 @@ class Trainer:
             if scale in self._g_loss_smoother:
                 self._g_loss_smoother[scale].reset()
 
-    def _make_discriminator_scheduler(
-        self, optimizer: torch.optim.Optimizer
-    ) -> LRScheduler:
-        return torch.optim.lr_scheduler.StepLR(
-            optimizer, step_size=self.lr_decay, gamma=self.gamma
+    def _make_scheduler(
+        self,
+        optimizer: torch.optim.Optimizer,
+        scheduler_type: str,
+        is_generator: bool,
+    ) -> Any:
+        if scheduler_type == SchedulerType.PLATEAU:
+            factor = self.options.lr_g_factor if is_generator else self.lr_d_factor
+            return torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=factor,
+                patience=self.options.lr_patience,
+                min_lr=self.options.lr_min,
+                threshold=1e-4,
+            )
+        elif scheduler_type == SchedulerType.STEP:
+            gamma = self.options.lr_g_factor if is_generator else self.lr_d_factor
+            return torch.optim.lr_scheduler.StepLR(
+                optimizer, step_size=self.lr_decay, gamma=gamma
+            )
+        else:
+            return torch.optim.lr_scheduler.ConstantLR(
+                optimizer, factor=1.0, total_iters=0
+            )
+
+    def _make_discriminator_scheduler(self, optimizer: torch.optim.Optimizer) -> Any:
+        return self._make_scheduler(
+            optimizer, self.options.scheduler_d, is_generator=False
         )
 
-    def _make_generator_scheduler(
-        self, optimizer: torch.optim.Optimizer
-    ) -> LRScheduler:
-        return torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode="min",
-            factor=self.options.lr_g_factor,
-            patience=self.options.lr_patience,
-            min_lr=self.options.lr_min,
-            threshold=1e-4,
+    def _make_generator_scheduler(self, optimizer: torch.optim.Optimizer) -> Any:
+        return self._make_scheduler(
+            optimizer, self.options.scheduler_g, is_generator=True
         )
 
     @staticmethod
@@ -1120,14 +1152,13 @@ class Trainer:
             rec_noise=self.model.rec_noise,
             rng_state=device_manager.get_rng_state_dict(),
             seen_indices=self._seen_indices_for_save,
+            last_gp_value=dict(self.model.last_gp_value),
         )
 
         # Save into the first scale's directory (arbitrary but deterministic)
         ckpt_path = Path(scale_paths[min(scales)]) / CheckpointFilenames.EPOCH_CKPT
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-        print(
-            f"Saving epoch checkpoint at epoch {epoch} (batch {batch_id})..."
-        )
+        print(f"Saving epoch checkpoint at epoch {epoch} (batch {batch_id})...")
         try:
             torch.save(checkpoint.to_dict(), str(ckpt_path))
             print(f"Epoch checkpoint saved: {ckpt_path}")
@@ -1179,15 +1210,21 @@ class Trainer:
         # 2.5 Override LR if requested by launch options (handles Resume with new LR)
         for s in scales:
             if s in self.discriminator_optimizers:
-                new_lr_d = self.lr_d * 0.01 if s == 0 else self.lr_d
+                new_lr_d = (
+                    self.lr_d * self.options.scale0_disc_lr_factor
+                    if s == 0
+                    else self.lr_d
+                )
                 for param_group in self.discriminator_optimizers[s].param_groups:
                     param_group["lr"] = new_lr_d
 
                 # Update scheduler base_lrs so it doesn't revert on the next step
                 if s in self.discriminator_schedulers:
-                    self.discriminator_schedulers[s].base_lrs = [new_lr_d] * len(
-                        self.discriminator_optimizers[s].param_groups
-                    )
+                    sch_d = self.discriminator_schedulers[s]
+                    if hasattr(sch_d, "base_lrs"):
+                        sch_d.base_lrs = [new_lr_d] * len(
+                            self.discriminator_optimizers[s].param_groups
+                        )
 
                 from tqdm import tqdm
 
@@ -1199,9 +1236,11 @@ class Trainer:
                 for param_group in self.generator_optimizers[s].param_groups:
                     param_group["lr"] = self.lr_g
                 if s in self.generator_schedulers:
-                    self.generator_schedulers[s].base_lrs = [self.lr_g] * len(
-                        self.generator_optimizers[s].param_groups
-                    )
+                    sch_g = self.generator_schedulers[s]
+                    if hasattr(sch_g, "base_lrs"):
+                        sch_g.base_lrs = [self.lr_g] * len(
+                            self.generator_optimizers[s].param_groups
+                        )
 
         # 3. Restore Auxiliary Metadata
         if ckpt.noise_amps:
@@ -1226,6 +1265,12 @@ class Trainer:
         # 5. Restore Seen Indices
         if ckpt.seen_indices:
             self._seen_indices_for_save = ckpt.seen_indices
+
+        # 6. Restore last computed gradient penalty values
+        if ckpt.last_gp_value:
+            self.model.last_gp_value = {
+                s: v.to(device_manager.device) for s, v in ckpt.last_gp_value.items()
+            }
 
         return ckpt.epoch, ckpt.batch_id
 
@@ -1726,19 +1771,7 @@ class Trainer:
                                 )
                             self._ddp_barrier()
 
-                # End of batch loop
 
-                # Gather all seen indices for this epoch across all ranks
-                epoch_indices = self.collect_seen_indices()
-                if epoch_indices:
-                    # Update the global set of seen indices (accumulated across all epochs)
-                    current_seen: set[tuple[int, ...]] = set(
-                        self._seen_indices_for_save
-                    )
-                    current_seen.update(epoch_indices)
-                    self._seen_indices_for_save = sorted(list(current_seen))
-
-                # End of batch loop
 
                 if device_manager.is_main_process and self.time_unit == TimeUnit.EPOCH:
                     # ── Save Epoch Progress (Periodic or Final) ───────
@@ -1818,8 +1851,8 @@ class Trainer:
             self.visualizer.close()
         if device_manager.is_main_process:
             print("\n✅ Training complete!")
-        if self.enable_tensorboard:
-            print("\n📊 View outputs in TensorBoard (if still running)")
+            if self.enable_tensorboard:
+                print("\n📊 View outputs in TensorBoard (if still running)")
 
         # Final DDP barrier: ensure all ranks have finished training
         # before returning so the caller can safely tear down the
@@ -1948,7 +1981,7 @@ class Trainer:
                     self.log_epoch(writers[scale], epoch, g, d, global_step, _cached_floats.get(scale))  # type: ignore
                     # Log learning rates per scale.
                     lr_g = self.generator_optimizers[scale].param_groups[0]["lr"]  # type: ignore[index]
-                    lr_d = self.discriminator_schedulers[scale].get_last_lr()[0]  # type: ignore[union-attr]
+                    lr_d = self.discriminator_optimizers[scale].param_groups[0]["lr"]  # type: ignore[index]
                     writers[scale].add_scalar("LearningRate/generator", lr_g, global_step)  # type: ignore
                     writers[scale].add_scalar("LearningRate/discriminator", lr_d, global_step)  # type: ignore
 
@@ -1956,12 +1989,13 @@ class Trainer:
             # before schedulers_step advances the count).
             _decay_counter = global_step if self.time_unit != TimeUnit.EPOCH else epoch
             if (
-                self.lr_decay > 0
+                self.options.scheduler_d == SchedulerType.STEP
+                and self.lr_decay > 0
                 and _decay_counter > 0
                 and _decay_counter % self.lr_decay == 0
             ):
-                lr_d_before = self.discriminator_schedulers[scales[0]].get_last_lr()[0]  # type: ignore[union-attr]
-                lr_d_after = lr_d_before * self.gamma  # type: ignore[operator]
+                lr_d_before = self.discriminator_optimizers[scales[0]].param_groups[0]["lr"]  # type: ignore[index]
+                lr_d_after = lr_d_before * self.lr_d_factor  # type: ignore[operator]
                 _unit_label = (
                     f"step {global_step}"
                     if self.time_unit != TimeUnit.EPOCH
@@ -1970,7 +2004,7 @@ class Trainer:
                 progress.write(  # type: ignore
                     f"\n  ⚡ LR decay at {_unit_label}: "
                     f"lr_d {lr_d_before:.2e} → {lr_d_after:.2e} "
-                    f"(gamma={self.gamma})"
+                    f"(lr_d_factor={self.lr_d_factor})"
                 )
 
             # Only rank 0 saves outputs at configured intervals
@@ -1992,43 +2026,61 @@ class Trainer:
             self.schedulers_step(scales, scale_metrics)
 
     def schedulers_step(
-        self, scales: tuple[int, ...], scale_metrics: ScaleMetrics | None = None
+        self,
+        scales: tuple[int, ...],
+        scale_metrics: ScaleMetrics | None = None,
     ) -> None:
         """Step the learning-rate schedulers for the provided scales.
 
-        The generator scheduler is :class:`ReduceLROnPlateau` and receives
-        the EMA-smoothed generator total loss.  The discriminator scheduler
-        remains a plain :class:`StepLR`.
+        The generator and discriminator schedulers are stepped depending on
+        their types (StepLR, ReduceLROnPlateau, or ConstantLR).
 
         Parameters
         ----------
         scales : tuple[int, ...]
             Tuple of scale indices to step the schedulers for.
         scale_metrics : ScaleMetrics, optional
-            Current epoch metrics.  When provided the smoothed generator
-            loss is fed to ``ReduceLROnPlateau.step(metric)``.
+            Current epoch metrics.
         """
         from training.metrics import MetricSmoother
 
         if not hasattr(self, "_g_loss_smoother"):
             self._g_loss_smoother: dict[int, MetricSmoother] = {}
+        if not hasattr(self, "_d_loss_smoother"):
+            self._d_loss_smoother: dict[int, MetricSmoother] = {}
 
-        alpha = getattr(self.options, "lr_smoothing_alpha", 0.9)
+        alpha = getattr(self.options, "lr_smoothing_alpha", 0.95)
 
         for scale in scales:
-            # Generator: ReduceLROnPlateau with smoothed loss
-            if scale_metrics is not None and scale in scale_metrics.generator:
-                g = scale_metrics.generator[scale]
-                raw_loss = g.total.item()  # type: ignore[union-attr]
-                if scale not in self._g_loss_smoother:
-                    self._g_loss_smoother[scale] = MetricSmoother(alpha=alpha)
-                smoothed = self._g_loss_smoother[scale].update(raw_loss)
-                self.generator_schedulers[scale].step(smoothed)  # type: ignore[arg-type]
+            # Generator
+            sch_g = self.generator_schedulers[scale]
+            if isinstance(sch_g, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                if scale_metrics is not None and scale in scale_metrics.generator:
+                    g = scale_metrics.generator[scale]
+                    raw_loss = g.total.item()  # type: ignore[union-attr]
+                    if scale not in self._g_loss_smoother:
+                        self._g_loss_smoother[scale] = MetricSmoother(alpha=alpha)
+                    smoothed = self._g_loss_smoother[scale].update(raw_loss)
+                    sch_g.step(smoothed)  # type: ignore
+                else:
+                    sch_g.step(0.0)  # type: ignore
             else:
-                # Fallback for subclasses that don't pass metrics
-                self.generator_schedulers[scale].step()  # type: ignore[arg-type]
-            # Discriminator: plain StepLR
-            self.discriminator_schedulers[scale].step()
+                sch_g.step()
+
+            # Discriminator
+            sch_d = self.discriminator_schedulers[scale]
+            if isinstance(sch_d, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                if scale_metrics is not None and scale in scale_metrics.discriminator:
+                    d = scale_metrics.discriminator[scale]
+                    raw_loss = d.total.item()  # type: ignore[union-attr]
+                    if scale not in self._d_loss_smoother:
+                        self._d_loss_smoother[scale] = MetricSmoother(alpha=alpha)
+                    smoothed = self._d_loss_smoother[scale].update(raw_loss)
+                    sch_d.step(smoothed)  # type: ignore
+                else:
+                    sch_d.step(0.0)  # type: ignore
+            else:
+                sch_d.step()
 
     def log_epoch(
         self,
@@ -2152,7 +2204,16 @@ class Trainer:
         ]
         # --- Generator Table ---
 
-        cached_v: list[list[float]] = []
+        def _fmt(val: float) -> str:
+            if 0.0 < abs(val) < 0.0001:
+                for prec in (4, 3, 2):
+                    s = f"{val:.{prec}e}"
+                    if len(s) <= 10:
+                        return f"{s:>10}"
+                return f"{val:>10.1e}"
+            return f"{val:>10.4f}"
+
+        cached_v: list[list[str]] = []
 
         for scale in scales:
             g = scale_metrics.generator[scale]
@@ -2170,12 +2231,14 @@ class Trainer:
                     )
                 else:
                     v.append(sm[i].update(raw[i]))
-            cached_v.append(v)
+
+            v_fmt = [_fmt(x) for x in v]
+            cached_v.append(v_fmt)
 
             lines.append(
                 (
-                    f"  │ {scale:^5d} │ {v[0]:>10.4f} │ {v[1]:>10.4f} │ {v[2]:>10.4f} │ "
-                    f"{v[3]:>10.4f} │ {v[4]:>10.4f} │ {v[5]:>10.4f} │ {v[6]:>10.4f} │ {v[7]:>10.4f} │ {v[8]:>10.4f} │"
+                    f"  │ {scale:^5d} │ {v_fmt[0]} │ {v_fmt[1]} │ {v_fmt[2]} │ "
+                    f"{v_fmt[3]} │ {v_fmt[4]} │ {v_fmt[5]} │ {v_fmt[6]} │ {v_fmt[7]} │ {v_fmt[8]} │"
                 )
             )
         lines.append("  └" + "─" * 124 + "┘")
@@ -2192,11 +2255,11 @@ class Trainer:
         lines.append("  ├" + "─" * 59 + "┤")
 
         for i, scale in enumerate(scales):
-            v = cached_v[i]
+            v_fmt = cached_v[i]
             lines.append(
                 (
-                    f"  │ {scale:^5d} │ {v[9]:>10.4f} │ {v[10]:>10.4f} │ "
-                    f"{v[11]:>10.4f} │ {v[12]:>10.4f} │"
+                    f"  │ {scale:^5d} │ {v_fmt[9]} │ {v_fmt[10]} │ "
+                    f"{v_fmt[11]} │ {v_fmt[12]} │"
                 )
             )
         lines.append("  └" + "─" * 59 + "┘")

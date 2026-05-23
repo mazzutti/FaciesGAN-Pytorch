@@ -121,14 +121,14 @@ def build_training_args(
         str(args.scale0_r1_gamma),
         "--scale0-disc-grad-clip",
         str(args.scale0_disc_grad_clip),
-        "--scale0-gp-alpha",
-        str(args.scale0_gp_alpha),
+        "--scale0-gradient-loss-penalty",
+        str(args.scale0_gradient_loss_penalty),
         "--generator-steps",
         str(args.generator_steps),
         "--rec-facies-loss-penalty",
         str(args.rec_facies_loss_penalty),
-        "--gamma",
-        str(args.gamma),
+        "--lr-d-factor",
+        str(args.lr_d_factor),
         "--lr-g",
         str(args.lr_g),
         "--lr-d",
@@ -145,6 +145,10 @@ def build_training_args(
         str(args.lr_smoothing_alpha),
         "--lr-g-factor",
         str(args.lr_g_factor),
+        "--scheduler-g",
+        str(args.scheduler_g),
+        "--scheduler-d",
+        str(args.scheduler_d),
         "--scale0-noise-amp",
         str(args.scale0_noise_amp),
         "--scale0-disc-lr-factor",
@@ -197,6 +201,8 @@ def build_training_args(
 
     if not args.shuffle:
         cmd.append("--no-shuffle")
+    if getattr(args, "enable_logging", False):
+        cmd.append("--enable-logging")
     if not args.enable_tensorboard:
         cmd.append("--no-tensorboard")
     if not args.enable_plot_outputs:
