@@ -12,7 +12,7 @@ from typing import Any
 from dataclasses import dataclass
 
 from config import DirectoryConfig, DomainConfig
-from enums import EmbeddingMethod, FeatureKey, TimeUnit
+from enums import EmbeddingMethod, FeatureKey, SchedulerType, TimeUnit
 
 NORMALIZATION_RANGE: tuple[float, float] = (-1.0, 1.0)
 
@@ -37,7 +37,9 @@ class TrainingOptions(argparse.Namespace):
         scale0_disc_steps_multiplier: int = 1,
         scale0_loss_multiplier: float = 1.0,
         num_facies_channels: int = DomainConfig.NUM_FACIES_CHANNELS,
-        gamma: float = 0.9,
+        lr_d_factor: float = 0.9,
+        scheduler_g: str = SchedulerType.PLATEAU,
+        scheduler_d: str = SchedulerType.STEP,
         generator_steps: int = 3,
         gpu_device: int = 0,
         input_path: str = DirectoryConfig.DATA,
@@ -94,8 +96,8 @@ class TrainingOptions(argparse.Namespace):
         tv_loss_penalty: float = 1e-4,
         elastic_loss_penalty: float = 0.1,
         seismic_loss_penalty: float = 0.1,
-        dz_pixel: float = 5.0,
-        wavelet_f_peak: float = 8.0,
+        dz_pixel: float = 1.0,
+        wavelet_f_peak: float = 26.0,
         wavelet_dt: float = 0.001,
         wavelet_length: float = 0.128,
         lr_patience: int = 400,
@@ -108,7 +110,7 @@ class TrainingOptions(argparse.Namespace):
         scale0_padding_size: int | None = None,
         scale0_r1_gamma: float = 0.0,
         scale0_disc_grad_clip: float = 0.0,
-        scale0_gp_alpha: float = 0.0,
+        scale0_gradient_loss_penalty: float = 0.0,
         scale0_disc_lr_factor: float = 1.0,
         use_gradnorm: bool = False,
         gradnorm_interval: int = 16,
@@ -137,8 +139,12 @@ class TrainingOptions(argparse.Namespace):
             Number of facies output channels (e.g. 3 for RGB). Default is 3.
             The facies classes are typically:
             0: Floodplain, 1: Point bar, 2: Channel, 3: Boundary.
-        gamma : float, optional
-            Learning-rate scheduler multiplicative factor. Default is 0.9.
+        lr_d_factor : float, optional
+            Learning-rate scheduler decay factor (multiplier) for discriminator. Default is 0.9.
+        scheduler_g : str, optional
+            Learning-rate scheduler type for generator ('plateau', 'step', 'none'). Default is 'plateau'.
+        scheduler_d : str, optional
+            Learning-rate scheduler type for discriminator ('plateau', 'step', 'none'). Default is 'step'.
         generator_steps : int, optional
             Number of generator steps per training iteration. Default is 3.
         gpu_device : int, optional
@@ -225,7 +231,12 @@ class TrainingOptions(argparse.Namespace):
         seismic_loss_penalty : float, optional
             Scalar multiplier for the geophysical seismic loss (MSE between synthetic and real seismic). Default is 1e-4.
         dz_pixel : float, optional
-            Vertical resolution of the data in meters per pixel. Default is 5.0.
+            Vertical resolution of the target scale in meters per pixel. Default is 1.0.
+            Note: The real seismic dataset is convolved sample-by-sample (effectively
+            dt = 1.0 ms). To match its wavelet width and avoid checkerboard artifacts at
+            Scale 6 (256x256), dz_pixel should be set to ~0.75 m (equivalent to 1.595 m
+            for the original 120-pixel grid). Setting this too high (e.g. 5.0) causes
+            the wavelet to become 3.13x too thin in pixel space, triggering spatial aliasing.
         wavelet_f_peak : float, optional
             Peak frequency of the Ricker wavelet in Hz. Default is 8.0.
         wavelet_dt : float, optional
@@ -251,7 +262,9 @@ class TrainingOptions(argparse.Namespace):
         self.scale0_disc_steps_multiplier = scale0_disc_steps_multiplier
         self.scale0_loss_multiplier = scale0_loss_multiplier
         self.num_facies_channels = num_facies_channels
-        self.gamma = gamma
+        self.lr_d_factor = lr_d_factor
+        self.scheduler_g = scheduler_g
+        self.scheduler_d = scheduler_d
         self.generator_steps = generator_steps
         self.gpu_device = gpu_device
         self.input_path = input_path
@@ -326,8 +339,8 @@ class TrainingOptions(argparse.Namespace):
         self.scale0_r1_gamma = scale0_r1_gamma
         # Gradient clip norm for scale 0 discriminator parameters (0.0 = disabled).
         self.scale0_disc_grad_clip = scale0_disc_grad_clip
-        # GP alpha override for scale 0 discriminator (0.0 = use global gradient_loss_penalty).
-        self.scale0_gp_alpha = scale0_gp_alpha
+        # GP override for scale 0 discriminator (0.0 = use global gradient_loss_penalty).
+        self.scale0_gradient_loss_penalty = scale0_gradient_loss_penalty
         # Learning-rate multiplier for the scale 0 discriminator (1.0 = same as global lr_d).
         # Values < 1 (e.g. 0.2) slow down D at s0 so G can keep up.
         self.scale0_disc_lr_factor = scale0_disc_lr_factor

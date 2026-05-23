@@ -11,7 +11,7 @@ from argparse import ArgumentParser
 from typing import Any, Optional, cast
 
 from config import DirectoryConfig, PhysicsConfig
-from enums import AmpDtype, TimeUnit
+from enums import AmpDtype, SchedulerType, TimeUnit
 from options import NORMALIZATION_RANGE
 
 
@@ -149,7 +149,11 @@ def add_optimization_args(
         help="number of full dataset passes (each pass shuffles the dataset independently)",
     )
     parser.add_argument(
-        "--gamma", type=float, help="scheduler gamma", default=d.get("gamma", 0.9)
+        "--lr-d-factor",
+        type=float,
+        dest="lr_d_factor",
+        help="scheduler decay factor (multiplier) for discriminator StepLR",
+        default=d.get("lr_d_factor", 0.9),
     )
     parser.add_argument(
         "--lr-g",
@@ -202,6 +206,20 @@ def add_optimization_args(
         help="Factor by which the generator LR is reduced on plateau (default: 0.8)",
     )
     parser.add_argument(
+        "--scheduler-g",
+        type=str,
+        choices=[s.value for s in SchedulerType],
+        default=d.get("scheduler_g", SchedulerType.PLATEAU),
+        help="learning rate scheduler type for generator (default: plateau)",
+    )
+    parser.add_argument(
+        "--scheduler-d",
+        type=str,
+        choices=[s.value for s in SchedulerType],
+        default=d.get("scheduler_d", SchedulerType.STEP),
+        help="learning rate scheduler type for discriminator (default: step)",
+    )
+    parser.add_argument(
         "--beta1",
         type=float,
         default=d.get("beta1", 0.5),
@@ -217,25 +235,25 @@ def add_optimization_args(
         "--use-gradnorm",
         action="store_true",
         default=d.get("use_gradnorm", False),
-        help="Use GradNorm to dynamically balance multi-task generator losses."
+        help="Use GradNorm to dynamically balance multi-task generator losses.",
     )
     parser.add_argument(
         "--gradnorm-interval",
         type=int,
         default=d.get("gradnorm_interval", 16),
-        help="Update loss weights via GradNorm every N generator steps."
+        help="Update loss weights via GradNorm every N generator steps.",
     )
     parser.add_argument(
         "--gradnorm-alpha",
         type=float,
         default=d.get("gradnorm_alpha", 0.15),
-        help="GradNorm asymmetry parameter (restoring force strength)."
+        help="GradNorm asymmetry parameter (restoring force strength).",
     )
     parser.add_argument(
         "--gradnorm-lr",
         type=float,
         default=d.get("gradnorm_lr", 0.0005),
-        help="GradNorm optimizer learning rate."
+        help="GradNorm optimizer learning rate.",
     )
     parser.add_argument(
         "--discriminator-steps",
@@ -273,6 +291,13 @@ def add_pyramid_args(
     d = defaults or {}
     parser.add_argument(
         "--stop-scale", type=int, help="stop scale", default=d.get("stop_scale", 6)
+    )
+    parser.add_argument(
+        "--min-size",
+        type=int,
+        dest="min_size",
+        help="minimum image size at the coarsest pyramid scale (default: 12)",
+        default=d.get("min_size", 12),
     )
     parser.add_argument(
         "--start-scale",
@@ -381,8 +406,8 @@ def add_physics_args(parser: ArgumentParser) -> None:
         "--dz-pixel",
         type=float,
         dest="dz_pixel",
-        default=5.0,
-        help="Vertical resolution in meters per pixel (default: 5.0).",
+        default=1.0,
+        help="Vertical resolution in meters per pixel (default: 1.0). For Scale 6 (256x256) matching the real seismic, set to ~0.75 to prevent wavelet thinning and aliasing.",
     )
     parser.add_argument(
         "--wavelet-f-peak",
@@ -458,11 +483,11 @@ def add_scale0_args(
         help="Gradient clip norm for scale 0 discriminator parameters (default: 0.0).",
     )
     parser.add_argument(
-        "--scale0-gp-alpha",
+        "--scale0-gradient-loss-penalty",
         type=float,
-        default=d.get("scale0_gp_alpha", 0.0),
-        dest="scale0_gp_alpha",
-        help="GP alpha override for scale 0 discriminator (default: 0.0).",
+        default=d.get("scale0_gradient_loss_penalty", 0.0),
+        dest="scale0_gradient_loss_penalty",
+        help="Gradient penalty override for scale 0 discriminator (default: 0.0).",
     )
     parser.add_argument(
         "--scale0-disc-lr-factor",
@@ -522,6 +547,13 @@ def add_gan_loss_args(
 def add_runtime_args(parser: ArgumentParser) -> None:
     """Add runtime control arguments (logging, visualization, compilation)."""
     parser.add_argument(
+        "--enable-logging",
+        action="store_true",
+        dest="enable_logging",
+        default=False,
+        help="Enable Python logging and stdout/stderr teeing (default: disabled).",
+    )
+    parser.add_argument(
         "--no-tensorboard",
         action="store_false",
         dest="enable_tensorboard",
@@ -567,4 +599,3 @@ def add_runtime_args(parser: ArgumentParser) -> None:
         default=98,
         help="Percentile for TensorBoard seismic contrast stretch (default: 98).",
     )
-

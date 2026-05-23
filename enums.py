@@ -89,6 +89,15 @@ class TimeUnit(StrEnum):
     STEP = "step"
 
 
+class SchedulerType(StrEnum):
+    """Supported learning rate scheduler types."""
+
+    PLATEAU = "plateau"
+    STEP = "step"
+    NONE = "none"
+
+
+
 class InterpolationStrategy(StrEnum):
     """Interpolation strategies for multiscale pyramids."""
 

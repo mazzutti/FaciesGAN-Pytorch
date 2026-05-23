@@ -402,6 +402,11 @@ class TensorBoardVisualizer:
             vp_mean,
             dz,
             self.physics_state,
+            normalize_output=False,  # use raw RC*wavelet amplitudes; the
+            # percentile stretch below (lines ~430-432) provides its own
+            # display normalisation.  Passing normalize_output=True collapses
+            # synthetic amplitudes that differ from seis_min/seis_max into a
+            # tiny sub-range, causing the Ip spatial pattern to ghost through.
         )
 
         # 3. Log Generated Seismic
