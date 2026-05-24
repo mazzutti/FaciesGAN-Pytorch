@@ -379,6 +379,12 @@ class ExperimentOptions(TrainingOptions):
         ],
         embedding_per_facies: bool = False,
         no_embeddings: bool = False,
+        variants: list[str] = [
+            "wells_seismic",
+            "wells_only",
+            "seismic_only",
+            "unconditional",
+        ],
         **kwargs: Any,
     ) -> None:
         """Initialize ExperimentOptions, forwarding training args to parent.
@@ -409,6 +415,8 @@ class ExperimentOptions(TrainingOptions):
         no_embeddings : bool, optional
             If True, disable all manifold learning and latent space
             visualizations. Default is False.
+        variants : list of str, optional
+            List of variant IDs to train/evaluate. Default is None (all variants).
         **kwargs : Any
             Additional training arguments passed to the :class:`TrainingOptions`
             constructor.
@@ -422,6 +430,7 @@ class ExperimentOptions(TrainingOptions):
         self.embedding_data = embedding_data
         self.embedding_per_facies = embedding_per_facies
         self.no_embeddings = no_embeddings
+        self.variants = variants
 
 
 # noinspection PyMissingConstructor

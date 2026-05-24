@@ -23,17 +23,24 @@ def get_arguments() -> ArgumentParser:
         help="Number of facies to generate per variant (default: 2000).",
     )
     parser.add_argument(
+        "--variants",
+        nargs="+",
+        default=["wells_seismic", "wells_only", "seismic_only", "unconditional"],
+        choices=["wells_seismic", "wells_only", "seismic_only", "unconditional"],
+        help="List of variants to train/evaluate (default: all variants).",
+    )
+    parser.add_argument(
         "--skip-training",
         action="store_true",
         help="Skip training and only run generation using existing model paths.",
     )
     parser.add_argument(
         "--model-paths",
-        nargs=4,
-        metavar=("WELLS_SEISMIC", "WELLS_ONLY", "SEISMIC_ONLY", "UNCONDITIONAL"),
+        nargs="+",
+        metavar="PATH",
         help=(
             "Explicit model paths for generation-only mode (requires "
-            "--skip-training). Provide 4 paths in order."
+            "--skip-training). Provide paths in order matching the active variants."
         ),
     )
     parser.add_argument(

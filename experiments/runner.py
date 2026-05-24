@@ -69,6 +69,14 @@ def main() -> None:
     base_output = args.output_path
     nproc = args.nproc_per_node
 
+    active_variants = list(ExperimentVariant)
+    if args.variants:
+        valid_ids = [ev.id for ev in ExperimentVariant]
+        for v in args.variants:
+            if v not in valid_ids:
+                parser.error(f"Invalid variant: {v}. Must be one of {valid_ids}")
+        active_variants = [ev for ev in ExperimentVariant if ev.id in args.variants]
+
     # Map variant name -> model path (either from training or --model-paths)
     model_paths: dict[str, str] = {}
     any_retrained = False
@@ -77,11 +85,18 @@ def main() -> None:
 
     if args.skip_training:
         if not args.model_paths:
+            variant_names = ", ".join(ev.id for ev in active_variants)
             parser.error(
-                "--skip-training requires --model-paths with 4 paths "
-                "(wells_seismic, wells_only, seismic_only, unconditional)."
+                f"--skip-training requires --model-paths with {len(active_variants)} paths "
+                f"({variant_names})."
             )
-        for ev, path in zip(ExperimentVariant, args.model_paths):
+        if len(args.model_paths) != len(active_variants):
+            variant_names = ", ".join(ev.id for ev in active_variants)
+            parser.error(
+                f"Expected {len(active_variants)} model paths matching the active variants ({variant_names}), "
+                f"but got {len(args.model_paths)} paths."
+            )
+        for ev, path in zip(active_variants, args.model_paths):
             if not Path(path).is_dir():
                 parser.error(f"Model path does not exist: {path}")
             if not _has_loadable_scale(path):
@@ -91,7 +106,7 @@ def main() -> None:
             model_paths[ev.id] = path
         print("Skipping training, using provided model paths.")
     else:
-        # ── Train all 4 variants ──
+        # ── Train active variants ──
         print("=" * 70)
         print("FACIESGAN CONDITIONING-ABLATION EXPERIMENTS")
         print("=" * 70)
@@ -99,11 +114,11 @@ def main() -> None:
             f"Device: GPU {args.gpu_device} for generation/plotting (DDP training runs in subprocesses with {nproc} GPUs)"
         )
         print(f"compile_backend: {'ON' if args.compile_backend else 'OFF'}")
-        print(f"Variants: {', '.join(ev.id for ev in ExperimentVariant)}")
+        print(f"Variants: {', '.join(ev.id for ev in active_variants)}")
         print(f"Output: {base_output}")
         print("=" * 70 + "\n")
 
-        for ev in ExperimentVariant:
+        for ev in active_variants:
             name = ev.id
             variant_output = str(Path(base_output) / name)
             utils.create_dirs(variant_output)
@@ -191,13 +206,18 @@ def main() -> None:
 
             # ── Load base options & dataset (needed for plots and embeddings) ──
             device_manager.initialize(gpu_id=args.gpu_device, use_cpu=args.use_cpu)
-    _first_ev = next(iter(ExperimentVariant))
+    _first_ev = active_variants[0]
     first_model = model_paths[_first_ev.id]
     _base_args = build_training_args(args, _first_ev.value, first_model)
     _base_opts = get_main_arguments().parse_args(
         _base_args, namespace=TrainingOptions()
     )
     _base_opts.rec = False
+    # Force loading of all real conditioning data types for comparison grids and embedding manifolds
+    _base_opts.use_wells = True
+    _base_opts.use_seismic = True
+    _base_opts.use_rock_physics = True
+
     _dataset = PyramidsDataset(_base_opts)
     # NOTE: We no longer subset the dataset here. By keeping the full dataset,
     # we can use absolute indices (from seen_indices) to retrieve the correct
@@ -282,7 +302,7 @@ def main() -> None:
 
         from models.utils import calculate_channels
 
-        for ev in ExperimentVariant:
+        for ev in active_variants:
             name = ev.id
             model_path = model_paths[name]
             gen_output = str(Path(base_output) / name / "generated")
@@ -389,18 +409,53 @@ def main() -> None:
 
     # Define kinds to plot
     plots = [
-        PlotData("facies", all_facies, real_full_np[..., :facies_ch]),
-        PlotData("ip", all_ip, real_full_np[..., facies_ch] if all_ip else None),
-        PlotData("is", all_is, real_full_np[..., facies_ch + 1] if all_is else None),
         PlotData(
-            "vp_vs", all_vpvs, real_full_np[..., facies_ch + 2] if all_vpvs else None
+            "facies",
+            all_facies,
+            (
+                real_full_np[..., :facies_ch]
+                if real_full_np.shape[-1] >= facies_ch
+                else None
+            ),
+        ),
+        PlotData(
+            "ip",
+            all_ip,
+            (
+                real_full_np[..., facies_ch]
+                if (all_ip and real_full_np.shape[-1] > facies_ch)
+                else None
+            ),
+        ),
+        PlotData(
+            "is",
+            all_is,
+            (
+                real_full_np[..., facies_ch + 1]
+                if (all_is and real_full_np.shape[-1] > facies_ch + 1)
+                else None
+            ),
+        ),
+        PlotData(
+            "vp_vs",
+            all_vpvs,
+            (
+                real_full_np[..., facies_ch + 2]
+                if (all_vpvs and real_full_np.shape[-1] > facies_ch + 2)
+                else None
+            ),
         ),
         PlotData(
             "seismic",
             all_seismic,
             (
                 np.transpose(device_manager.to_numpy(real_seismic_tensor), (0, 2, 3, 1))
-                if all_seismic
+                if (
+                    all_seismic
+                    and real_seismic_tensor is not None
+                    and real_seismic_tensor.numel() > 0
+                    and len(real_seismic_tensor.shape) == 4
+                )
                 else None
             ),
         ),
@@ -530,5 +585,5 @@ def main() -> None:
     print(f"ALL EXPERIMENTS COMPLETE  ({total_elapsed})")
     print("=" * 70 + "\n")
     print(f"\nOutputs in: {base_output}")
-    for ev in ExperimentVariant:
+    for ev in active_variants:
         print(f"  {ev.id}: {model_paths.get(ev.id, 'N/A')}")

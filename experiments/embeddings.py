@@ -339,15 +339,33 @@ def compute_shared_embeddings(
     # 1. Prepare Ground Truth (Real) Features
     real_tensor, _, _, real_seismic_tensor = dataset.get_scale_data(-1)
     if seismic_only:
-        real_flat = _flatten_data(device_manager.to_numpy(real_seismic_tensor))
+        if real_seismic_tensor.numel() == 0 or len(real_seismic_tensor.shape) < 4:
+            target_h = int(dataset.options.crop_size or 128)
+            target_w = int(dataset.options.crop_size or 128)
+            real_flat = np.empty((0, target_h * target_w), dtype=np.float32)
+        else:
+            real_flat = prepare_features(
+                dataset,
+                device_manager.to_numpy(real_seismic_tensor),
+                rock_physics_only=False,
+                seismic_only=True,
+            )
     else:
-        real_flat = prepare_features(
-            dataset,
-            device_manager.to_numpy(real_tensor),
-            rock_physics_only,
-            False,
-            channel_index,
-        )
+        if real_tensor.numel() == 0 or len(real_tensor.shape) < 4:
+            target_h = int(dataset.options.crop_size or 128)
+            target_w = int(dataset.options.crop_size or 128)
+            n_channels = int(dataset.options.num_facies_channels or 3)
+            if rock_physics_only:
+                n_channels = 1
+            real_flat = np.empty((0, n_channels * target_h * target_w), dtype=np.float32)
+        else:
+            real_flat = prepare_features(
+                dataset,
+                device_manager.to_numpy(real_tensor),
+                rock_physics_only,
+                False,
+                channel_index,
+            )
 
     # 2. Prepare Generated (Fake) Features
     f_list: List[np.ndarray] = []
