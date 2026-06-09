@@ -228,6 +228,12 @@ def build_training_args(
     # Rock physics flags
     if args.use_rock_physics:
         cmd.append("--use-rock-physics")
+        if not getattr(args, "use_ip", True):
+            cmd.append("--no-ip")
+        if not getattr(args, "use_is", True):
+            cmd.append("--no-is")
+        if not getattr(args, "use_vpvs", True):
+            cmd.append("--no-vpvs")
         if args.vp_vs_robust_range:
             cmd.append("--vp-vs-robust-range")
             cmd.extend(

@@ -555,7 +555,12 @@ def compute_rock_physics_loss(
         tv_loss = options.tv_loss_penalty * tv_unweighted
 
     elastic_loss = DomainConfig.ZERO_SCALAR
-    if options.elastic_loss_penalty > 0:
+    if (
+        options.elastic_loss_penalty > 0
+        and getattr(options, "use_ip", True)
+        and getattr(options, "use_is", True)
+        and getattr(options, "use_vpvs", True)
+    ):
         log_ip = torch.log(phys["Ip"] + eps)
         log_is = torch.log(phys["Is"] + eps)
         log_vpvs_target = torch.log(phys["VP_VS"] + eps)
@@ -565,7 +570,11 @@ def compute_rock_physics_loss(
         )
 
     seismic_loss = DomainConfig.ZERO_SCALAR
-    if options.seismic_loss_penalty > 0 and seismic_pyramid.get(scale) is not None:
+    if (
+        options.seismic_loss_penalty > 0
+        and seismic_pyramid.get(scale) is not None
+        and getattr(options, "use_ip", True)
+    ):
         vp_phys = phys["Ip"] / physics_state.rho_mean
         vp_mean = torch.mean(vp_phys).clamp(physics_state.vp_min, physics_state.vp_max)
 
@@ -612,11 +621,16 @@ def compute_reconstruction_loss(
 
     if options.use_rock_physics:
         fc = options.num_facies_channels
+        num_rp = sum([
+            getattr(options, "use_ip", True),
+            getattr(options, "use_is", True),
+            getattr(options, "use_vpvs", True)
+        ])
         rec_loss_facies = options.rec_facies_loss_penalty * F.mse_loss(
             rec[:, :fc, ...], real[:, :fc, ...]
         )
         rec_loss_rp = options.rec_rock_physics_loss_penalty * F.huber_loss(
-            rec[:, fc : fc + 3, ...], real[:, fc : fc + 3, ...]
+            rec[:, fc : fc + num_rp, ...], real[:, fc : fc + num_rp, ...]
         )
         return rec_loss_facies, rec_loss_rp
     else:

@@ -832,103 +832,105 @@ class Trainer:
 
             if use_rock_physics and rp_cpu is not None and real_rp_cpu is not None:
                 lo, hi = min(norm_range), max(norm_range)
-                ip_path = out_dir.replace(ExperimentPaths.FACIES, ExperimentPaths.IP)
-                is_path = out_dir.replace(ExperimentPaths.FACIES, ExperimentPaths.IS)
-                vp_vs_path = out_dir.replace(
-                    ExperimentPaths.FACIES, ExperimentPaths.VP_VS
-                )
+                active_properties: list[str] = []
+                if getattr(self.options, "use_ip", True):
+                    active_properties.append("Ip")
+                if getattr(self.options, "use_is", True):
+                    active_properties.append("Is")
+                if getattr(self.options, "use_vpvs", True):
+                    active_properties.append("VP_VS")
 
-                # Ip  (channel 0)
-                os.makedirs(ip_path, exist_ok=True)
-                bw.submit_plot_generated_outputs(
-                    utils.torch2np(
-                        rp_cpu[:, :, 0:1, ...].clamp(lo, hi),
-                        denormalize=True,
-                        normalization_range=norm_range,
-                    ),
-                    utils.torch2np(
-                        real_rp_cpu[:, 0:1, ...].clamp(lo, hi),
-                        denormalize=True,
-                        normalization_range=norm_range,
-                    ),
-                    scale,
-                    epoch,
-                    ip_path,
-                    masks_np,
-                    batch_id=batch_id,
-                    plot_title="Acoustic Impedance (Ip)",
-                    normalization_range=norm_range,
-                )
-
-                # Is  (channel 1)
-                is_path = out_dir.replace(ExperimentPaths.FACIES, ExperimentPaths.IS)
-                os.makedirs(is_path, exist_ok=True)
-                bw.submit_plot_generated_outputs(
-                    utils.torch2np(
-                        rp_cpu[:, :, 1:2, ...].clamp(lo, hi),
-                        denormalize=True,
-                        normalization_range=norm_range,
-                    ),
-                    utils.torch2np(
-                        real_rp_cpu[:, 1:2, ...].clamp(lo, hi),
-                        denormalize=True,
-                        normalization_range=norm_range,
-                    ),
-                    scale,
-                    epoch,
-                    is_path,
-                    masks_np,
-                    batch_id=batch_id,
-                    plot_title="Shear Impedance (Is)",
-                    normalization_range=norm_range,
-                )
-
-                # Vp/Vs  (channel 2)
-                vp_vs_path = out_dir.replace(
-                    ExperimentPaths.FACIES, ExperimentPaths.VP_VS
-                )
-                os.makedirs(vp_vs_path, exist_ok=True)
-                try:
-                    # Diagnostic print: numeric ranges for VP/VS (generated vs real)
-                    gen_vpvs = rp_cpu[:, :, 2:3, ...]
-                    real_vpvs = real_rp_cpu[:, 2:3, ...]
-                    gen_vpvs_np = device_manager.to_numpy(gen_vpvs)
-                    real_vpvs_np = device_manager.to_numpy(real_vpvs)
-                    lo_g = float(np.nanmin(cast(np.ndarray, gen_vpvs_np)))
-                    hi_g = float(np.nanmax(cast(np.ndarray, gen_vpvs_np)))
-                    mean_g = float(np.nanmean(cast(np.ndarray, gen_vpvs_np)))
-                    lo_r = float(np.nanmin(cast(np.ndarray, real_vpvs_np)))
-                    hi_r = float(np.nanmax(cast(np.ndarray, real_vpvs_np)))
-                    mean_r = float(np.nanmean(cast(np.ndarray, real_vpvs_np)))
-                    print(
-                        f"[diagnostic] Scale_{scale} VP_VS generated range: [{lo_g:.6f}, {hi_g:.6f}] mean={mean_g:.6f}"
-                    )
-                    print(
-                        f"[diagnostic] Scale_{scale} VP_VS real      range: [{lo_r:.6f}, {hi_r:.6f}] mean={mean_r:.6f}"
-                    )
-                except Exception as _e:
-                    logger.exception(
-                        "[diagnostic] Could not compute VP/VS numeric summary: %s", _e
-                    )
-                bw.submit_plot_generated_outputs(
-                    utils.torch2np(
-                        rp_cpu[:, :, 2:3, ...].clamp(lo, hi),
-                        denormalize=True,
-                        normalization_range=norm_range,
-                    ),
-                    utils.torch2np(
-                        real_rp_cpu[:, 2:3, ...].clamp(lo, hi),
-                        denormalize=True,
-                        normalization_range=norm_range,
-                    ),
-                    scale,
-                    epoch,
-                    vp_vs_path,
-                    masks_np,
-                    batch_id=batch_id,
-                    plot_title="Vp/Vs Ratio",
-                    normalization_range=norm_range,
-                )
+                for ch_idx, prop_name in enumerate(active_properties):
+                    if prop_name == "Ip":
+                        ip_path = out_dir.replace(ExperimentPaths.FACIES, ExperimentPaths.IP)
+                        os.makedirs(ip_path, exist_ok=True)
+                        bw.submit_plot_generated_outputs(
+                            utils.torch2np(
+                                rp_cpu[:, :, ch_idx : ch_idx + 1, ...].clamp(lo, hi),
+                                denormalize=True,
+                                normalization_range=norm_range,
+                            ),
+                            utils.torch2np(
+                                real_rp_cpu[:, ch_idx : ch_idx + 1, ...].clamp(lo, hi),
+                                denormalize=True,
+                                normalization_range=norm_range,
+                            ),
+                            scale,
+                            epoch,
+                            ip_path,
+                            masks_np,
+                            batch_id=batch_id,
+                            plot_title="Acoustic Impedance (Ip)",
+                            normalization_range=norm_range,
+                        )
+                    elif prop_name == "Is":
+                        is_path = out_dir.replace(ExperimentPaths.FACIES, ExperimentPaths.IS)
+                        os.makedirs(is_path, exist_ok=True)
+                        bw.submit_plot_generated_outputs(
+                            utils.torch2np(
+                                rp_cpu[:, :, ch_idx : ch_idx + 1, ...].clamp(lo, hi),
+                                denormalize=True,
+                                normalization_range=norm_range,
+                            ),
+                            utils.torch2np(
+                                real_rp_cpu[:, ch_idx : ch_idx + 1, ...].clamp(lo, hi),
+                                denormalize=True,
+                                normalization_range=norm_range,
+                            ),
+                            scale,
+                            epoch,
+                            is_path,
+                            masks_np,
+                            batch_id=batch_id,
+                            plot_title="Shear Impedance (Is)",
+                            normalization_range=norm_range,
+                        )
+                    elif prop_name == "VP_VS":
+                        vp_vs_path = out_dir.replace(
+                            ExperimentPaths.FACIES, ExperimentPaths.VP_VS
+                        )
+                        os.makedirs(vp_vs_path, exist_ok=True)
+                        try:
+                            # Diagnostic print: numeric ranges for VP/VS (generated vs real)
+                            gen_vpvs = rp_cpu[:, :, ch_idx : ch_idx + 1, ...]
+                            real_vpvs = real_rp_cpu[:, ch_idx : ch_idx + 1, ...]
+                            gen_vpvs_np = device_manager.to_numpy(gen_vpvs)
+                            real_vpvs_np = device_manager.to_numpy(real_vpvs)
+                            lo_g = float(np.nanmin(cast(np.ndarray, gen_vpvs_np)))
+                            hi_g = float(np.nanmax(cast(np.ndarray, gen_vpvs_np)))
+                            mean_g = float(np.nanmean(cast(np.ndarray, gen_vpvs_np)))
+                            lo_r = float(np.nanmin(cast(np.ndarray, real_vpvs_np)))
+                            hi_r = float(np.nanmax(cast(np.ndarray, real_vpvs_np)))
+                            mean_r = float(np.nanmean(cast(np.ndarray, real_vpvs_np)))
+                            print(
+                                f"[diagnostic] Scale_{scale} VP_VS generated range: [{lo_g:.6f}, {hi_g:.6f}] mean={mean_g:.6f}"
+                            )
+                            print(
+                                f"[diagnostic] Scale_{scale} VP_VS real      range: [{lo_r:.6f}, {hi_r:.6f}] mean={mean_r:.6f}"
+                            )
+                        except Exception as _e:
+                            logger.exception(
+                                "[diagnostic] Could not compute VP/VS numeric summary: %s", _e
+                            )
+                        bw.submit_plot_generated_outputs(
+                            utils.torch2np(
+                                rp_cpu[:, :, ch_idx : ch_idx + 1, ...].clamp(lo, hi),
+                                denormalize=True,
+                                normalization_range=norm_range,
+                            ),
+                            utils.torch2np(
+                                real_rp_cpu[:, ch_idx : ch_idx + 1, ...].clamp(lo, hi),
+                                denormalize=True,
+                                normalization_range=norm_range,
+                            ),
+                            scale,
+                            epoch,
+                            vp_vs_path,
+                            masks_np,
+                            batch_id=batch_id,
+                            plot_title="Vp/Vs Ratio",
+                            normalization_range=norm_range,
+                        )
 
     def setup_optimizers(self, scales: tuple[int, ...]) -> None:
         """Initialize optimizers and schedulers for the given scales.

@@ -289,21 +289,31 @@ class TensorBoardVisualizer:
                         )
 
                 if rp_img is not None and self.physics_state is not None:
-                    # Rock physics contains [Ip, Is, Vp/Vs].
+                    # Determine active names and cmaps based on options
+                    opts = self.physics_state.options
+                    use_ip = getattr(opts, "use_ip", True)
+                    use_is = getattr(opts, "use_is", True)
+                    use_vpvs = getattr(opts, "use_vpvs", True)
+
+                    active_properties: list[tuple[str, str]] = []
+                    if use_ip:
+                        active_properties.append(("Ip", "magma"))
+                    if use_is:
+                        active_properties.append(("Is", "magma"))
+                    if use_vpvs:
+                        active_properties.append(("VpVs", "viridis"))
+
                     # Use raw tensor channels (without tensor2np default
                     # clipping to [0, 1]) so diagnostics and plots reflect
                     # the true normalization domain (e.g. [-1, 1]).
                     sample_chw = device_manager.to_cpu(sample[0])
+                    num_rp_channels = len(active_properties)
                     rp_chw_t = sample_chw[
-                        self.num_facies_channels : self.num_facies_channels + 3, ...
+                        self.num_facies_channels : self.num_facies_channels + num_rp_channels,
+                        ...,
                     ]
                     rp_chw = rp_chw_t.numpy()
 
-                    # Log individual RP attributes if they exist
-                    # Keep legacy TensorBoard tag spelling for VP/VS so
-                    # dashboards and historical runs stay comparable.
-                    names = ["Ip", "Is", "VpVs"]
-                    cmaps = ["magma", "magma", "viridis"]
                     # Batch-read normalization scalars from the PhysicsState
                     # to avoid multiple GPU->CPU synchronizations in the loop.
                     norm_min_t, norm_max_t = device_manager.to_cpu(
@@ -315,7 +325,7 @@ class TensorBoardVisualizer:
                     lo = float(min(norm_min_f, norm_max_f))
                     hi = float(max(norm_min_f, norm_max_f))
                     span = hi - lo
-                    for ch_idx, name in enumerate(names):
+                    for ch_idx, (name, cmap_name) in enumerate(active_properties):
                         if rp_chw.shape[0] > ch_idx:
                             channel_raw = np.asarray(rp_chw[ch_idx], dtype=np.float32)
                             channel_raw = np.nan_to_num(
@@ -347,12 +357,16 @@ class TensorBoardVisualizer:
                             self._add_image_with_cmap(
                                 f"Samples_{name}/Scale_{scale}",
                                 attr_hw,
-                                cmaps[ch_idx],
+                                cmap_name,
                                 epoch,
                             )
 
-                # Log Synthetic Seismic if Rock Physics is enabled
-                if self.has_rp and self.physics_state is not None:
+                # Log Synthetic Seismic if Rock Physics is enabled and Ip is active
+                if (
+                    self.has_rp
+                    and self.physics_state is not None
+                    and getattr(self.physics_state.options, "use_ip", True)
+                ):
                     self._log_seismic(scale, sample, real_seismic, epoch)
 
         self.last_update_time = current_time

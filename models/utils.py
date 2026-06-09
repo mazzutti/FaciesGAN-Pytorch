@@ -145,9 +145,11 @@ def calculate_channels(options: TrainingOptions) -> dict[ChannelKey, int]:
     num_facies_channels = options.num_facies_channels
     num_rp = 0
     if options.use_rock_physics:
-        from enums import DataFiles
-
-        num_rp = len(DataFiles.generator_output_rock_physics())
+        num_rp = sum([
+            getattr(options, "use_ip", True),
+            getattr(options, "use_is", True),
+            getattr(options, "use_vpvs", True)
+        ])
 
     # Total channels produced by the generator (e.g., 3 Facies + 3 Rock Physics = 6)
     total_out: int = num_facies_channels + num_rp
@@ -286,11 +288,14 @@ def split_facies_rp(
     # 2. Rock Physics (if flagged and present)
     num_rp = 0
     if has_rp:
-        from enums import DataFiles
+        num_rp = total_ch - num_facies
+        if has_wells:
+            num_rp -= num_facies
+        if has_seismic:
+            num_rp -= 1
+        num_rp = max(0, num_rp)
 
-        num_rp = len(DataFiles.generator_output_rock_physics())
-
-    if has_rp and total_ch >= curr + num_rp:
+    if has_rp and total_ch >= curr + num_rp and num_rp > 0:
         res["rock_physics"] = _slice(curr, num_rp)
         curr += num_rp
 

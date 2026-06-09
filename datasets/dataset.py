@@ -150,41 +150,49 @@ class PyramidsDataset(Dataset[RawBatch]):
         if self.options.use_rock_physics:
             # We call the public wrappers directly to ensure Joblib populates
             # the specific cache folders (to_ip_pyramids, to_is_pyramids, etc.)
-            rock_physics_attrs = [
-                utils.to_ip_pyramids(
-                    self.scales,
-                    self.data_dir,
-                    self.channels_last,
-                    normalization_range=normalization_range,
-                ),
-                utils.to_is_pyramids(
-                    self.scales,
-                    self.data_dir,
-                    self.channels_last,
-                    normalization_range=normalization_range,
-                ),
-                utils.to_vp_vs_pyramids(
-                    self.scales,
-                    self.data_dir,
-                    self.channels_last,
-                    normalization_range=normalization_range,
-                    use_robust_range=bool(
-                        getattr(self.options, "vp_vs_robust_range", False)
-                    ),
-                    robust_percentiles=(
-                        float(
-                            getattr(
-                                self.options, "vp_vs_robust_percentiles", (1.0, 99.0)
-                            )[0]
+            rock_physics_attrs: list[tuple[torch.Tensor, ...]] = []
+            if getattr(self.options, "use_ip", True):
+                rock_physics_attrs.append(
+                    utils.to_ip_pyramids(
+                        self.scales,
+                        self.data_dir,
+                        self.channels_last,
+                        normalization_range=normalization_range,
+                    )
+                )
+            if getattr(self.options, "use_is", True):
+                rock_physics_attrs.append(
+                    utils.to_is_pyramids(
+                        self.scales,
+                        self.data_dir,
+                        self.channels_last,
+                        normalization_range=normalization_range,
+                    )
+                )
+            if getattr(self.options, "use_vpvs", True):
+                rock_physics_attrs.append(
+                    utils.to_vp_vs_pyramids(
+                        self.scales,
+                        self.data_dir,
+                        self.channels_last,
+                        normalization_range=normalization_range,
+                        use_robust_range=bool(
+                            getattr(self.options, "vp_vs_robust_range", False)
                         ),
-                        float(
-                            getattr(
-                                self.options, "vp_vs_robust_percentiles", (1.0, 99.0)
-                            )[1]
+                        robust_percentiles=(
+                            float(
+                                getattr(
+                                    self.options, "vp_vs_robust_percentiles", (1.0, 99.0)
+                                )[0]
+                            ),
+                            float(
+                                getattr(
+                                    self.options, "vp_vs_robust_percentiles", (1.0, 99.0)
+                                )[1]
+                            ),
                         ),
-                    ),
-                ),
-            ]
+                    )
+                )
 
             combined: list[torch.Tensor] = []
             dim = 3 if self.channels_last else 1

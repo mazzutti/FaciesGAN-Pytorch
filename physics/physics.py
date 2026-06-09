@@ -69,7 +69,13 @@ class PhysicsState(nn.Module):
         )
         phys_min, phys_diff, phys_mean = self._compute_phys_ranges(stats)
 
-        self.phys_names = DataFiles.rock_physics_names()
+        self.phys_names = []
+        if getattr(self.options, "use_ip", True):
+            self.phys_names.append("Ip")
+        if getattr(self.options, "use_is", True):
+            self.phys_names.append("Is")
+        if getattr(self.options, "use_vpvs", True):
+            self.phys_names.append("VP_VS")
 
         phys_diff_tensor = torch.stack([phys_diff[n] for n in self.phys_names])
         phys_min_tensor = torch.stack([phys_min[n] for n in self.phys_names])

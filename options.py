@@ -83,6 +83,9 @@ class TrainingOptions(argparse.Namespace):
         use_wells: bool = False,
         use_seismic: bool = False,
         use_rock_physics: bool = False,
+        use_ip: bool = True,
+        use_is: bool = True,
+        use_vpvs: bool = True,
         vp_vs_robust_range: bool = False,
         vp_vs_robust_percentiles: tuple[float, float] = (1.0, 99.0),
         wells_mask_columns: tuple[int, ...] = (),
@@ -308,6 +311,14 @@ class TrainingOptions(argparse.Namespace):
         self.use_wells = use_wells
         self.use_seismic = use_seismic
         self.use_rock_physics = use_rock_physics
+        self.use_ip = use_ip
+        self.use_is = use_is
+        self.use_vpvs = use_vpvs
+
+        if self.use_rock_physics and not (self.use_ip or self.use_is or self.use_vpvs):
+            raise ValueError(
+                "When use_rock_physics is True, at least one of use_ip, use_is, or use_vpvs must be True."
+            )
         self.vp_vs_robust_range = vp_vs_robust_range
         self.vp_vs_robust_percentiles = tuple(vp_vs_robust_percentiles)
         self.wells_mask_columns = wells_mask_columns

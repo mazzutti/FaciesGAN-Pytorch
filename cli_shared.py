@@ -375,6 +375,27 @@ def add_physics_args(parser: ArgumentParser) -> None:
         help="Train with rock physics volumes (Ip, Is, Vp/Vs) as additional output channels.",
     )
     parser.add_argument(
+        "--no-ip",
+        action="store_false",
+        dest="use_ip",
+        default=True,
+        help="Disable Acoustic Impedance (Ip) output channel.",
+    )
+    parser.add_argument(
+        "--no-is",
+        action="store_false",
+        dest="use_is",
+        default=True,
+        help="Disable Shear Impedance (Is) output channel.",
+    )
+    parser.add_argument(
+        "--no-vpvs",
+        action="store_false",
+        dest="use_vpvs",
+        default=True,
+        help="Disable Vp/Vs output channel.",
+    )
+    parser.add_argument(
         "--rec-rock-physics-loss-penalty",
         type=float,
         dest="rec_rock_physics_loss_penalty",

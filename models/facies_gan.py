@@ -981,13 +981,18 @@ class FaciesGAN(nn.Module):
 
                 if self.options.use_rock_physics:
                     fc = self.options.num_facies_channels
+                    num_rp = sum([
+                        getattr(self.options, "use_ip", True),
+                        getattr(self.options, "use_is", True),
+                        getattr(self.options, "use_vpvs", True)
+                    ])
                     rec_loss_facies = self.options.rec_facies_loss_penalty * F.mse_loss(
                         rec[:, :fc, ...], real[:, :fc, ...]
                     )
                     rec_loss_rp = (
                         self.options.rec_rock_physics_loss_penalty
                         * F.huber_loss(
-                            rec[:, fc : fc + 3, ...], real[:, fc : fc + 3, ...]
+                            rec[:, fc : fc + num_rp, ...], real[:, fc : fc + num_rp, ...]
                         )
                     )
                     rec_facies_loss, rec_rp_loss = rec_loss_facies, rec_loss_rp
