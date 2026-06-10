@@ -29,6 +29,7 @@ from physics.seismic import calculate_synthetic_seismic
 if TYPE_CHECKING:
     from physics.physics import PhysicsState
     from training.metrics import ScaleMetrics
+    from options import TrainingOptions
 
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,7 @@ class TensorBoardVisualizer:
         physics_state: "PhysicsState | None" = None,
         normalization_range: tuple[float, float] = (-1.0, 1.0),
         seismic_stretch_percentile: int = 98,  # kept for call-site compatibility, no longer used
+        options: TrainingOptions | None = None,
     ):
         """Initialize the TensorBoard visualizer.
 
@@ -90,6 +92,8 @@ class TensorBoardVisualizer:
             visualizer applies a fixed 2/98 robust stretch to the synthetic
             seismic's own distribution. Kept for backwards-compatible call
             sites but has no effect.
+        options : TrainingOptions, optional
+            The training options to check which losses/metrics are active.
         """
         self.num_scales = num_scales
         self.output_dir = output_dir
@@ -99,6 +103,7 @@ class TensorBoardVisualizer:
         self.num_facies_channels = num_facies
         self.has_rp = has_rp
         self.physics_state = physics_state
+        self.options = options
         self.normalization_range = (
             float(normalization_range[0]),
             float(normalization_range[1]),
@@ -130,6 +135,53 @@ class TensorBoardVisualizer:
 
         print("TensorBoard initialized.")
         print(f"tensorboard --logdir={log_dir} --port=6006 --bind_all")
+
+    def _is_metric_active(self, key: str) -> bool:
+        """Check if a metric is active based on the saved training options."""
+        if self.options is None:
+            return True
+
+        from enums import MetricKey
+
+        if key == MetricKey.G_TOTAL:
+            return True
+        if key == MetricKey.G_FAKE:
+            return getattr(self.options, "adversarial_loss_penalty", 1.0) > 0
+        if key == MetricKey.G_REC_FACIES:
+            return getattr(self.options, "rec_facies_loss_penalty", 10.0) > 0
+        if key == MetricKey.G_WELL:
+            return getattr(self.options, "use_wells", False) and getattr(self.options, "well_loss_penalty", 10.0) > 0
+        if key == MetricKey.G_DIV:
+            return getattr(self.options, "diversity_loss_penalty", 1.0) > 0
+        if key == MetricKey.G_REC_ROCK_PHYSICS:
+            return getattr(self.options, "use_rock_physics", False) and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
+        if key == MetricKey.G_TV:
+            return getattr(self.options, "use_rock_physics", False) and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+        if key == MetricKey.G_ELASTIC:
+            return (
+                getattr(self.options, "use_rock_physics", False)
+                and getattr(self.options, "elastic_loss_penalty", 0.1) > 0
+                and getattr(self.options, "use_ip", True)
+                and getattr(self.options, "use_is", True)
+                and getattr(self.options, "use_vpvs", True)
+            )
+        if key == MetricKey.G_SEISMIC:
+            return (
+                getattr(self.options, "use_rock_physics", False)
+                and getattr(self.options, "use_seismic", False)
+                and getattr(self.options, "seismic_loss_penalty", 0.1) > 0
+                and getattr(self.options, "use_ip", True)
+            )
+        if key == MetricKey.D_TOTAL:
+            return True
+        if key == MetricKey.D_REAL:
+            return True
+        if key == MetricKey.D_FAKE:
+            return True
+        if key == MetricKey.D_GP:
+            return getattr(self.options, "gradient_loss_penalty", 10.0) > 0
+
+        return True
 
     def update(
         self,
@@ -184,21 +236,29 @@ class TensorBoardVisualizer:
 
         # Define standard metric groups
         d_keys = [
-            MetricKey.D_TOTAL,
-            MetricKey.D_REAL,
-            MetricKey.D_FAKE,
-            MetricKey.D_GP,
+            key
+            for key in [
+                MetricKey.D_TOTAL,
+                MetricKey.D_REAL,
+                MetricKey.D_FAKE,
+                MetricKey.D_GP,
+            ]
+            if self._is_metric_active(key)
         ]
         g_keys = [
-            MetricKey.G_TOTAL,
-            MetricKey.G_FAKE,
-            MetricKey.G_REC_FACIES,
-            MetricKey.G_WELL,
-            MetricKey.G_DIV,
-            MetricKey.G_REC_ROCK_PHYSICS,
-            MetricKey.G_TV,
-            MetricKey.G_ELASTIC,
-            MetricKey.G_SEISMIC,
+            key
+            for key in [
+                MetricKey.G_TOTAL,
+                MetricKey.G_FAKE,
+                MetricKey.G_REC_FACIES,
+                MetricKey.G_WELL,
+                MetricKey.G_DIV,
+                MetricKey.G_REC_ROCK_PHYSICS,
+                MetricKey.G_TV,
+                MetricKey.G_ELASTIC,
+                MetricKey.G_SEISMIC,
+            ]
+            if self._is_metric_active(key)
         ]
 
         # Log individual scale metrics

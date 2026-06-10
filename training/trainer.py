@@ -242,6 +242,7 @@ class Trainer:
                     float(options.normalization_range[1]),
                 ),
                 seismic_stretch_percentile=options.seismic_stretch_percentile,
+                options=options,
             )
             print("📊 TensorBoard logging enabled")
             print(f"   logdir: {log_dir}")
@@ -2183,39 +2184,80 @@ class Trainer:
 
         global_step = global_step if global_step is not None else epoch
 
+        # Determine active statuses from self.options
+        adv_active = getattr(self.options, "adversarial_loss_penalty", 1.0) > 0
+        rec_facies_active = getattr(self.options, "rec_facies_loss_penalty", 10.0) > 0
+        well_active = getattr(self.options, "use_wells", False) and getattr(self.options, "well_loss_penalty", 10.0) > 0
+        div_active = getattr(self.options, "diversity_loss_penalty", 1.0) > 0
+        rec_rp_active = getattr(self.options, "use_rock_physics", False) and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
+        tv_active = getattr(self.options, "use_rock_physics", False) and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+        elastic_active = (
+            getattr(self.options, "use_rock_physics", False)
+            and getattr(self.options, "elastic_loss_penalty", 0.1) > 0
+            and getattr(self.options, "use_ip", True)
+            and getattr(self.options, "use_is", True)
+            and getattr(self.options, "use_vpvs", True)
+        )
+        seismic_active = (
+            getattr(self.options, "use_rock_physics", False)
+            and getattr(self.options, "use_seismic", False)
+            and getattr(self.options, "seismic_loss_penalty", 0.1) > 0
+            and getattr(self.options, "use_ip", True)
+        )
+        gp_active = getattr(self.options, "gradient_loss_penalty", 10.0) > 0
+
         writer.add_scalar("G/Total", g_total, global_step)  # type: ignore
-        writer.add_scalar("G/Adv", g_fake, global_step)  # type: ignore
-        writer.add_scalar("G/Rec_Facies", g_rec_facies, global_step)  # type: ignore
-        writer.add_scalar("G/Well", g_well, global_step)  # type: ignore
-        writer.add_scalar("G/Diversity", g_div, global_step)  # type: ignore
-        writer.add_scalar("G/Rec_Rock_Physics", g_rec_rock_physics, global_step)  # type: ignore
-        writer.add_scalar("G/TV_Smoothness", g_tv, global_step)  # type: ignore
-        writer.add_scalar("G/Elastic", g_elastic, global_step)  # type: ignore
-        writer.add_scalar("G/Seismic", g_seismic, global_step)  # type: ignore
+        if adv_active:
+            writer.add_scalar("G/Adv", g_fake, global_step)  # type: ignore
+        if rec_facies_active:
+            writer.add_scalar("G/Rec_Facies", g_rec_facies, global_step)  # type: ignore
+        if well_active:
+            writer.add_scalar("G/Well", g_well, global_step)  # type: ignore
+        if div_active:
+            writer.add_scalar("G/Diversity", g_div, global_step)  # type: ignore
+        if rec_rp_active:
+            writer.add_scalar("G/Rec_Rock_Physics", g_rec_rock_physics, global_step)  # type: ignore
+        if tv_active:
+            writer.add_scalar("G/TV_Smoothness", g_tv, global_step)  # type: ignore
+        if elastic_active:
+            writer.add_scalar("G/Elastic", g_elastic, global_step)  # type: ignore
+        if seismic_active:
+            writer.add_scalar("G/Seismic", g_seismic, global_step)  # type: ignore
+
         writer.add_scalar("D/Total", d_total, global_step)  # type: ignore
         writer.add_scalar("D/Real", d_real, global_step)  # type: ignore
         writer.add_scalar("D/Fake", d_fake, global_step)  # type: ignore
-        writer.add_scalar("D/GP", d_gp, global_step)  # type: ignore
+        if gp_active:
+            writer.add_scalar("D/GP", d_gp, global_step)  # type: ignore
 
         step = global_step
 
         # Log to TensorBoard - discriminator losses
         writer.add_scalar("Loss/train/discriminator/real", -d_real, step)  # type: ignore
         writer.add_scalar("Loss/train/discriminator/fake", d_fake, step)  # type: ignore
-        writer.add_scalar(  # type: ignore
-            "Loss/train/discriminator/gradient_penalty", d_gp, step
-        )
+        if gp_active:
+            writer.add_scalar(  # type: ignore
+                "Loss/train/discriminator/gradient_penalty", d_gp, step
+            )
         writer.add_scalar("Loss/train/discriminator", d_total, step)  # type: ignore
 
         # Log to TensorBoard - generator losses
-        writer.add_scalar("Loss/train/generator/adversarial", g_fake, step)  # type: ignore
-        writer.add_scalar("Loss/train/generator/rec_facies", g_rec_facies, step)  # type: ignore
-        writer.add_scalar("Loss/train/generator/well_constraint", g_well, step)  # type: ignore
-        writer.add_scalar("Loss/train/generator/diversity", g_div, step)  # type: ignore
-        writer.add_scalar("Loss/train/generator/rec_rock_physics", g_rec_rock_physics, step)  # type: ignore
-        writer.add_scalar("Loss/train/generator/tv_smoothness", g_tv, step)  # type: ignore
-        writer.add_scalar("Loss/train/generator/elastic", g_elastic, step)  # type: ignore
-        writer.add_scalar("Loss/train/generator/seismic", g_seismic, step)  # type: ignore
+        if adv_active:
+            writer.add_scalar("Loss/train/generator/adversarial", g_fake, step)  # type: ignore
+        if rec_facies_active:
+            writer.add_scalar("Loss/train/generator/rec_facies", g_rec_facies, step)  # type: ignore
+        if well_active:
+            writer.add_scalar("Loss/train/generator/well_constraint", g_well, step)  # type: ignore
+        if div_active:
+            writer.add_scalar("Loss/train/generator/diversity", g_div, step)  # type: ignore
+        if rec_rp_active:
+            writer.add_scalar("Loss/train/generator/rec_rock_physics", g_rec_rock_physics, step)  # type: ignore
+        if tv_active:
+            writer.add_scalar("Loss/train/generator/tv_smoothness", g_tv, step)  # type: ignore
+        if elastic_active:
+            writer.add_scalar("Loss/train/generator/elastic", g_elastic, step)  # type: ignore
+        if seismic_active:
+            writer.add_scalar("Loss/train/generator/seismic", g_seismic, step)  # type: ignore
         writer.add_scalar("Loss/train/generator", g_total, step)  # type: ignore
 
     def _print_metrics_table(
@@ -2240,16 +2282,57 @@ class Trainer:
                     MetricSmoother(alpha=_sm_alpha) for _ in range(13)
                 ]
 
+        # Determine active statuses from self.options
+        adv_active = getattr(self.options, "adversarial_loss_penalty", 1.0) > 0
+        rec_facies_active = getattr(self.options, "rec_facies_loss_penalty", 10.0) > 0
+        well_active = getattr(self.options, "use_wells", False) and getattr(self.options, "well_loss_penalty", 10.0) > 0
+        div_active = getattr(self.options, "diversity_loss_penalty", 1.0) > 0
+        rec_rp_active = getattr(self.options, "use_rock_physics", False) and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
+        tv_active = getattr(self.options, "use_rock_physics", False) and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+        elastic_active = (
+            getattr(self.options, "use_rock_physics", False)
+            and getattr(self.options, "elastic_loss_penalty", 0.1) > 0
+            and getattr(self.options, "use_ip", True)
+            and getattr(self.options, "use_is", True)
+            and getattr(self.options, "use_vpvs", True)
+        )
+        seismic_active = (
+            getattr(self.options, "use_rock_physics", False)
+            and getattr(self.options, "use_seismic", False)
+            and getattr(self.options, "seismic_loss_penalty", 0.1) > 0
+            and getattr(self.options, "use_ip", True)
+        )
+        gp_active = getattr(self.options, "gradient_loss_penalty", 10.0) > 0
+
+        # Build dynamic generator columns
+        g_cols = [("Scale", 5), ("G_total", 10)]
+        if adv_active:
+            g_cols.append(("G_adv", 10))
+        if rec_facies_active:
+            g_cols.append(("G_fa_rec", 10))
+        if well_active:
+            g_cols.append(("G_well", 10))
+        if div_active:
+            g_cols.append(("G_div", 10))
+        if rec_rp_active:
+            g_cols.append(("G_rp_rec", 10))
+        if tv_active:
+            g_cols.append(("G_tv", 10))
+        if elastic_active:
+            g_cols.append(("G_el", 10))
+        if seismic_active:
+            g_cols.append(("G_seis", 10))
+
+        g_box_width = sum(w for _, w in g_cols) + 3 * len(g_cols) - 1
+        g_header_line = "  │ " + " │ ".join(f"{name:^{width}}" for name, width in g_cols) + " │"
+
         lines: list[str] = [
             "",
             "",
             "  Generator Metrics:",
-            "  ┌" + "─" * 124 + "┐",
-            (
-                f"  │ {'Scale':^5} │ {'G_total':^10} │ {'G_adv':^10} │ {'G_fa_rec':^10} │ "
-                f"{'G_well':^10} │ {'G_div':^10} │ {'G_rp_rec':^10} │ {'G_tv':^10} │ {'G_el':^10} │ {'G_seis':^10} │"
-            ),
-            "  ├" + "─" * 124 + "┤",
+            "  ┌" + "─" * g_box_width + "┐",
+            g_header_line,
+            "  ├" + "─" * g_box_width + "┤",
         ]
         # --- Generator Table ---
 
@@ -2284,34 +2367,48 @@ class Trainer:
             v_fmt = [_fmt(x) for x in v]
             cached_v.append(v_fmt)
 
-            lines.append(
-                (
-                    f"  │ {scale:^5d} │ {v_fmt[0]} │ {v_fmt[1]} │ {v_fmt[2]} │ "
-                    f"{v_fmt[3]} │ {v_fmt[4]} │ {v_fmt[5]} │ {v_fmt[6]} │ {v_fmt[7]} │ {v_fmt[8]} │"
-                )
-            )
-        lines.append("  └" + "─" * 124 + "┘")
+            # Map raw array index explicitly to corresponding columns if active
+            row_vals = [f"{scale:^5d}", v_fmt[0]]  # Scale, G_total
+            if adv_active:
+                row_vals.append(v_fmt[1])
+            if rec_facies_active:
+                row_vals.append(v_fmt[2])
+            if well_active:
+                row_vals.append(v_fmt[3])
+            if div_active:
+                row_vals.append(v_fmt[4])
+            if rec_rp_active:
+                row_vals.append(v_fmt[5])
+            if tv_active:
+                row_vals.append(v_fmt[6])
+            if elastic_active:
+                row_vals.append(v_fmt[7])
+            if seismic_active:
+                row_vals.append(v_fmt[8])
+
+            lines.append("  │ " + " │ ".join(row_vals) + " │")
+        lines.append("  └" + "─" * g_box_width + "┘")
 
         # --- Discriminator Table ---
+        d_cols = [("Scale", 5), ("D_total", 10), ("D_real", 10), ("D_fake", 10)]
+        if gp_active:
+            d_cols.append(("D_gp", 10))
+
+        d_box_width = sum(w for _, w in d_cols) + 3 * len(d_cols) - 1
+        d_header_line = "  │ " + " │ ".join(f"{name:^{width}}" for name, width in d_cols) + " │"
+
         lines.append("  Discriminator Metrics:")
-        lines.append("  ┌" + "─" * 59 + "┐")
-        lines.append(
-            (
-                f"  │ {'Scale':^5} │ {'D_total':^10} │ {'D_real':^10} │ "
-                f"{'D_fake':^10} │ {'D_gp':^10} │"
-            )
-        )
-        lines.append("  ├" + "─" * 59 + "┤")
+        lines.append("  ┌" + "─" * d_box_width + "┐")
+        lines.append(d_header_line)
+        lines.append("  ├" + "─" * d_box_width + "┤")
 
         for i, scale in enumerate(scales):
             v_fmt = cached_v[i]
-            lines.append(
-                (
-                    f"  │ {scale:^5d} │ {v_fmt[9]} │ {v_fmt[10]} │ "
-                    f"{v_fmt[11]} │ {v_fmt[12]} │"
-                )
-            )
-        lines.append("  └" + "─" * 59 + "┘")
+            row_vals = [f"{scale:^5d}", v_fmt[9], v_fmt[10], v_fmt[11]]
+            if gp_active:
+                row_vals.append(v_fmt[12])
+            lines.append("  │ " + " │ ".join(row_vals) + " │")
+        lines.append("  └" + "─" * d_box_width + "┘")
         # Use plain print so the loss table is always shown on stdout
         # (user preference) rather than relying on logging configuration.
         print("\n".join(lines))

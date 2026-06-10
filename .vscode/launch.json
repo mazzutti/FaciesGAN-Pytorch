@@ -220,6 +220,7 @@
         "--gradnorm-alpha", "0.3",
 
         "--time-unit", "step",
+        "--log-metrics-interval", "50",
         "--gradnorm-interval", "55",
         "--checkpoint-interval", "500",
         "--save-interval", "200",
