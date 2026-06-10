@@ -1,5 +1,6 @@
 from argparse import ArgumentParser
 from typing import Any
+
 import cli_shared
 from enums import VariantConfig
 
@@ -218,6 +219,8 @@ def build_training_args(
         cmd.append("--no-compile")
     if args.gradient_checkpointing:
         cmd.append("--gradient-checkpoint")
+    if getattr(args, "log_metrics_interval", None) is not None:
+        cmd.extend(["--log-metrics-interval", str(args.log_metrics_interval)])
 
     # Conditioning flags
     if variant.use_wells:

@@ -476,7 +476,9 @@ def compute_seismic_loss(
     # Using a larger epsilon (1e-4) to prevent gradient explosions on flat patches.
     # Specify dim=(2, 3) to compute RMS per-sample, not across the whole batch!
     eps_safe = 1e-4
-    synth_rms = torch.sqrt(torch.mean(synth_zero**2, dim=(2, 3), keepdim=True) + eps_safe)
+    synth_rms = torch.sqrt(
+        torch.mean(synth_zero**2, dim=(2, 3), keepdim=True) + eps_safe
+    )
     real_rms = torch.sqrt(torch.mean(real_zero**2, dim=(2, 3), keepdim=True) + eps_safe)
 
     synth_norm = synth_zero / synth_rms
@@ -621,11 +623,13 @@ def compute_reconstruction_loss(
 
     if options.use_rock_physics:
         fc = options.num_facies_channels
-        num_rp = sum([
-            getattr(options, "use_ip", True),
-            getattr(options, "use_is", True),
-            getattr(options, "use_vpvs", True)
-        ])
+        num_rp = sum(
+            [
+                getattr(options, "use_ip", True),
+                getattr(options, "use_is", True),
+                getattr(options, "use_vpvs", True),
+            ]
+        )
         rec_loss_facies = options.rec_facies_loss_penalty * F.mse_loss(
             rec[:, :fc, ...], real[:, :fc, ...]
         )

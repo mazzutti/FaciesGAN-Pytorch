@@ -182,12 +182,16 @@ class PyramidsDataset(Dataset[RawBatch]):
                         robust_percentiles=(
                             float(
                                 getattr(
-                                    self.options, "vp_vs_robust_percentiles", (1.0, 99.0)
+                                    self.options,
+                                    "vp_vs_robust_percentiles",
+                                    (1.0, 99.0),
                                 )[0]
                             ),
                             float(
                                 getattr(
-                                    self.options, "vp_vs_robust_percentiles", (1.0, 99.0)
+                                    self.options,
+                                    "vp_vs_robust_percentiles",
+                                    (1.0, 99.0),
                                 )[1]
                             ),
                         ),

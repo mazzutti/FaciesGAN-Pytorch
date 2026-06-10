@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -7,7 +8,6 @@ from config import DomainConfig
 from device import device_manager
 from enums import ChannelKey, DeviceType, LossFn, SplitKey
 from options import TrainingOptions
-from pathlib import Path
 
 
 def weights_init(m: torch.nn.Module) -> None:
@@ -145,11 +145,13 @@ def calculate_channels(options: TrainingOptions) -> dict[ChannelKey, int]:
     num_facies_channels = options.num_facies_channels
     num_rp = 0
     if options.use_rock_physics:
-        num_rp = sum([
-            getattr(options, "use_ip", True),
-            getattr(options, "use_is", True),
-            getattr(options, "use_vpvs", True)
-        ])
+        num_rp = sum(
+            [
+                getattr(options, "use_ip", True),
+                getattr(options, "use_is", True),
+                getattr(options, "use_vpvs", True),
+            ]
+        )
 
     # Total channels produced by the generator (e.g., 3 Facies + 3 Rock Physics = 6)
     total_out: int = num_facies_channels + num_rp

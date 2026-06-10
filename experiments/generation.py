@@ -181,7 +181,7 @@ def _generate_samples(
                         active_properties.append("VP_VS")
 
                     for ch_idx, prop_name in enumerate(active_properties):
-                        prop_norm = rp_t[:, ch_idx:ch_idx+1, ...]
+                        prop_norm = rp_t[:, ch_idx : ch_idx + 1, ...]
                         # For manifold learning and embedding comparisons, keep features in normalized range [-1, 1]
                         if prop_name == "Ip":
                             all_ip.append(device_manager.to_numpy(prop_norm.squeeze(0)))
@@ -189,7 +189,8 @@ def _generate_samples(
                                 phys_dict[DataFiles.Ip.name].squeeze(0)
                             )
                             np.save(
-                                ip_dir / f"{DataFiles.Ip.name.lower()}_{idx:04d}.npy", ip_phys
+                                ip_dir / f"{DataFiles.Ip.name.lower()}_{idx:04d}.npy",
+                                ip_phys,
                             )
                         elif prop_name == "Is":
                             all_is.append(device_manager.to_numpy(prop_norm.squeeze(0)))
@@ -197,24 +198,31 @@ def _generate_samples(
                                 phys_dict[DataFiles.Is.name].squeeze(0)
                             )
                             np.save(
-                                is_dir / f"{DataFiles.Is.name.lower()}_{idx:04d}.npy", is_phys
+                                is_dir / f"{DataFiles.Is.name.lower()}_{idx:04d}.npy",
+                                is_phys,
                             )
                         elif prop_name == "VP_VS":
-                            all_vpvs.append(device_manager.to_numpy(prop_norm.squeeze(0)))
+                            all_vpvs.append(
+                                device_manager.to_numpy(prop_norm.squeeze(0))
+                            )
                             vpvs_phys = device_manager.to_numpy(
                                 phys_dict[DataFiles.VP_VS.name].squeeze(0)
                             )
                             np.save(
-                                vpvs_dir / f"{DataFiles.VP_VS.name.lower()}_{idx:04d}.npy",
+                                vpvs_dir
+                                / f"{DataFiles.VP_VS.name.lower()}_{idx:04d}.npy",
                                 vpvs_phys,
                             )
 
                     # Also synthetic seismic (requires Ip)
                     if getattr(opts, "use_ip", True):
-                        seismic: torch.Tensor = model.get_synthetic_seismic(g.unsqueeze(0))
+                        seismic: torch.Tensor = model.get_synthetic_seismic(
+                            g.unsqueeze(0)
+                        )
                         all_seismic.append(device_manager.to_numpy(seismic.squeeze(0)))
                         np.save(
-                            seismic_dir / f"{DataFiles.SEISMIC.name.lower()}_{idx:04d}.npy",
+                            seismic_dir
+                            / f"{DataFiles.SEISMIC.name.lower()}_{idx:04d}.npy",
                             device_manager.to_numpy(seismic.squeeze(0)),
                         )
 

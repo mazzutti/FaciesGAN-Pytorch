@@ -596,6 +596,13 @@ def add_runtime_args(parser: ArgumentParser) -> None:
         help="Disable torch.compile (default: enabled).",
     )
     parser.add_argument(
+        "--log-metrics-interval",
+        type=int,
+        dest="log_metrics_interval",
+        default=10,
+        help="Interval between logging metrics to TensorBoard and updating smoothers (in units specified by --time-unit) (default: 10).",
+    )
+    parser.add_argument(
         "--gradient-checkpoint",
         action="store_true",
         dest="gradient_checkpointing",

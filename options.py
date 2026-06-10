@@ -8,8 +8,8 @@ arguments used throughout the project. They may be passed as the
 
 import argparse
 import os
-from typing import Any
 from dataclasses import dataclass
+from typing import Any
 
 from config import DirectoryConfig, DomainConfig
 from enums import EmbeddingMethod, FeatureKey, SchedulerType, TimeUnit
@@ -108,6 +108,7 @@ class TrainingOptions(argparse.Namespace):
         lr_smoothing_alpha: float = 0.95,
         lr_g_factor: float = 0.8,
         time_unit: str = TimeUnit.STEP,
+        log_metrics_interval: int = 10,
         compile_backend: bool = True,
         seismic_stretch_percentile: int = 98,
         scale0_padding_size: int | None = None,
@@ -342,6 +343,7 @@ class TrainingOptions(argparse.Namespace):
         self.lr_smoothing_alpha = lr_smoothing_alpha
         self.lr_g_factor = lr_g_factor
         self.time_unit = time_unit
+        self.log_metrics_interval = log_metrics_interval
         self.compile_backend = compile_backend
         self.seismic_stretch_percentile = seismic_stretch_percentile
         # Discriminator padding override for scale 0 only (None = use global padding_size).

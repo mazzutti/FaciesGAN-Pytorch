@@ -16,14 +16,14 @@ Notes
 
 from __future__ import annotations
 
+import logging
 import math
-from pathlib import Path
 import os
 import sys
 import threading
 import time
-import logging
 from collections.abc import Iterator
+from pathlib import Path
 from typing import IO, Any, cast
 
 import numpy as np
@@ -148,8 +148,8 @@ class Trainer:
         self._num_passes: int = options.num_iter
         self._current_pass_idx: int = 0
 
-        # How often to flush TensorBoard scalars (epochs).
-        self._tb_log_interval: int = 10
+        # How often to flush TensorBoard scalars and update smoothers (optimization steps).
+        self._tb_log_interval: int = getattr(options, "log_metrics_interval", 10)
 
         self.batch_size: int = (
             options.batch_size
@@ -842,7 +842,9 @@ class Trainer:
 
                 for ch_idx, prop_name in enumerate(active_properties):
                     if prop_name == "Ip":
-                        ip_path = out_dir.replace(ExperimentPaths.FACIES, ExperimentPaths.IP)
+                        ip_path = out_dir.replace(
+                            ExperimentPaths.FACIES, ExperimentPaths.IP
+                        )
                         os.makedirs(ip_path, exist_ok=True)
                         bw.submit_plot_generated_outputs(
                             utils.torch2np(
@@ -864,7 +866,9 @@ class Trainer:
                             normalization_range=norm_range,
                         )
                     elif prop_name == "Is":
-                        is_path = out_dir.replace(ExperimentPaths.FACIES, ExperimentPaths.IS)
+                        is_path = out_dir.replace(
+                            ExperimentPaths.FACIES, ExperimentPaths.IS
+                        )
                         os.makedirs(is_path, exist_ok=True)
                         bw.submit_plot_generated_outputs(
                             utils.torch2np(
@@ -910,7 +914,8 @@ class Trainer:
                             )
                         except Exception as _e:
                             logger.exception(
-                                "[diagnostic] Could not compute VP/VS numeric summary: %s", _e
+                                "[diagnostic] Could not compute VP/VS numeric summary: %s",
+                                _e,
                             )
                         bw.submit_plot_generated_outputs(
                             utils.torch2np(
@@ -1228,9 +1233,7 @@ class Trainer:
                             self.discriminator_optimizers[s].param_groups
                         )
 
-                logger.debug(
-                    "scale %d discriminator LR overridden to %s", s, new_lr_d
-                )
+                logger.debug("scale %d discriminator LR overridden to %s", s, new_lr_d)
 
             if s in self.generator_optimizers:
                 for param_group in self.generator_optimizers[s].param_groups:
@@ -1771,8 +1774,6 @@ class Trainer:
                                 )
                             self._ddp_barrier()
 
-
-
                 if device_manager.is_main_process and self.time_unit == TimeUnit.EPOCH:
                     # ── Save Epoch Progress (Periodic or Final) ───────
                     interval = self.options.checkpoint_interval
@@ -1918,7 +1919,21 @@ class Trainer:
         # ── Rank-0 only I/O ─────────────────────────────────────────
         if device_manager.is_main_process:
             _print_table = global_step % 100 == 0
-            _log_tb = global_step % self._tb_log_interval == 0 or _is_last_step
+            if self.time_unit == TimeUnit.EPOCH:
+                _is_epoch_end = self._current_batch_id == self._total_batches - 1
+                _log_tb = (
+                    global_step == 0
+                    or (_is_epoch_end and (epoch % self._tb_log_interval == 0))
+                    or _is_last_step
+                    or _should_gather
+                )
+            else:
+                _log_tb = (
+                    global_step == 0
+                    or (global_step % self._tb_log_interval == 0)
+                    or _is_last_step
+                    or _should_gather
+                )
 
             # Pre-compute metric floats once (single GPU→CPU sync per scale)
             # so _print_metrics_table and log_epoch both reuse the same values.

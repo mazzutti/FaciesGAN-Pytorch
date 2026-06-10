@@ -159,6 +159,7 @@
         "PYTHONUNBUFFERED": "1"
       },
       "args": [
+        "--enable-logging",
         "--stop-scale", "4",
         "--crop-size", "256",
         "--min-size", "20",

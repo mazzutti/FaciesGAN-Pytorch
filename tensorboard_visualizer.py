@@ -309,7 +309,8 @@ class TensorBoardVisualizer:
                     sample_chw = device_manager.to_cpu(sample[0])
                     num_rp_channels = len(active_properties)
                     rp_chw_t = sample_chw[
-                        self.num_facies_channels : self.num_facies_channels + num_rp_channels,
+                        self.num_facies_channels : self.num_facies_channels
+                        + num_rp_channels,
                         ...,
                     ]
                     rp_chw = rp_chw_t.numpy()
