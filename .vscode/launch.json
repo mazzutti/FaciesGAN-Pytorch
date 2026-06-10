@@ -219,14 +219,17 @@
         "--gradnorm-alpha", "0.3",
 
         "--time-unit", "step",
-        "--gradnorm-interval", "25",
+        "--gradnorm-interval", "55",
         "--checkpoint-interval", "500",
         "--save-interval", "200",
 
         "--seismic-stretch-percentile", "98",
         "--vp-vs-robust-range",
         "--no-plot-outputs",
-        "--variants", "wells_only"
+        "--variants", "seismic_only", 
+
+        "--no-is",
+        "--no-vpvs",
        
       ]
     },
@@ -276,7 +279,8 @@
         "--num-iter", "100",
         "--nproc-per-node", "2",
         "--how-many", "1000",
-        "--no-tensorboard"
+        "--no-tensorboard",
+
       ]
     }
   ],
