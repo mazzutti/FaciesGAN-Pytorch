@@ -163,6 +163,7 @@ class FaciesGAN(nn.Module):
 
         self.disc_step_counter: int = 0
         self.extra_disc_step_counter: int = 0
+        self.gen_step_counter: int = 0
         self.last_gp_value: dict[int, torch.Tensor] = {}
 
         self.padding_value: float = get_padding_value(options.normalization_range)
@@ -267,7 +268,7 @@ class FaciesGAN(nn.Module):
         self.generator.compile_progress_callback = self._tick_compile_progress
 
         # --- GradNorm Initialization ---
-        self.gradnorm = None
+        self.gradnorm: GradNorm | None = None
         if getattr(options, "use_gradnorm", False):
             all_scales = list(range(options.stop_scale + 1))
             self.gradnorm = GradNorm(
@@ -591,6 +592,7 @@ class FaciesGAN(nn.Module):
             self.discriminator.discs[s].requires_grad_(False)
 
         for _ in range(g):
+            self.gen_step_counter += 1
             step_metrics = []
 
             # Freeze all active gen blocks up front

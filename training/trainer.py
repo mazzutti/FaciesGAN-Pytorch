@@ -1148,14 +1148,26 @@ class Trainer:
                 sch_d=self.discriminator_schedulers[s].state_dict(),
             )
 
+        gradnorm_state = None
+        gradnorm_opt_state = None
+        if (
+            getattr(self.options, "use_gradnorm", False)
+            and self.model.gradnorm is not None
+        ):
+            gradnorm_state = self.model.gradnorm.state_dict()
+            gradnorm_opt_state = self.model.gradnorm.optimizer.state_dict()
+
         checkpoint = Checkpoint(
             epoch=epoch,
             batch_id=batch_id,
             noise_amps=list(self.model.noise_amps),
             disc_step_counter=self.model.disc_step_counter,
             extra_disc_step_counter=self.model.extra_disc_step_counter,
+            gen_step_counter=self.model.gen_step_counter,
             scales=scales_info,
             grad_scaler_g=self.model.grad_scaler_g.state_dict(),
+            gradnorm_state=gradnorm_state,
+            gradnorm_opt_state=gradnorm_opt_state,
             rec_noise=self.model.rec_noise,
             rng_state=device_manager.get_rng_state_dict(),
             seen_indices=self._seen_indices_for_save,
@@ -1252,6 +1264,7 @@ class Trainer:
             ]
         self.model.disc_step_counter = ckpt.disc_step_counter
         self.model.extra_disc_step_counter = ckpt.extra_disc_step_counter
+        self.model.gen_step_counter = getattr(ckpt, "gen_step_counter", 0)
 
         if ckpt.rec_noise:
             self.model.rec_noise = [n.to(device_manager.device) for n in ckpt.rec_noise]
@@ -1261,6 +1274,27 @@ class Trainer:
                 self.model.grad_scaler_g.load_state_dict(ckpt.grad_scaler_g)
             except Exception:
                 logger.debug("Failed restoring grad_scaler_g state", exc_info=True)
+
+        if (
+            getattr(self.options, "use_gradnorm", False)
+            and self.model.gradnorm is not None
+        ):
+            if ckpt.gradnorm_state is not None:
+                try:
+                    self.model.gradnorm.load_state_dict(ckpt.gradnorm_state)
+                except Exception:
+                    logger.warning(
+                        "Failed restoring GradNorm state dict", exc_info=True
+                    )
+            if ckpt.gradnorm_opt_state is not None:
+                try:
+                    self.model.gradnorm.optimizer.load_state_dict(
+                        ckpt.gradnorm_opt_state
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed restoring GradNorm optimizer state dict", exc_info=True
+                    )
 
         # 4. Restore RNG States
         device_manager.set_rng_state_dict(ckpt.rng_state)

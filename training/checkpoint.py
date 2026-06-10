@@ -46,6 +46,10 @@ def _default_seen_indices() -> List[Any]:
     return []
 
 
+def _default_last_gp_value() -> Dict[int, torch.Tensor]:
+    return {}
+
+
 @dataclass
 class Checkpoint:
     """Global training state checkpoint.
@@ -60,12 +64,17 @@ class Checkpoint:
     noise_amps: List[torch.Tensor]
     disc_step_counter: int
     extra_disc_step_counter: int
+    gen_step_counter: int = 0
     scales: Dict[int, ScaleCheckpoint] = field(default_factory=_default_scales)
     grad_scaler_g: Dict[str, Any] | None = None
+    gradnorm_state: Dict[str, Any] | None = None
+    gradnorm_opt_state: Dict[str, Any] | None = None
     rec_noise: List[torch.Tensor] = field(default_factory=_default_rec_noise)
     rng_state: Dict[str, Any] = field(default_factory=_default_rng_state)
     seen_indices: List[Any] = field(default_factory=_default_seen_indices)
-    last_gp_value: Dict[int, torch.Tensor] = field(default_factory=dict)
+    last_gp_value: Dict[int, torch.Tensor] = field(
+        default_factory=_default_last_gp_value
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the checkpoint to a plain dictionary for torch.save."""
@@ -75,7 +84,10 @@ class Checkpoint:
             "noise_amps": self.noise_amps,
             "disc_step_counter": self.disc_step_counter,
             "extra_disc_step_counter": self.extra_disc_step_counter,
+            "gen_step_counter": self.gen_step_counter,
             "grad_scaler_g": self.grad_scaler_g,
+            "gradnorm_state": self.gradnorm_state,
+            "gradnorm_opt_state": self.gradnorm_opt_state,
             "rec_noise": self.rec_noise,
             "rng_state": self.rng_state,
             "seen_indices": self.seen_indices,
@@ -123,11 +135,16 @@ class Checkpoint:
                 noise_amps=data["noise_amps"],
                 disc_step_counter=data["disc_step_counter"],
                 extra_disc_step_counter=data["extra_disc_step_counter"],
+                gen_step_counter=data.get("gen_step_counter", 0),
                 grad_scaler_g=data.get("grad_scaler_g"),
+                gradnorm_state=data.get("gradnorm_state"),
+                gradnorm_opt_state=data.get("gradnorm_opt_state"),
                 rec_noise=data.get("rec_noise", []),
                 rng_state=data.get("rng_state", {}),
                 seen_indices=data.get("seen_indices", []),
-                last_gp_value={int(s): v for s, v in data.get("last_gp_value", {}).items()},
+                last_gp_value={
+                    int(s): v for s, v in data.get("last_gp_value", {}).items()
+                },
                 scales=scales,
             )
 
@@ -163,7 +180,10 @@ class Checkpoint:
             noise_amps=data.get("noise_amps", []),
             disc_step_counter=data.get("disc_step_counter", 0),
             extra_disc_step_counter=data.get("extra_disc_step_counter", 0),
+            gen_step_counter=data.get("gen_step_counter", 0),
             grad_scaler_g=data.get("grad_scaler_g"),
+            gradnorm_state=data.get("gradnorm_state"),
+            gradnorm_opt_state=data.get("gradnorm_opt_state"),
             rec_noise=data.get("rec_noise", []),
             rng_state=data.get("rng_state", {}),
             seen_indices=data.get("seen_indices", []),
