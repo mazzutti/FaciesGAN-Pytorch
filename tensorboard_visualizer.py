@@ -27,9 +27,9 @@ from models.utils import SplitKey, split_facies_rp
 from physics.seismic import calculate_synthetic_seismic
 
 if TYPE_CHECKING:
+    from options import TrainingOptions
     from physics.physics import PhysicsState
     from training.metrics import ScaleMetrics
-    from options import TrainingOptions
 
 
 logger = logging.getLogger(__name__)
@@ -150,13 +150,22 @@ class TensorBoardVisualizer:
         if key == MetricKey.G_REC_FACIES:
             return getattr(self.options, "rec_facies_loss_penalty", 10.0) > 0
         if key == MetricKey.G_WELL:
-            return getattr(self.options, "use_wells", False) and getattr(self.options, "well_loss_penalty", 10.0) > 0
+            return (
+                getattr(self.options, "use_wells", False)
+                and getattr(self.options, "well_loss_penalty", 10.0) > 0
+            )
         if key == MetricKey.G_DIV:
             return getattr(self.options, "diversity_loss_penalty", 1.0) > 0
         if key == MetricKey.G_REC_ROCK_PHYSICS:
-            return getattr(self.options, "use_rock_physics", False) and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
+            return (
+                getattr(self.options, "use_rock_physics", False)
+                and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
+            )
         if key == MetricKey.G_TV:
-            return getattr(self.options, "use_rock_physics", False) and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+            return (
+                getattr(self.options, "use_rock_physics", False)
+                and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+            )
         if key == MetricKey.G_ELASTIC:
             return (
                 getattr(self.options, "use_rock_physics", False)

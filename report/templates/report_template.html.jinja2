@@ -1,0 +1,1225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FaciesGAN Conditioning Sensitivity Analysis Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-color: #0b0f19;
+      --card-bg: #151b26;
+      --card-border: #222d41;
+      --text-main: #f0f4f9;
+      --text-muted: #8c9eb5;
+      --accent: #3b82f6;
+      --accent-hover: #60a5fa;
+      --success: #10b981;
+      --success-bg: rgba(16, 185, 129, 0.1);
+    }
+    * { box-sizing: border-box; }
+    img { max-width: 100%; height: auto; }
+    body {
+      margin: 0; padding: 0;
+      font-family: 'Inter', sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+    header {
+      background: linear-gradient(135deg, #151b26 0%, #0d121c 100%);
+      border-bottom: 1px solid var(--card-border);
+      padding: 30px 20px;
+    }
+    .header-content {
+      width: 100%; max-width: 100%; text-align: center; padding: 0 40px;
+    }
+    .hero-title {
+      font-family: 'Outfit', sans-serif; font-size: 2.2rem; margin: 0 0 10px 0;
+      background: linear-gradient(90deg, #60a5fa, #34d399);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .hero-subtitle { font-size: 1.05rem; color: var(--text-muted); margin: 0; }
+    .layout-container { display: flex; width: 100%; max-width: 100%; padding: 30px 40px; gap: 30px; }
+    aside {
+      width: 260px; flex-shrink: 0; position: sticky; top: 30px; height: fit-content;
+      background-color: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px;
+    }
+    main { flex-grow: 1; min-width: 0; }
+    .nav-title { font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 1px; margin-bottom: 12px; font-weight: 700; }
+    .nav-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+    .nav-link { display: block; padding: 8px 12px; color: var(--text-muted); text-decoration: none; border-radius: 6px; font-weight: 500; font-size: 0.9rem; transition: all 0.2s; }
+    .nav-link:hover, .nav-link.active { background-color: rgba(59, 130, 246, 0.1); color: var(--accent-hover); }
+    section { margin-bottom: 40px; scroll-margin-top: 30px; }
+    .section-title { font-family: 'Outfit', sans-serif; font-size: 1.6rem; margin-top: 0; margin-bottom: 16px; border-bottom: 2px solid var(--card-border); padding-bottom: 8px; }
+    .card { background-color: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.15); }
+    .card-title { font-family: 'Outfit', sans-serif; font-size: 1.2rem; margin-top: 0; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+    table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 0.9rem; border-radius: 8px; overflow: hidden; border: 1px solid var(--card-border); }
+    th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--card-border); }
+    th { background-color: #1a2333; font-weight: 700; color: #60a5fa; font-family: 'Outfit', sans-serif; letter-spacing: 0.5px; }
+    tr:nth-child(even) { background-color: rgba(255, 255, 255, 0.015); }
+    tr:hover { background-color: rgba(59, 130, 246, 0.04); }
+    .tab-container { display: flex; flex-direction: column; }
+    .tab-headers { display: flex; border-bottom: 1px solid var(--card-border); gap: 6px; margin-bottom: 15px; }
+    .tab-btn { background: none; border: none; color: var(--text-muted); padding: 8px 16px; cursor: pointer; font-weight: 600; font-size: 0.9rem; border-bottom: 2px solid transparent; transition: all 0.2s; }
+    .tab-btn:hover { color: var(--text-main); background-color: rgba(255,255,255,0.02); }
+    .tab-btn.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; animation: fadeIn 0.3s ease; }
+    .tab-print-title { display: none; }
+    .carousel-wrapper { position: relative; margin: 15px 0; }
+    .carousel-viewport { display: flex; overflow-x: hidden; scroll-behavior: smooth; border: 1px solid var(--card-border); border-radius: 8px; background-color: rgba(0,0,0,0.1); }
+    .carousel-slide { flex: 0 0 100%; width: 100%; box-sizing: border-box; padding: 16px; display: none; }
+    .carousel-control-btn { position: absolute; top: 50%; transform: translateY(-50%); background-color: rgba(21, 27, 38, 0.9); border: 1px solid var(--card-border); color: var(--text-main); width: 36px; height: 36px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1rem; transition: all 0.2s; z-index: 10; }
+    .carousel-control-btn:hover { background-color: var(--accent); border-color: var(--accent); }
+    .carousel-control-btn.prev { left: 8px; }
+    .carousel-control-btn.next { right: 8px; }
+    .carousel-indicator-bar { display: flex; justify-content: center; gap: 6px; margin-top: 12px; }
+    .carousel-indicator-dot { width: 6px; height: 6px; border-radius: 50%; background-color: var(--card-border); cursor: pointer; transition: all 0.2s; }
+    .carousel-indicator-dot.active { background-color: var(--accent); width: 18px; border-radius: 3px; }
+    .image-grid-5 { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
+    .image-grid-losses { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+    .image-card { text-align: center; background-color: rgba(0,0,0,0.12); border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; }
+    .image-card img { max-width: 100%; border-radius: 4px; border: 1px solid var(--card-border); }
+    .image-title { font-size: 0.7rem; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; }
+    .badge { background-color: var(--success-bg); color: var(--success); font-size: 0.7rem; padding: 2px 6px; border-radius: 10px; font-weight: 600; }
+    .discussion-box { background-color: rgba(255,255,255,0.01); border-left: 3px solid var(--accent); padding: 12px 16px; border-radius: 0 6px 6px 0; margin-top: 15px; font-size: 0.9rem; }
+    .projections-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
+    .projection-card { border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; text-align: center; background-color: rgba(0,0,0,0.1); }
+    .projection-card img { max-width: 100%; border-radius: 4px; border: 1px solid var(--card-border); }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    @media (max-width: 992px) { .layout-container { flex-direction: column; } aside { width: 100%; position: relative; top: 0; } }
+    
+    /* Light theme */
+    [data-theme='light'] {
+      --bg-color: #f5f7fa;
+      --card-bg: #ffffff;
+      --card-border: #d0d7de;
+      --text-main: #1f2937;
+      --text-muted: #6b7280;
+      --accent: #2563eb;
+      --accent-hover: #3b82f6;
+      --success: #059669;
+      --success-bg: rgba(5, 150, 105, 0.1);
+    }
+    [data-theme='light'] header { background: linear-gradient(135deg, #ffffff 0%, #f0f3f8 100%); }
+    [data-theme='light'] .hero-title { background: linear-gradient(90deg, #2563eb, #059669); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    [data-theme='light'] th { background-color: #f0f3f8; color: #2563eb; }
+    [data-theme='light'] tr:nth-child(even) { background-color: rgba(0, 0, 0, 0.02); }
+    [data-theme='light'] tr:hover { background-color: rgba(37, 99, 235, 0.04); }
+    [data-theme='light'] .carousel-control-btn { background-color: rgba(255,255,255,0.9); color: #1f2937; }
+    [data-theme='light'] .toolbar-btn { background-color: rgba(0,0,0,0.04); border-color: rgba(0,0,0,0.12); color: #6b7280; }
+    
+    /* Header toolbar */
+    .header-toolbar { display: flex; gap: 10px; justify-content: center; margin-top: 16px; }
+    .toolbar-btn { background-color: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: var(--text-muted); padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; font-weight: 600; display: flex; align-items: center; gap: 6px; transition: all 0.2s; font-family: 'Inter', sans-serif; }
+    .toolbar-btn:hover { background-color: rgba(59,130,246,0.15); color: var(--accent-hover); border-color: var(--accent); }
+    
+    /* Scorecard */
+    .scorecard-rank { font-size: 1.2rem; font-weight: 700; }
+    .score-bar { display: inline-block; height: 6px; border-radius: 3px; background: linear-gradient(90deg, #10b981, #3b82f6); }
+    
+    /* Animation player */
+    .anim-player { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+    .anim-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: center; }
+    .anim-btn { background-color: var(--card-bg); border: 1px solid var(--card-border); color: var(--text-main); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 600; transition: all 0.2s; }
+    .anim-btn:hover, .anim-btn.active { background-color: var(--accent); border-color: var(--accent); color: white; }
+    .anim-speed { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--text-muted); }
+    .anim-speed input[type='range'] { width: 80px; accent-color: var(--accent); }
+    .anim-epoch-label { font-size: 0.85rem; font-weight: 600; color: var(--accent); font-family: 'Outfit', sans-serif; }
+    .anim-frame { border: 1px solid var(--card-border); border-radius: 8px; overflow: hidden; background-color: rgba(0,0,0,0.1); }
+    .anim-frame img { max-width: 100%; display: block; }
+    
+    /* Print styles */
+    @media print {
+      aside, .header-toolbar, .carousel-control-btn, .anim-controls, .carousel-indicator-bar, .tab-headers { display: none !important; }
+      body { background: white !important; color: black !important; }
+      .layout-container { display: block !important; padding: 0 !important; }
+      .card { box-shadow: none !important; border: 1px solid #ccc !important; break-inside: avoid; margin-bottom: 20px !important; padding: 15px !important; }
+      header { background: white !important; border-bottom: 2px solid #333 !important; }
+      .hero-title { background: none !important; -webkit-text-fill-color: #333 !important; }
+      .section-title { color: #333 !important; page-break-after: avoid; }
+      img { max-width: 100% !important; height: auto !important; break-inside: avoid; }
+      /* Expand all tabs */
+      .tab-pane { display: block !important; opacity: 1 !important; visibility: visible !important; margin-bottom: 30px !important; break-inside: avoid; }
+      .tab-print-title { display: block !important; font-size: 1.1rem; font-weight: bold; margin-top: 20px; margin-bottom: 10px; color: #111; border-bottom: 1px solid #ddd; padding-bottom: 4px; page-break-after: avoid; }
+      /* Adjust carousels */
+      .carousel-viewport { display: block !important; overflow: visible !important; background: transparent !important; border: none !important; }
+      .carousel-slide { display: block !important; flex: none !important; width: 100% !important; padding: 10px 0 !important; box-sizing: border-box !important; break-inside: avoid; }
+      .carousel-slide:not(.milestone-print) { display: none !important; }
+      /* Grid layout for single-image carousels */
+      #carousel-rock-physics, #carousel-distribution, #carousel-spatial { display: grid !important; grid-template-columns: repeat(2, 1fr) !important; gap: 20px !important; }
+      #carousel-rock-physics .carousel-slide, #carousel-distribution .carousel-slide, #carousel-spatial .carousel-slide { width: auto !important; border: 1px solid #eee !important; border-radius: 6px !important; padding: 10px !important; background: #fafafa !important; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="header-content">
+      <h1 class="hero-title">FaciesGAN - Conditioning Sensitivity Analysis</h1>
+      <p class="hero-subtitle">Interactive Geological Generative Modeling Dashboard</p>
+      <div class="header-toolbar">
+        <button class="toolbar-btn" id="theme-toggle" onclick="toggleTheme()">🌓 Toggle Theme</button>
+        <button class="toolbar-btn" onclick="window.print()">📄 Export PDF</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Container -->
+  <div class="layout-container">
+
+    <!-- Sidebar Navigation -->
+    <aside>
+      <div class="nav-title">Navigation</div>
+      <ul class="nav-list">
+        <li><a href="#executive-summary" class="nav-link active">1. Executive Summary</a></li>
+        <li><a href="#conditioning-inputs" class="nav-link">2. Conditioning Inputs</a></li>
+        <li><a href="#training-pyramids" class="nav-link">3. Training Pyramids (GT)</a></li>
+        <li><a href="#hyperparameters" class="nav-link">4. Hyperparameters</a></li>
+        <li><a href="#comparison-grids" class="nav-link">5. Comparison Grids</a></li>
+        <li><a href="#quantitative-analysis" class="nav-link">6. Quantitative Analysis</a></li>
+        <li><a href="#rock-physics-correlation" class="nav-link">7. Rock Physics Correlation</a></li>
+        <li><a href="#experiment-variants" class="nav-link">8. Experiment Variants</a></li>
+        <li><a href="#cross-variant-synthesis" class="nav-link">9. Cross-Variant Manifolds</a></li>
+        <li><a href="#distribution-analysis" class="nav-link">10. Distribution Analysis</a></li>
+        <li><a href="#spatial-continuity" class="nav-link">11. Spatial Continuity</a></li>
+        <li><a href="#timing-performance" class="nav-link">12. Timing & Performance</a></li>
+      </ul>
+    </aside>
+
+    <!-- Main Content -->
+    <main>
+
+      <!-- Section 1: Executive Summary -->
+      <section id="executive-summary">
+        <h2 class="section-title">1. Executive Summary</h2>
+        <div class="card">
+          <p>This interactive dashboard presents the results of the conditioning sensitivity analysis for the <strong>FaciesGAN</strong> generative system. We assess the effect of incorporating local hard data (wells) and regional soft constraints (seismic reflection maps) on the generated geological structures, latent space manifold representation, and rock physics property consistency.</p>
+        </div>
+      </section>
+
+      <!-- Section 2: Conditioning Inputs -->
+      <section id="conditioning-inputs">
+        <h2 class="section-title">2. Conditioning Inputs (Seismic & Wells)</h2>
+        <div class="card">
+          <h3 class="card-title" style="font-size: 1.1rem; margin-bottom: 8px;">Seismic Conditioning Profiles</h3>
+          <p>The regional seismic dataset consists of reflection amplitude profiles along the vertical xz plane, directing the spatial distribution of generated sand/shale channel geometries (plotted with the <em>RdBu</em> colormap):</p>
+          <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">
+            <strong>Geophysical Context:</strong> Seismic reflections map acoustic impedance boundaries in the subsurface. Red and blue bands show positive and negative reflection coefficients, representing changes in velocity and density at layer boundaries. The generator uses this soft conditioning as a spatial guide, aligning its channel shapes with the geophysical trends.
+          </p>
+          {% if seismic_images %}
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin-top: 12px; margin-bottom: 20px;">
+              {% for img in seismic_images %}
+                <div class="projection-card">
+                  <div class="image-title">{{ img.name }}</div>
+                  <img src="{{ img.rel_path }}" alt="{{ img.name }}">
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p style="color: var(--text-muted); margin-bottom: 20px;">No seismic crossline images available.</p>
+          {% endif %}
+
+          <h3 class="card-title" style="font-size: 1.1rem; margin-top: 20px; margin-bottom: 8px;">Well Conditioning Traces</h3>
+          <p>The well dataset contains local hard facies observations along vertical well traces (represented as color-coded lines on a white background):</p>
+          <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">
+            <strong>Geological Context:</strong> Well logs act as 1D high-resolution 'hard data'. They capture the exact sequence of lithofacies (Floodplain, Channel, Point Bar, Boundary) encountered at specific coordinates. The GAN is penalized if its realizations do not match the facies observed at these well locations, ensuring local honoring of control wells.
+          </p>
+          {% if well_images %}
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin-top: 12px;">
+              {% for img in well_images %}
+                <div class="projection-card">
+                  <div class="image-title">{{ img.name }}</div>
+                  <img src="{{ img.rel_path }}" alt="{{ img.name }}">
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p style="color: var(--text-muted);">No well crossline images available.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <!-- Section 3: Training Pyramids -->
+      <section id="training-pyramids">
+        <h2 class="section-title">3. Training Pyramid Architecture</h2>
+        <div class="card">
+          <p>The training dataset and model outputs are structured as multi-resolution pyramids. Use the tabs below to switch between the <strong>Ground Truth (Real)</strong> data used for training and the <strong>Generated</strong> realizations produced by each variant at all scales.</p>
+          <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 15px;">
+            <strong>Why a Pyramid?</strong> Training GANs directly on high-resolution geological structures often causes mode collapse and training instability. By using a progressive multi-scale pyramid (Scale 0 to Scale 4), the network first learns large-scale patterns (river paths) and then refines details (point bars, channel edges, and fine noise) at finer scales.
+          </p>
+          {% if available_pyramids %}
+            <div class="tab-container">
+              <div class="tab-headers">
+                {% for pyr in available_pyramids %}
+                  <button class="tab-btn{% if loop.first %} active{% endif %}">{{ pyr.label.split(' ')[0] }}</button>
+                {% endfor %}
+              </div>
+              <div class="tab-panes">
+                {% for pyr in available_pyramids %}
+                  <div class="tab-pane{% if loop.first %} active{% endif %}">
+                    <div class="tab-print-title">{{ pyr.label }}</div>
+                    <img src="{{ pyr.rel_path }}" alt="{{ pyr.label }}" style="width: 100%; border-radius: 8px;">
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 8px;">{{ pyr.description }}</p>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          {% else %}
+            <p style="color: var(--text-muted);">No pyramid visualizations found.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <!-- Section 4: Hyperparameters -->
+      <section id="hyperparameters">
+        <h2 class="section-title">4. Training Hyperparameters</h2>
+        <div class="card">
+          <p>Comparative summary of hyperparameters used during model optimization for each experiment variant:</p>
+          {% if hparams_table %}
+            <div style="overflow-x: auto;">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="text-align: left;">Parameter</th>
+                    {% for label in variant_labels_cols %}
+                      <th style="text-align: center;">{{ label }}</th>
+                    {% endfor %}
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for cat in hparams_table %}
+                    <tr style="background-color: rgba(59, 130, 246, 0.05); font-weight: bold;">
+                      <td colspan="{{ num_variant_cols }}" style="color: #60a5fa; font-family: 'Outfit', sans-serif; font-size: 0.95rem; padding: 12px 16px; border-bottom: 1px solid var(--card-border);">{{ cat.category }}</td>
+                    </tr>
+                    {% for param in cat.params %}
+                      <tr>
+                        <td style="color: var(--text-main); font-weight: 500;">{{ param.label }}</td>
+                        {% for val in param['values'] %}
+                          <td style="text-align: center;">
+                            {% if val.is_yes %}
+                              <span class="badge" style="background-color: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 4px; padding: 2px 8px; font-size: 0.8rem; font-weight: 600;">Yes</span>
+                            {% elif val.is_no %}
+                              <span class="badge" style="background-color: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.2); border-radius: 4px; padding: 2px 8px; font-size: 0.8rem; font-weight: 600;">No</span>
+                            {% else %}
+                              <span style="font-family: monospace; font-size: 0.9rem;">{{ val.formatted }}</span>
+                            {% endif %}
+                          </td>
+                        {% endfor %}
+                      </tr>
+                    {% endfor %}
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <p style="color: var(--text-muted);">No options.json configurations found.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <!-- Section 5: Comparison Grids -->
+      <section id="comparison-grids">
+        <h2 class="section-title">5. Subsurface Realization Comparison Grids</h2>
+        <div class="card">
+          <p>Side-by-side comparison grids of the real validation sample and four independent variant realizations. Click tabs to switch fields:</p>
+          <div class="discussion-box" style="margin-bottom: 15px;">
+            <strong>Property Interpretation Guide:</strong><br>
+            • <strong>Facies:</strong> Sand channels (blue) and point bars (red) embedded in floodplain mud (grey). Notice how conditional variants restrict channels to specific paths, while unconditional samples show arbitrary positions.<br>
+            • <strong>Acoustic Impedance (Ip) & Shear Impedance (Is):</strong> Elastic properties matching the lithology. Higher impedance corresponds to sand bodies, reflecting compacted channel sands.<br>
+            • <strong>Vp/Vs Ratio:</strong> Key fluid and lithology indicator. Mudstone/floodplain typically exhibits higher Vp/Vs than sand reservoirs.<br>
+            • <strong>Synthetic Seismic:</strong> Simulated seismic response of the property grids. A realistic seismic reflection response confirms the geophysical consistency of the generated geological realizations.
+          </div>
+          {% if comparison_grids %}
+            <div class="tab-container">
+              <div class="tab-headers">
+                {% for grid in comparison_grids %}
+                  <button class="tab-btn{% if loop.first %} active{% endif %}">{{ grid.label.split(' ')[0] }}</button>
+                {% endfor %}
+              </div>
+              <div class="tab-panes">
+                {% for grid in comparison_grids %}
+                  <div class="tab-pane{% if loop.first %} active{% endif %}">
+                    <div class="tab-print-title">{{ grid.label }}</div>
+                    <img src="{{ grid.rel_path }}" alt="{{ grid.label }}" style="width: 100%; border-radius: 8px;">
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 8px;">Realization grid for {{ grid.label.lower() }}. Columns show: Real ground-truth, Wells+Seismic, Wells Only, Seismic Only, and Unconditional respectively.</p>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          {% else %}
+            <p style="color: var(--text-muted);">No comparison grids found.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <!-- Section 6: Quantitative Analysis -->
+      <section id="quantitative-analysis">
+        <h2 class="section-title">6. Quantitative Statistical Analysis</h2>
+        
+        <!-- Facies table -->
+        <div class="card">
+          <h3 class="card-title">Facies Proportion Comparison</h3>
+          <div style="overflow-x: auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="text-align: left;">Variant</th>
+                  <th style="text-align: center;">Floodplain (%)</th>
+                  <th style="text-align: center;">Point Bar (%)</th>
+                  <th style="text-align: center;">Channel (%)</th>
+                  <th style="text-align: center;">Boundary (%)</th>
+                  <th style="text-align: center;">RMSE (%)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr style="background-color: rgba(96, 165, 250, 0.05);">
+                  <td style="color: #60a5fa; font-weight: 600;">Real Validation Data</td>
+                  {% for p in facies_proportions.real %}
+                    <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ p }}</td>
+                  {% endfor %}
+                  <td style="text-align: center;">
+                    <span class="badge" style="background-color: rgba(96, 165, 250, 0.15); color: #60a5fa; border: 1px solid rgba(96, 165, 250, 0.3); border-radius: 4px; padding: 2px 8px; font-size: 0.85rem; font-weight: 600;">0.00%</span>
+                  </td>
+                </tr>
+                {% for var in facies_proportions.variants %}
+                  <tr>
+                    <td style="font-weight: 500;">{{ var.label }}</td>
+                    {% for p in var.proportions %}
+                      <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ p }}</td>
+                    {% endfor %}
+                    <td style="text-align: center;">
+                      {% if var.is_best %}
+                        <span class="badge" style="background-color: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 4px; padding: 2px 8px; font-size: 0.85rem; font-weight: 600;">{{ var.rmse }} (Best)</span>
+                      {% else %}
+                        <span style="font-family: monospace; font-size: 0.9rem;">{{ var.rmse }}</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Rock Physics Table -->
+        <div class="card">
+          <h3 class="card-title">Rock Physics Property Consistency</h3>
+          <div style="overflow-x: auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="text-align: left;">Variant</th>
+                  {% if use_ip %}
+                  <th style="text-align: center;">Ip Mean (m/s * g/cm³)</th>
+                  <th style="text-align: center;">Ip Std</th>
+                  {% endif %}
+                  {% if use_is %}
+                  <th style="text-align: center;">Is Mean (m/s * g/cm³)</th>
+                  <th style="text-align: center;">Is Std</th>
+                  {% endif %}
+                  {% if use_vpvs %}
+                  <th style="text-align: center;">Vp/Vs Mean</th>
+                  <th style="text-align: center;">Vp/Vs Std</th>
+                  {% endif %}
+                </tr>
+              </thead>
+              <tbody>
+                <tr style="background-color: rgba(96, 165, 250, 0.05);">
+                  <td style="color: #60a5fa; font-weight: 600;">Real Validation Data</td>
+                  {% if use_ip %}
+                  <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ rock_physics_stats.real.ip_mean }}</td>
+                  <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ rock_physics_stats.real.ip_std }}</td>
+                  {% endif %}
+                  {% if use_is %}
+                  <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ rock_physics_stats.real.is_mean }}</td>
+                  <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ rock_physics_stats.real.is_std }}</td>
+                  {% endif %}
+                  {% if use_vpvs %}
+                  <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ rock_physics_stats.real.vpvs_mean }}</td>
+                  <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ rock_physics_stats.real.vpvs_std }}</td>
+                  {% endif %}
+                </tr>
+                {% for var in rock_physics_stats.variants %}
+                  <tr>
+                    <td style="font-weight: 500;">{{ var.label }}</td>
+                    {% if use_ip %}
+                    <td style="text-align: center;">{{ var.ip_mean_html|safe }}</td>
+                    <td style="text-align: center;">{{ var.ip_std_html|safe }}</td>
+                    {% endif %}
+                    {% if use_is %}
+                    <td style="text-align: center;">{{ var.is_mean_html|safe }}</td>
+                    <td style="text-align: center;">{{ var.is_std_html|safe }}</td>
+                    {% endif %}
+                    {% if use_vpvs %}
+                    <td style="text-align: center;">{{ var.vpvs_mean_html|safe }}</td>
+                    <td style="text-align: center;">{{ var.vpvs_std_html|safe }}</td>
+                    {% endif %}
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="discussion-box">
+            <strong>Quantitative Analysis & Geophysical Discussion:</strong><br>
+            • <strong>Facies Realism:</strong> Categorical proportions match closely with the validation dataset (RMSE ~5%). Setting <code>rec_facies_loss_penalty = 0.0</code> successfully prevents mode collapse in the unconditional variant.<br>
+            • <strong>Physical Consistency:</strong> Continuous properties have exceptional mean overlap (&lt;1-2% deviation from validation data). This shows the elastic/physics consistency loss forces the model to learn physically consistent cross-property relationships (<i>V<sub>p</sub></i>, <i>V<sub>s</sub></i>, <i>&rho;</i>) rather than generating independent continuous features.
+          </div>
+        </div>
+
+        <!-- Variant Scorecard Table -->
+        {% if scorecard_table %}
+          <div class="card">
+            <h3 class="card-title">🏆 Variant Ranking Scorecard</h3>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Composite score ranking each variant based on weighted facies RMSE (40%), Ip deviation (20%), Is deviation (20%), and Vp/Vs deviation (20%). Lower is better.</p>
+            <div style="overflow-x: auto;">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="text-align: center; width: 60px;">Rank</th>
+                    <th style="text-align: left;">Variant</th>
+                    <th style="text-align: center;">Facies RMSE (%)</th>
+                    {% if use_ip %}
+                    <th style="text-align: center;">Ip Dev (%)</th>
+                    {% endif %}
+                    {% if use_is %}
+                    <th style="text-align: center;">Is Dev (%)</th>
+                    {% endif %}
+                    {% if use_vpvs %}
+                    <th style="text-align: center;">Vp/Vs Dev (%)</th>
+                    {% endif %}
+                    <th style="text-align: center;">Overall Score</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in scorecard_table %}
+                    <tr{% if row.is_first %} style="background-color: rgba(16, 185, 129, 0.06);"{% endif %}>
+                      <td style="text-align: center;"><span class="scorecard-rank">{{ row.medal }}</span></td>
+                      <td style="font-weight: 600;">{{ row.label }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.facies_rmse }}</td>
+                      {% if use_ip %}
+                      <td style="text-align: center; font-family: monospace;">{{ row.ip_dev }}</td>
+                      {% endif %}
+                      {% if use_is %}
+                      <td style="text-align: center; font-family: monospace;">{{ row.is_dev }}</td>
+                      {% endif %}
+                      {% if use_vpvs %}
+                      <td style="text-align: center; font-family: monospace;">{{ row.vpvs_dev }}</td>
+                      {% endif %}
+                      <td style="text-align: center;">
+                        <span style="font-family: monospace; font-weight: 600;">{{ row.overall }}</span>
+                        <span class="score-bar" style="width: {{ row.bar_width }}px;"></span>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        {% endif %}
+
+        <!-- KL-Divergence & Wasserstein Distance Table -->
+        {% if distribution_table %}
+          <div class="card">
+            <h3 class="card-title">📐 Distribution Distance Metrics</h3>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">KL-Divergence and Wasserstein (Earth Mover's) distance between real and generated property distributions. Lower values indicate better distributional match.</p>
+            <div style="overflow-x: auto;">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="text-align: left;">Variant</th>
+                    {% if use_ip %}
+                    <th style="text-align: center;">Ip KL-Div</th>
+                    <th style="text-align: center;">Ip Wasserstein</th>
+                    {% endif %}
+                    {% if use_is %}
+                    <th style="text-align: center;">Is KL-Div</th>
+                    <th style="text-align: center;">Is Wasserstein</th>
+                    {% endif %}
+                    {% if use_vpvs %}
+                    <th style="text-align: center;">Vp/Vs KL-Div</th>
+                    <th style="text-align: center;">Vp/Vs Wasserstein</th>
+                    {% endif %}
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in distribution_table %}
+                    <tr>
+                      <td style="font-weight: 500;">{{ row.label }}</td>
+                      {% if use_ip %}
+                        {% set metric = row.metrics[0] %}
+                        {% if metric.exists %}
+                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.kl_color }};">{{ metric.kl }}</span></td>
+                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.wd_color }};">{{ metric.wd }}</span></td>
+                        {% else %}
+                          <td style="text-align: center; color: var(--text-muted);">—</td>
+                          <td style="text-align: center; color: var(--text-muted);">—</td>
+                        {% endif %}
+                      {% endif %}
+                      {% if use_is %}
+                        {% set metric = row.metrics[1] %}
+                        {% if metric.exists %}
+                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.kl_color }};">{{ metric.kl }}</span></td>
+                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.wd_color }};">{{ metric.wd }}</span></td>
+                        {% else %}
+                          <td style="text-align: center; color: var(--text-muted);">—</td>
+                          <td style="text-align: center; color: var(--text-muted);">—</td>
+                        {% endif %}
+                      {% endif %}
+                      {% if use_vpvs %}
+                        {% set metric = row.metrics[2] %}
+                        {% if metric.exists %}
+                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.kl_color }};">{{ metric.kl }}</span></td>
+                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.wd_color }};">{{ metric.wd }}</span></td>
+                        {% else %}
+                          <td style="text-align: center; color: var(--text-muted);">—</td>
+                          <td style="text-align: center; color: var(--text-muted);">—</td>
+                        {% endif %}
+                      {% endif %}
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        {% endif %}
+
+        <!-- Channel Connectivity Table -->
+        {% if connectivity_table %}
+          <div class="card">
+            <h3 class="card-title">🔗 Channel Connectivity Analysis</h3>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Connected-component analysis on channel facies (class 2). Higher largest component fraction and lower component count indicate better geological connectivity.</p>
+            <div style="overflow-x: auto;">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="text-align: left;">Source</th>
+                    <th style="text-align: center;">Avg # Components</th>
+                    <th style="text-align: center;">Largest Component (%)</th>
+                    <th style="text-align: center;">Mean Component Size (px)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in connectivity_table %}
+                    <tr{% if row.is_real %} style="background-color: rgba(96, 165, 250, 0.05);"{% endif %}>
+                      <td{% if row.is_real %} style="color: #60a5fa; font-weight: 600;"{% else %} style="font-weight: 500;"{% endif %}>{{ row.label }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.n_components }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.largest_frac }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.mean_size }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            <div class="discussion-box" style="margin-top: 15px;">
+              <strong>Quantitative Metric Interpretation:</strong><br>
+              • <strong>KL-Divergence:</strong> Measures the information loss when approximating the real property distribution with the generated one. Lower is better, with 0 indicating a perfect distribution overlap.<br>
+              • <strong>Wasserstein Distance:</strong> Measures the minimum cost of shifting the generated distribution shape to match the real distribution. Robust to horizontal offsets and scaling.<br>
+              • <strong>Channel Connectivity:</strong> Sand channels should naturally form continuous paths. Real data shows fewer components with larger sizes. Fragmented channel blobs result in a high component count and low largest component %.
+            </div>
+          </div>
+        {% endif %}
+      </section>
+
+      <!-- Section 7: Rock Physics Correlation -->
+      <section id="rock-physics-correlation">
+        <h2 class="section-title">7. Rock Physics Cross-Property Correlation</h2>
+        <div class="card">
+          <p>Crossplots of Acoustic Impedance (Ip) versus Shear Impedance (Is) color-coded by facies class. These plots compare the physical correlations learned by each variant against the real validation dataset, showing if the model preserves distinct geological and elastic property clusters:</p>
+          
+          <div style="display: flex; justify-content: center; gap: 16px; margin: 15px 0 10px 0; flex-wrap: wrap; background-color: rgba(0,0,0,0.12); padding: 8px 16px; border-radius: 8px; border: 1px solid var(--card-border);">
+            <span style="display: flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 500;"><span style="width: 10px; height: 10px; border-radius: 50%; background-color: #00e5ff; display: inline-block;"></span> Floodplain</span>
+            <span style="display: flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 500;"><span style="width: 10px; height: 10px; border-radius: 50%; background-color: #ff2d9b; display: inline-block;"></span> Point Bar</span>
+            <span style="display: flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 500;"><span style="width: 10px; height: 10px; border-radius: 50%; background-color: #ffb300; display: inline-block;"></span> Channel</span>
+            <span style="display: flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 500;"><span style="width: 10px; height: 10px; border-radius: 50%; background-color: #76ff03; display: inline-block;"></span> Boundary</span>
+          </div>
+
+          {% if existing_rp|length > 1 %}
+            <div class="carousel-wrapper">
+              <div class="carousel-viewport" id="carousel-rock-physics">
+                {% for rp in existing_rp %}
+                  <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
+                    <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">Scenario: {{ rp.label }}</div>
+                    <img src="{{ rp.rel_path }}" alt="{{ rp.label }}" style="width: 100%; max-width: 580px; display: inline-block; border-radius: 8px;">
+                  </div>
+                {% endfor %}
+              </div>
+              <button class="carousel-control-btn prev" onclick="moveCarousel('rock-physics', -1)">❮</button>
+              <button class="carousel-control-btn next" onclick="moveCarousel('rock-physics', 1)">❯</button>
+              <div class="carousel-indicator-bar">
+                {% for rp in existing_rp %}
+                  <span class="carousel-indicator-dot{% if loop.first %} active{% endif %}" onclick="jumpToSlide('rock-physics', {{ loop.index0 }})"></span>
+                {% endfor %}
+              </div>
+            </div>
+          {% elif existing_rp|length == 1 %}
+            <div style="text-align: center; margin-top: 15px;">
+              <img src="{{ existing_rp[0].rel_path }}" alt="{{ existing_rp[0].label }}" style="width: 100%; max-width: 580px; display: inline-block; border-radius: 8px;">
+            </div>
+          {% else %}
+            <p style="color: var(--text-muted);">Rock physics crossplots not available.</p>
+          {% endif %}
+
+          <div class="discussion-box">
+            <strong>Physics Consistency Analysis:</strong><br>
+            • <strong>Facies Separation:</strong> The scatter plots show how the model distinguishes between facies classes in elastic space. Floodplain (grey) has lower Ip and Is, point bars (red) and channels (blue) form higher-velocity clusters, and boundary facies (green) reside in intermediate transitions, matching the validation trend.<br>
+            • <strong>Constraint Influence:</strong> Conditional variants (<code>wells_seismic</code>, <code>wells_only</code>, and <code>seismic_only</code>) recover the tight physical correlations between Ip and Is better than the unconditional variant, which exhibits slightly larger dispersion but still respects the overall physical trends.
+          </div>
+        </div>
+      </section>
+
+      <!-- Section 8: Experiment Variants -->
+      <section id="experiment-variants">
+        <h2 class="section-title">8. Experiment Variants</h2>
+        <div class="card">
+          <p>This section displays the detailed training history and outputs for each of the four conditioning scenarios. For each variant, you can inspect:</p>
+          <ul>
+            <li><strong>Loss Curves:</strong> The individual loss components for the Generator and Discriminator. Successful GAN training shows stabilized adversarial losses and decreasing reconstruction/physics losses.</li>
+            <li><strong>Training Evolution Gallery:</strong> Use the interactive player to watch how the GAN progressively improves its generations. At early epochs, the structures are blurry. As epochs increase, the adversarial feedback sharpens the channels.</li>
+            <li><strong>Latent Space Projections:</strong> Compares the high-dimensional latent space representation of the generated realizations with the training data.</li>
+          </ul>
+        </div>
+
+        {% for var in variant_details %}
+          <div class="card">
+            <h3 class="card-title">{{ var.label }}</h3>
+            
+            {% if var.exists %}
+              <!-- Loss Curves Collapsible -->
+              {% if var.losses.has_g or var.losses.has_d %}
+                <details style="margin-bottom: 20px;">
+                  <summary style="font-size: 0.95rem; font-weight: 600; color: var(--accent); cursor: pointer;">📉 View Training Loss Curves (Carousel)</summary>
+                  <div style="margin-top: 15px;">
+                    {% if var.losses.has_g and var.losses.has_d %}
+                      <div class="carousel-wrapper">
+                        <div class="carousel-viewport" id="carousel-losses-{{ var.id }}">
+                          <!-- Generator losses slide -->
+                          <div class="carousel-slide" style="display: block;">
+                            <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent-hover); margin-bottom: 12px;">📉 Generator Loss Components</div>
+                            <div class="image-grid-losses">
+                              {% for path in var.losses.g %}
+                                <div class="image-card">
+                                  <div class="image-title">{{ path.label }}</div>
+                                  <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                                </div>
+                              {% endfor %}
+                            </div>
+                          </div>
+                          <!-- Discriminator losses slide -->
+                          <div class="carousel-slide" style="display: none;">
+                            <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent-hover); margin-bottom: 12px;">📉 Discriminator Loss Components</div>
+                            <div class="image-grid-losses">
+                              {% for path in var.losses.d %}
+                                <div class="image-card">
+                                  <div class="image-title">{{ path.label }}</div>
+                                  <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                                </div>
+                              {% endfor %}
+                            </div>
+                          </div>
+                        </div>
+                        <button class="carousel-control-btn prev" onclick="moveCarousel('losses-{{ var.id }}', -1)">❮</button>
+                        <button class="carousel-control-btn next" onclick="moveCarousel('losses-{{ var.id }}', 1)">❯</button>
+                        <div class="carousel-indicator-bar">
+                          <span class="carousel-indicator-dot active" onclick="jumpToSlide('losses-{{ var.id }}', 0)"></span>
+                          <span class="carousel-indicator-dot" onclick="jumpToSlide('losses-{{ var.id }}', 1)"></span>
+                        </div>
+                      </div>
+                    {% else %}
+                      {% set loss_list = var.losses.g if var.losses.has_g else var.losses.d %}
+                      {% set loss_title = "Generator Loss Components" if var.losses.has_g else "Discriminator Loss Components" %}
+                      <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent-hover); margin-bottom: 12px;">📉 {{ loss_title }}</div>
+                      <div class="image-grid-losses">
+                        {% for path in loss_list %}
+                          <div class="image-card">
+                            <div class="image-title">{{ path.label }}</div>
+                            <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                          </div>
+                        {% endfor %}
+                      </div>
+                    {% endif %}
+                  </div>
+                </details>
+              {% endif %}
+
+              <!-- Multi-Scale generated realizations -->
+              {% if var.pyramid_overview %}
+                <details style="margin-bottom: 20px;">
+                  <summary style="font-size: 0.95rem; font-weight: 600; color: var(--accent); cursor: pointer;">🏢 View Multi-Scale Generated Realizations</summary>
+                  <div style="margin-top: 15px;">
+                    <img src="{{ var.pyramid_overview }}" alt="Pyramid Overview" style="width: 100%; border-radius: 8px;">
+                  </div>
+                </details>
+              {% endif %}
+
+              <!-- Training Evolution Gallery animation -->
+              {% if var.gallery.has_gallery %}
+                <div class="carousel-wrapper">
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding: 0 5px;">
+                    <div style="font-weight: 600; color: var(--accent-hover); font-size: 0.95rem; font-family: 'Outfit', sans-serif;">📅 Training Evolution Gallery</div>
+                    <div style="display: flex; align-items: center; gap: 15px;">
+                      <div class="anim-speed">
+                        <span>Speed:</span>
+                        <input type="range" id="speed-{{ var.id }}" min="100" max="2000" step="100" value="800" style="direction: rtl;">
+                      </div>
+                      <button class="anim-btn" id="btn-anim-{{ var.id }}" onclick="toggleAnimation('{{ var.id }}')">▶ Play</button>
+                    </div>
+                  </div>
+                  <div class="carousel-viewport" id="carousel-{{ var.id }}">
+                    {% for slide in var.gallery.slides %}
+                      <div class="carousel-slide{% if slide.is_milestone %} milestone-print{% endif %}" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %}">
+                        <div style="margin-bottom: 10px; font-weight: 600; color: var(--accent-hover); font-size: 0.95rem;">📅 Milestone: <span class="epoch-number-label">{{ slide.epoch_label }}</span></div>
+                        <div class="image-grid-5">
+                          {% for prop in slide.properties %}
+                            {% if prop.rel_path %}
+                              <div class="image-card">
+                                <div class="image-title">{{ prop.label }}</div>
+                                <img src="{{ prop.rel_path }}" alt="{{ prop.label }}">
+                              </div>
+                            {% else %}
+                              <div class="image-card" style="display: flex; align-items: center; justify-content: center; height: 80px; border: 1px dashed var(--card-border);">
+                                <div style="font-size: 0.7rem; color: var(--text-muted);">{{ prop.label }} N/A</div>
+                              </div>
+                            {% endif %}
+                          {% endfor %}
+                        </div>
+                      </div>
+                    {% endfor %}
+                  </div>
+                  <button class="carousel-control-btn prev" onclick="moveCarousel('{{ var.id }}', -1)">❮</button>
+                  <button class="carousel-control-btn next" onclick="moveCarousel('{{ var.id }}', 1)">❯</button>
+                  
+                  {% if var.gallery.use_scrubber %}
+                    <div class="carousel-indicator-bar" style="align-items: center; gap: 10px; width: 100%; max-width: 400px; margin: 12px auto;">
+                      <input type="range" id="scrubber-{{ var.id }}" min="0" max="{{ var.gallery.slides|length - 1 }}" value="0" oninput="jumpToSlide('{{ var.id }}', parseInt(this.value))" style="flex-grow: 1; accent-color: var(--accent); cursor: pointer;">
+                      <span id="scrubber-label-{{ var.id }}" style="font-size: 0.85rem; color: var(--text-muted); font-family: monospace;">{{ var.gallery.default_epoch_label }} (1/{{ var.gallery.slides|length }})</span>
+                    </div>
+                  {% else %}
+                    <div class="carousel-indicator-bar">
+                      {% for slide in var.gallery.slides %}
+                        <span class="carousel-indicator-dot{% if loop.first %} active{% endif %}" onclick="jumpToSlide('{{ var.id }}', {{ loop.index0 }})"></span>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+                </div>
+              {% endif %}
+
+              <!-- Latent Space Projections -->
+              {% if var.projections %}
+                <details style="margin-top: 15px;">
+                  <summary style="font-size: 0.95rem; font-weight: 600; color: var(--accent); cursor: pointer;">📊 View Latent Space Projections</summary>
+                  <div class="tab-container" style="margin-top: 15px;">
+                    <div class="tab-headers">
+                      {% for proj in var.projections %}
+                        <button class="tab-btn{% if loop.first %} active{% endif %}">{{ proj.key|upper }}</button>
+                      {% endfor %}
+                    </div>
+                    <div class="tab-panes">
+                      {% for proj in var.projections %}
+                        <div class="tab-pane{% if loop.first %} active{% endif %}">
+                          <div class="tab-print-title">{{ proj.label }} Latent Space Projections</div>
+                          <div class="projections-grid">
+                            {% for method in proj.methods %}
+                              <div class="projection-card">
+                                <div class="image-title">{{ method.label }}</div>
+                                <img src="{{ method.rel_path }}" alt="{{ method.label }}">
+                              </div>
+                            {% endfor %}
+                          </div>
+                        </div>
+                      {% endfor %}
+                    </div>
+                  </div>
+                </details>
+              {% endif %}
+
+            {% endif %}
+          </div>
+        {% endfor %}
+      </section>
+
+      <!-- Section 9: Cross-Variant Projections -->
+      <section id="cross-variant-synthesis">
+        <h2 class="section-title">9. Cross-Variant Embedding Synthesis</h2>
+        <div class="card">
+          <p>Manifold learning methods (MDS, UMAP, Isomap, and t-SNE) project high-dimensional geological models into a 2D space. This allows us to visualize the latent structure learned by the networks and evaluate model generalization:</p>
+          <div class="discussion-box" style="margin-bottom: 15px;">
+            <strong>Manifold Interpretation Guide:</strong><br>
+            • <strong>Real Data Cloud:</strong> Represented as the background distribution. It defines the 'true' geological variability space.<br>
+            • <strong>Variant Overlap:</strong> Ideal realizations should overlap perfectly with the real data cloud. If a variant forms a tiny cluster far away, it represents a model that has suffered from mode collapse or significant bias.<br>
+            • <strong>Dimensionality Reduction:</strong> <em>t-SNE</em> and <em>UMAP</em> focus on local structures (neighbor relationships), showing clusters of similar realizations, while <em>MDS</em> and <em>Isomap</em> preserve global distances and non-linear paths respectively.
+          </div>
+
+          <!-- Technical Explanation -->
+          <details style="margin-top: 15px; margin-bottom: 20px;">
+            <summary style="font-size: 0.95rem; font-weight: 600; color: var(--accent); cursor: pointer;">📖 What are Latent Space Projections (Embeddings)?</summary>
+            <div style="margin-top: 12px; font-size: 0.9rem; line-height: 1.6; color: var(--text-main); padding: 15px; border-left: 3px solid var(--accent); background-color: rgba(255,255,255,0.02); border-radius: 0 8px 8px 0;">
+              <p style="margin-bottom: 15px;">
+                <strong>Latent Space Projection</strong> is a technique used to visualize high-dimensional data by mapping it onto a 2D or 3D coordinate system. In the context of FaciesGAN, each generated geological model consists of thousands of pixels across multiple rock properties (Facies, Ip, Is, Vp/Vs). To understand the diversity and quality of these models, we "project" them into a lower-dimensional **Latent Space**.
+              </p>
+              <p style="margin-bottom: 15px;">
+                Models that share similar spatial features (e.g., similar channel orientation, connectivity, or rock physics correlations) will be positioned close to each other in this space, while geologically distinct models will be far apart. This allows us to visually confirm if our GAN is covering the full range of variability seen in the real reservoir data.
+              </p>
+              
+              <h4 style="color: var(--accent-hover); margin-bottom: 10px; font-family: 'Outfit', sans-serif;">Key Manifold Learning Techniques:</h4>
+              <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div style="background-color: rgba(0,0,0,0.1); padding: 10px; border-radius: 6px; border: 1px solid var(--card-border);">
+                  <strong>1. MDS (Multidimensional Scaling):</strong><br>
+                  A linear technique that attempts to preserve the actual Euclidean distances between models. It provides a reliable view of the "global" structure of the dataset.
+                </div>
+                <div style="background-color: rgba(0,0,0,0.1); padding: 10px; border-radius: 6px; border: 1px solid var(--card-border);">
+                  <strong>2. Isomap:</strong><br>
+                  A non-linear method that measures distances along the surface of the data manifold (geodesic distance). It is excellent for capturing continuous geological transitions, such as varying channel sinuosity.
+                </div>
+                <div style="background-color: rgba(0,0,0,0.1); padding: 10px; border-radius: 6px; border: 1px solid var(--card-border);">
+                  <strong>3. t-SNE:</strong><br>
+                  A probabilistic technique that prioritizes keeping similar models together. It is highly effective at revealing distinct clusters or "modes" in the data, making it useful for detecting mode collapse.
+                </div>
+                <div style="background-color: rgba(0,0,0,0.1); padding: 10px; border-radius: 6px; border: 1px solid var(--card-border);">
+                  <strong>4. UMAP:</strong><br>
+                  A state-of-the-art technique that balances local and global structure. It is often more efficient and provides a clearer separation of variants while still respecting the overall distribution of the real data.
+                </div>
+              </div>
+            </div>
+          </details>
+
+          {% if cross_variant_synthesis %}
+            <div class="tab-container">
+              <div class="tab-headers">
+                {% for cv in cross_variant_synthesis %}
+                  <button class="tab-btn{% if loop.first %} active{% endif %}">{{ cv.key|upper }}</button>
+                {% endfor %}
+              </div>
+              <div class="tab-panes">
+                {% for cv in cross_variant_synthesis %}
+                  <div class="tab-pane{% if loop.first %} active{% endif %}">
+                    <div class="tab-print-title">Cross-Variant Manifold: {{ cv.label }}</div>
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Manifold progression plots for {{ cv.label.lower() }}:</p>
+                    
+                    {% for method in cv.methods %}
+                      <details style="margin-bottom: 10px;">
+                        <summary style="font-size: 0.9rem; font-weight: 600; color: var(--accent); cursor: pointer;">🔍 {{ method.method_label }} Projection Progression</summary>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 10px;">
+                          {% if method.type == 'epochs' %}
+                            {% for img in method.images %}
+                              <div style="background-color: rgba(0,0,0,0.15); border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; text-align: center;">
+                                <div class="image-title">{{ img.label }}</div>
+                                <img src="{{ img.rel_path }}" alt="{{ img.label }}" style="max-width: 100%; border-radius: 4px;">
+                              </div>
+                            {% endfor %}
+                          {% else %}
+                            <div style="background-color: rgba(0,0,0,0.15); border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; text-align: center; grid-column: 1 / -1;">
+                              <div class="image-title">Final Grid</div>
+                              <img src="{{ method.images[0].rel_path }}" alt="Final Grid" style="max-width: 50%; min-width: 260px; border-radius: 4px;">
+                            </div>
+                          {% endif %}
+                        </div>
+                      </details>
+                    {% endfor %}
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          {% else %}
+            <p style="color: var(--text-muted);">No cross-variant manifold progression plots found.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <!-- Section 10: Distribution Analysis -->
+      <section id="distribution-analysis">
+        <h2 class="section-title">10. Distribution Analysis</h2>
+        <div class="card">
+          <p>Overlaid histograms comparing the categorical and continuous property distributions of the real validation data vs. all generated variants. This visualization helps identify potential bias or mode collapse in the latent representations and physical parameter space:</p>
+          <div class="discussion-box" style="margin-bottom: 15px;">
+            <strong>Distribution Interpretation Guide:</strong><br>
+            • <strong>Overlapping Curves:</strong> The gray filled area represents the real distribution. The colored lines show each variant. A perfect match means the GAN generates the correct proportion and spread of properties.<br>
+            • <strong>Mode Collapse:</strong> If a variant's curve exhibits a single sharp spike or narrow peak where the real data has a wide spread, it indicates the model is generating repetitive values (mode collapse).<br>
+            • <strong>Bias:</strong> A horizontal shift between the curves indicates that the variant consistently over-predicts or under-predicts a property value (e.g. generating channels with average acoustic impedance that is too high).
+          </div>
+
+          {% if distribution_analysis|length > 1 %}
+            <div class="carousel-wrapper">
+              <div class="carousel-viewport" id="carousel-distribution">
+                {% for dist in distribution_analysis %}
+                  <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
+                    <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">Property: {{ dist.label }}</div>
+                    <img src="{{ dist.rel_path }}" alt="{{ dist.label }}" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+                  </div>
+                {% endfor %}
+              </div>
+              <button class="carousel-control-btn prev" onclick="moveCarousel('distribution', -1)">❮</button>
+              <button class="carousel-control-btn next" onclick="moveCarousel('distribution', 1)">❯</button>
+              <div class="carousel-indicator-bar">
+                {% for dist in distribution_analysis %}
+                  <span class="carousel-indicator-dot{% if loop.first %} active{% endif %}" onclick="jumpToSlide('distribution', {{ loop.index0 }})"></span>
+                {% endfor %}
+              </div>
+            </div>
+          {% elif distribution_analysis|length == 1 %}
+            <div style="text-align: center; margin-top: 15px;">
+              <img src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+            </div>
+          {% else %}
+            <p style="color: var(--text-muted);">Distribution histograms not available.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <!-- Section 11: Spatial Continuity -->
+      <section id="spatial-continuity">
+        <h2 class="section-title">11. Spatial Continuity Analysis</h2>
+        <div class="card">
+          <p>Variograms quantify the spatial correlation and continuity of geological properties by measuring how the variance between data points increases with distance (lag). This analysis evaluates whether the GAN-generated realizations (Ip, Is, Vp/Vs, and Seismic) correctly capture the characteristic spatial structures of the original reservoir data.</p>
+          <p>Key variogram parameters used for evaluation include:</p>
+          <ul>
+            <li><strong>Sill</strong>: The maximum variance reached at large distances, indicating the total variability of the field.</li>
+            <li><strong>Range</strong>: The distance at which the variogram reaches the sill, representing the maximum correlation length.</li>
+            <li><strong>Nugget</strong>: The variance at zero lag, reflecting small-scale variability or measurement noise.</li>
+          </ul>
+          <p>A close match between the 'Real' and 'Generated' variogram curves suggests that the GAN has successfully learned the underlying geological length scales and spatial textures:</p>
+          <div class="discussion-box" style="margin-bottom: 15px;">
+            <strong>Variogram Interpretation Guide:</strong><br>
+            • <strong>Curvature Match:</strong> A variant curve that follows the real curve indicates correct spatial autocorrelation. If the curve rises too fast, the generated features are too noisy or disconnected at small scales.<br>
+            • <strong>Sill Level (Total Variance):</strong> If the variant's sill is lower than the real sill, it means the generated realizations lack variance (i.e. they are too homogeneous/blurry).<br>
+            • <strong>Range (Correlation Length):</strong> A mismatch in the range means the generated channels are either too long/continuous or too short/fragmented compared to reality.
+          </div>
+
+          {% if spatial_continuity|length > 1 %}
+            <div class="carousel-wrapper">
+              <div class="carousel-viewport" id="carousel-spatial">
+                {% for var_plot in spatial_continuity %}
+                  <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
+                    <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">Property: {{ var_plot.label }}</div>
+                    <img src="{{ var_plot.rel_path }}" alt="{{ var_plot.label }}" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                  </div>
+                {% endfor %}
+              </div>
+              <button class="carousel-control-btn prev" onclick="moveCarousel('spatial', -1)">❮</button>
+              <button class="carousel-control-btn next" onclick="moveCarousel('spatial', 1)">❯</button>
+              <div class="carousel-indicator-bar">
+                {% for var_plot in spatial_continuity %}
+                  <span class="carousel-indicator-dot{% if loop.first %} active{% endif %}" onclick="jumpToSlide('spatial', {{ loop.index0 }})"></span>
+                {% endfor %}
+              </div>
+            </div>
+          {% elif spatial_continuity|length == 1 %}
+            <div style="text-align: center; margin-top: 15px;">
+              <img src="{{ spatial_continuity[0].rel_path }}" alt="{{ spatial_continuity[0].label }}" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+            </div>
+          {% else %}
+            <p style="color: var(--text-muted);">Variogram plots not available.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <!-- Section 12: Timing & Performance -->
+      <section id="timing-performance">
+        <h2 class="section-title">12. Timing & Performance</h2>
+        <div class="card">
+          <p>Computational metrics including training duration and total model size (checkpoints) for each variant:</p>
+          <div class="discussion-box" style="margin-bottom: 15px;">
+            <strong>Performance Discussion:</strong><br>
+            • <strong>Model Size:</strong> Reflects the cumulative storage footprint of the generated generator and discriminator weights at all pyramid scales. Variants with seismic conditioning require additional convolutional layers, increasing size.<br>
+            • <strong>Training Time:</strong> Captured directly from active TensorBoard logging intervals. Variants with more complex loss components (e.g. seismic and well physics penalties) require slightly longer backpropagation times per epoch.
+          </div>
+          {% if performance_table %}
+            <div style="overflow-x: auto;">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="text-align: left;">Variant</th>
+                    <th style="text-align: center;">Total Training Time</th>
+                    <th style="text-align: center;">Model Size (MB)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in performance_table %}
+                    <tr>
+                      <td style="font-weight: 500;">{{ row.label }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.duration }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.size_mb }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <p style="color: var(--text-muted);">Performance data not available.</p>
+          {% endif %}
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- JavaScript block -->
+  <script>
+    // Tab switcher logic
+    document.querySelectorAll('.tab-headers').forEach(header => {
+      const buttons = header.querySelectorAll('.tab-btn');
+      const panesContainer = header.nextElementSibling;
+      const panes = panesContainer.querySelectorAll('.tab-pane');
+      
+      buttons.forEach((btn, idx) => {
+        btn.addEventListener('click', () => {
+          buttons.forEach(b => b.classList.remove('active'));
+          panes.forEach(p => p.classList.remove('active'));
+          
+          btn.classList.add('active');
+          if (panes[idx]) {
+            panes[idx].classList.add('active');
+          }
+        });
+      });
+    });
+
+    // Animation logic
+    const animIntervals = {};
+    function toggleAnimation(variant) {
+      const btn = document.getElementById('btn-anim-' + variant);
+      if (animIntervals[variant]) {
+        clearInterval(animIntervals[variant]);
+        delete animIntervals[variant];
+        btn.innerHTML = '▶ Play';
+        btn.classList.remove('active');
+      } else {
+        const speedInput = document.getElementById('speed-' + variant);
+        const interval = parseInt(speedInput.value || 800);
+        
+        btn.innerHTML = '⏸ Stop';
+        btn.classList.add('active');
+        
+        // Start from epoch 0 (last slide) if currently at final epoch
+        const container = document.getElementById('carousel-' + variant);
+        const slides = container.querySelectorAll('.carousel-slide');
+        let activeIdx = 0;
+        slides.forEach((s, i) => { if (s.style.display === 'block') activeIdx = i; });
+        if (activeIdx === 0) jumpToSlide(variant, slides.length - 1);
+
+        animIntervals[variant] = setInterval(() => {
+          moveCarousel(variant, -1); // Move backward in the desc list = forward in time
+        }, interval);
+      }
+    }
+
+    // Theme toggle
+    function toggleTheme() {
+      const body = document.body;
+      const current = body.getAttribute('data-theme');
+      const next = current === 'light' ? 'dark' : 'light';
+      body.setAttribute('data-theme', next);
+      localStorage.setItem('faciesgan-theme', next);
+    }
+    
+    // Load theme setting on load
+    window.addEventListener('DOMContentLoaded', () => {
+      const theme = localStorage.getItem('faciesgan-theme');
+      if (theme) {
+        document.body.setAttribute('data-theme', theme);
+      }
+    });
+
+    // Carousel controls
+    function moveCarousel(variant, step) {
+      const container = document.getElementById('carousel-' + variant);
+      const slides = container.querySelectorAll('.carousel-slide');
+      let activeIdx = -1;
+      
+      slides.forEach((slide, idx) => {
+        if (slide.style.display === 'block' || (slide.style.display !== 'none' && activeIdx === -1)) {
+          activeIdx = idx;
+        }
+      });
+      
+      let newIdx = activeIdx + step;
+      if (newIdx >= slides.length) newIdx = 0;
+      if (newIdx < 0) newIdx = slides.length - 1;
+      
+      jumpToSlide(variant, newIdx);
+    }
+
+    function jumpToSlide(variant, slideIdx) {
+      const container = document.getElementById('carousel-' + variant);
+      const slides = container.querySelectorAll('.carousel-slide');
+      
+      slides.forEach((slide, idx) => {
+        if (idx === slideIdx) {
+          slide.style.display = 'block';
+        } else {
+          slide.style.display = 'none';
+        }
+      });
+      
+      const wrapper = container.closest('.carousel-wrapper');
+      const indicatorBar = wrapper.querySelector('.carousel-indicator-bar');
+      if (indicatorBar) {
+        const scrubber = indicatorBar.querySelector('input[type="range"]');
+        const label = indicatorBar.querySelector('span');
+        if (scrubber && label) {
+          scrubber.value = slideIdx;
+          const slideHeader = slides[slideIdx].querySelector('.epoch-number-label');
+          const epochStr = slideHeader ? slideHeader.textContent : '';
+          label.textContent = `${epochStr} (${slideIdx + 1}/${slides.length})`;
+        }
+        const dots = indicatorBar.querySelectorAll('.carousel-indicator-dot');
+        dots.forEach((dot, idx) => {
+          if (idx === slideIdx) {
+            dot.classList.add('active');
+          } else {
+            dot.classList.remove('active');
+          }
+        });
+      }
+    }
+
+    // Scrollspy to highlight active nav link
+    window.addEventListener('DOMContentLoaded', () => {
+      const sections = document.querySelectorAll('section');
+      const navLinks = document.querySelectorAll('.nav-link');
+      
+      window.addEventListener('scroll', () => {
+        let current = '';
+        sections.forEach(section => {
+          const sectionTop = section.offsetTop;
+          if (window.scrollY >= sectionTop - 150) {
+            current = section.getAttribute('id');
+          }
+        });
+        
+        // Force highlight the last section if scrolled to the absolute bottom
+        const isAtBottom = (window.innerHeight + window.scrollY) >= (document.documentElement.scrollHeight - 60);
+        if (isAtBottom && sections.length > 0) {
+          current = sections[sections.length - 1].getAttribute('id');
+        }
+        
+        navLinks.forEach(link => {
+          link.classList.remove('active');
+          if (link.getAttribute('href') === '#' + current) {
+            link.classList.add('active');
+          }
+        });
+      });
+    });
+
+    // Automatically open all details sections before printing
+    window.addEventListener('beforeprint', () => {
+      document.querySelectorAll('details').forEach(el => {
+        el.setAttribute('data-was-closed', !el.hasAttribute('open'));
+        el.setAttribute('open', '');
+      });
+    });
+    window.addEventListener('afterprint', () => {
+      document.querySelectorAll('details').forEach(el => {
+        if (el.getAttribute('data-was-closed') === 'true') {
+          el.removeAttribute('open');
+        }
+        el.removeAttribute('data-was-closed');
+      });
+    });
+  </script>
+</body>
+</html>

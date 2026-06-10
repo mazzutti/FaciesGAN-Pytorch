@@ -2187,10 +2187,19 @@ class Trainer:
         # Determine active statuses from self.options
         adv_active = getattr(self.options, "adversarial_loss_penalty", 1.0) > 0
         rec_facies_active = getattr(self.options, "rec_facies_loss_penalty", 10.0) > 0
-        well_active = getattr(self.options, "use_wells", False) and getattr(self.options, "well_loss_penalty", 10.0) > 0
+        well_active = (
+            getattr(self.options, "use_wells", False)
+            and getattr(self.options, "well_loss_penalty", 10.0) > 0
+        )
         div_active = getattr(self.options, "diversity_loss_penalty", 1.0) > 0
-        rec_rp_active = getattr(self.options, "use_rock_physics", False) and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
-        tv_active = getattr(self.options, "use_rock_physics", False) and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+        rec_rp_active = (
+            getattr(self.options, "use_rock_physics", False)
+            and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
+        )
+        tv_active = (
+            getattr(self.options, "use_rock_physics", False)
+            and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+        )
         elastic_active = (
             getattr(self.options, "use_rock_physics", False)
             and getattr(self.options, "elastic_loss_penalty", 0.1) > 0
@@ -2285,10 +2294,19 @@ class Trainer:
         # Determine active statuses from self.options
         adv_active = getattr(self.options, "adversarial_loss_penalty", 1.0) > 0
         rec_facies_active = getattr(self.options, "rec_facies_loss_penalty", 10.0) > 0
-        well_active = getattr(self.options, "use_wells", False) and getattr(self.options, "well_loss_penalty", 10.0) > 0
+        well_active = (
+            getattr(self.options, "use_wells", False)
+            and getattr(self.options, "well_loss_penalty", 10.0) > 0
+        )
         div_active = getattr(self.options, "diversity_loss_penalty", 1.0) > 0
-        rec_rp_active = getattr(self.options, "use_rock_physics", False) and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
-        tv_active = getattr(self.options, "use_rock_physics", False) and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+        rec_rp_active = (
+            getattr(self.options, "use_rock_physics", False)
+            and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
+        )
+        tv_active = (
+            getattr(self.options, "use_rock_physics", False)
+            and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+        )
         elastic_active = (
             getattr(self.options, "use_rock_physics", False)
             and getattr(self.options, "elastic_loss_penalty", 0.1) > 0
@@ -2324,7 +2342,9 @@ class Trainer:
             g_cols.append(("G_seis", 10))
 
         g_box_width = sum(w for _, w in g_cols) + 3 * len(g_cols) - 1
-        g_header_line = "  │ " + " │ ".join(f"{name:^{width}}" for name, width in g_cols) + " │"
+        g_header_line = (
+            "  │ " + " │ ".join(f"{name:^{width}}" for name, width in g_cols) + " │"
+        )
 
         lines: list[str] = [
             "",
@@ -2395,7 +2415,9 @@ class Trainer:
             d_cols.append(("D_gp", 10))
 
         d_box_width = sum(w for _, w in d_cols) + 3 * len(d_cols) - 1
-        d_header_line = "  │ " + " │ ".join(f"{name:^{width}}" for name, width in d_cols) + " │"
+        d_header_line = (
+            "  │ " + " │ ".join(f"{name:^{width}}" for name, width in d_cols) + " │"
+        )
 
         lines.append("  Discriminator Metrics:")
         lines.append("  ┌" + "─" * d_box_width + "┐")
