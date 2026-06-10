@@ -1110,7 +1110,10 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
                                     active_properties.append("Is")
                                 if getattr(opt, "use_vpvs", True):
                                     active_properties.append("VP_VS")
-                                prop_indices = {name: idx for idx, name in enumerate(active_properties)}
+                                prop_indices = {
+                                    name: idx
+                                    for idx, name in enumerate(active_properties)
+                                }
 
                                 if prop_key == "ip" and "Ip" in prop_indices:
                                     ch_idx = num_facies_ch + prop_indices["Ip"]

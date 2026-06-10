@@ -319,7 +319,7 @@ def compute_distribution_metrics(
         real_is: list[FloatArray] = []
         real_vpvs: list[FloatArray] = []
         n_samples = min(10, facies_batch.shape[0])
-        
+
         prop_indices = {name: i for i, name in enumerate(active_properties)}
 
         for idx in range(n_samples):
@@ -354,9 +354,17 @@ def compute_distribution_metrics(
         if not real_ip and not real_is and not real_vpvs:
             return metrics
 
-        real_ip_arr: FloatArray | None = np.asarray(np.concatenate(real_ip), dtype=np.float64) if real_ip else None
-        real_is_arr: FloatArray | None = np.asarray(np.concatenate(real_is), dtype=np.float64) if real_is else None
-        real_vpvs_arr: FloatArray | None = np.asarray(np.concatenate(real_vpvs), dtype=np.float64) if real_vpvs else None
+        real_ip_arr: FloatArray | None = (
+            np.asarray(np.concatenate(real_ip), dtype=np.float64) if real_ip else None
+        )
+        real_is_arr: FloatArray | None = (
+            np.asarray(np.concatenate(real_is), dtype=np.float64) if real_is else None
+        )
+        real_vpvs_arr: FloatArray | None = (
+            np.asarray(np.concatenate(real_vpvs), dtype=np.float64)
+            if real_vpvs
+            else None
+        )
 
         properties: list[tuple[str, FloatArray]] = []
         if real_ip_arr is not None:

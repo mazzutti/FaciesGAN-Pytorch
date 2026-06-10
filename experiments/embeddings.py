@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import logging
 import math
-import warnings
 import os
 import traceback
+import warnings
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -30,24 +31,26 @@ from typing import (
 import numpy as np
 import torch
 import torch.nn.functional as F
-from concurrent.futures import ThreadPoolExecutor, as_completed, Future
-
-# joblib removed: use ThreadPoolExecutor for parallelism to avoid multiprocessing issues
-from sklearn.metrics import euclidean_distances
 from scipy.sparse import SparseEfficiencyWarning, coo_matrix
 from sklearn.decomposition import PCA
 from sklearn.manifold import MDS, TSNE, Isomap
+
+# joblib removed: use ThreadPoolExecutor for parallelism to avoid multiprocessing issues
+from sklearn.metrics import euclidean_distances
 from umap import UMAP  # type: ignore[import]
+
 
 def _get_numba_threads() -> int:
     try:
         import numba  # type: ignore
+
         _threads = getattr(numba.config, "NUMBA_NUM_THREADS", None)
         if _threads is not None:
             return int(_threads)
     except Exception:
         pass
     return os.cpu_count() or 1
+
 
 _NUMBA_THREADS = _get_numba_threads()
 
@@ -362,7 +365,9 @@ def compute_shared_embeddings(
             n_channels = int(dataset.options.num_facies_channels or 3)
             if rock_physics_only:
                 n_channels = 1
-            real_flat = np.empty((0, n_channels * target_h * target_w), dtype=np.float32)
+            real_flat = np.empty(
+                (0, n_channels * target_h * target_w), dtype=np.float32
+            )
         else:
             real_flat = prepare_features(
                 dataset,

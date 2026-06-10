@@ -115,9 +115,17 @@ def generate_html_report(
             continue
         r = results[var]
         # Calculate deviations for the scorecard
-        ip_dev = abs(((r["ip_mean"] - real_ip_mean) / real_ip_mean) * 100) if use_ip else 0.0
-        is_dev = abs(((r["is_mean"] - real_is_mean) / real_is_mean) * 100) if use_is else 0.0
-        vpvs_dev = abs(((r["vpvs_mean"] - real_vpvs_mean) / real_vpvs_mean) * 100) if use_vpvs else 0.0
+        ip_dev = (
+            abs(((r["ip_mean"] - real_ip_mean) / real_ip_mean) * 100) if use_ip else 0.0
+        )
+        is_dev = (
+            abs(((r["is_mean"] - real_is_mean) / real_is_mean) * 100) if use_is else 0.0
+        )
+        vpvs_dev = (
+            abs(((r["vpvs_mean"] - real_vpvs_mean) / real_vpvs_mean) * 100)
+            if use_vpvs
+            else 0.0
+        )
         facies_rmse = float(r["rmse_error"]) * 100
 
         # Weighted score (lower is better)
@@ -126,7 +134,10 @@ def generate_html_report(
         if active_rp_count > 0:
             rp_weight = 0.6 / active_rp_count
             overall = (
-                (facies_rmse * 0.4) + (ip_dev * rp_weight if use_ip else 0.0) + (is_dev * rp_weight if use_is else 0.0) + (vpvs_dev * rp_weight if use_vpvs else 0.0)
+                (facies_rmse * 0.4)
+                + (ip_dev * rp_weight if use_ip else 0.0)
+                + (is_dev * rp_weight if use_is else 0.0)
+                + (vpvs_dev * rp_weight if use_vpvs else 0.0)
             )
         else:
             overall = facies_rmse
