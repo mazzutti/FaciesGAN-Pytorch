@@ -381,7 +381,7 @@ class Trainer:
                         # Tick the compile progress bar for this discriminator scale.
                         # The actual JIT compilation for the disc fires here (train-mode
                         # backward), so this is the correct place to report progress.
-                        self.model._mark_disc_compile_progress(scale)
+                        self.model.mark_disc_compile_progress(scale)
 
                 self.model.generator.zero_grad(set_to_none=True)
                 self.model.discriminator.zero_grad(set_to_none=True)

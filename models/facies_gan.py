@@ -327,7 +327,7 @@ class FaciesGAN(nn.Module):
         self._compile_progress_done = self._compile_progress_total
         self._tick_compile_progress("finished")
 
-    def _mark_disc_compile_progress(self, scale: int) -> None:
+    def mark_disc_compile_progress(self, scale: int) -> None:
         """Tick compile progress once when a compiled discriminator is first used."""
         if scale in self._compiled_disc_seen:
             return
@@ -522,7 +522,7 @@ class FaciesGAN(nn.Module):
 
             raw_losses: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
             for scale in active_scales:
-                self._mark_disc_compile_progress(scale)
+                self.mark_disc_compile_progress(scale)
                 raw_losses[scale] = _disc_step(scale, step_idx, compute_gp)
 
             # Phase 2: Coalesced all-reduce

@@ -39,12 +39,17 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import MDS, TSNE, Isomap
 from umap import UMAP  # type: ignore[import]
 
-try:
-    import numba
+def _get_numba_threads() -> int:
+    try:
+        import numba  # type: ignore
+        _threads = getattr(numba.config, "NUMBA_NUM_THREADS", None)
+        if _threads is not None:
+            return int(_threads)
+    except Exception:
+        pass
+    return os.cpu_count() or 1
 
-    _NUMBA_THREADS = int(numba.config.NUMBA_NUM_THREADS)
-except Exception:
-    _NUMBA_THREADS = os.cpu_count() or 1
+_NUMBA_THREADS = _get_numba_threads()
 
 _MAX_JOBS = min(12, _NUMBA_THREADS)
 

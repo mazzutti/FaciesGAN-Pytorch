@@ -452,7 +452,6 @@ def main() -> None:
                 np.transpose(device_manager.to_numpy(real_seismic_tensor), (0, 2, 3, 1))
                 if (
                     all_seismic
-                    and real_seismic_tensor is not None
                     and real_seismic_tensor.numel() > 0
                     and len(real_seismic_tensor.shape) == 4
                 )
