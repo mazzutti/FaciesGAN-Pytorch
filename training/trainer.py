@@ -517,9 +517,9 @@ class Trainer:
             return F.pad(z_rec, [self.residual_padding] * 4, value=pad_value)
 
         num_cond_channels = 0
-        if len(wells_pyramid) > 0:
+        if self.options.use_wells and len(wells_pyramid) > 0:
             num_cond_channels += self.options.num_facies_channels
-        if len(seismic_pyramid) > 0:
+        if self.options.use_seismic and len(seismic_pyramid) > 0:
             num_cond_channels += 1
 
         noise_ch = self.noise_channels - num_cond_channels
@@ -529,9 +529,9 @@ class Trainer:
         )
 
         to_concat = [z_rec]
-        if len(wells_pyramid) > 0:
+        if self.options.use_wells and len(wells_pyramid) > 0:
             to_concat.append(wells_pyramid[scale][positions].to(device_manager.device))
-        if len(seismic_pyramid) > 0:
+        if self.options.use_seismic and len(seismic_pyramid) > 0:
             to_concat.append(
                 seismic_pyramid[scale][positions].to(device_manager.device)
             )

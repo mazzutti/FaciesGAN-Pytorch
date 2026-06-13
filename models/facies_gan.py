@@ -1255,7 +1255,7 @@ class FaciesGAN(nn.Module):
                 w_on_device = w_local
                 noise_channels -= w_local.shape[1]
 
-            if seismic_pyramid:
+            if self.options.use_seismic and seismic_pyramid:
                 s_local = (
                     seismic_pyramid[lvl]
                     if not isinstance(indexes, torch.Tensor)
@@ -1363,7 +1363,7 @@ class FaciesGAN(nn.Module):
                 i,
                 indexes,
                 wells_pyramid[i] if wells_pyramid else None,
-                seismic_pyramid[i] if seismic_pyramid else None,
+                seismic_pyramid[i] if (self.options.use_seismic and seismic_pyramid) else None,
             )
             for i in range(scale + 1)
         ]

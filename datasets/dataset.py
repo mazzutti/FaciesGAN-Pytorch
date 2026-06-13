@@ -244,7 +244,11 @@ class PyramidsDataset(Dataset[RawBatch]):
             masks_pyramids = tuple()
 
         # Seismic
-        if self.options.use_seismic:
+        if (
+            self.options.use_seismic
+            or getattr(self.options, "seismic_loss_penalty", 0.0) > 0.0
+            or getattr(self.options, "use_residual_coupling", False)
+        ):
             seismic_pyramids = utils.to_seismic_pyramids(
                 self.scales,
                 data_dir=self.data_dir,
