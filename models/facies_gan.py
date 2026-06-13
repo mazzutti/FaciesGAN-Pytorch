@@ -35,10 +35,13 @@ from training.metrics import (
     DiscriminatorMetrics,
     GeneratorMetrics,
     ScaleMetrics,
+    calculate_reconstruction_loss_from_output,
     compute_adversarial_loss,
     compute_diversity_loss,
     compute_gradient_penalty,
+    compute_integrated_rpm_loss,
     compute_masked_loss,
+    compute_reconstruction_loss,
     compute_rock_physics_loss,
 )
 from utils import get_padding_value
@@ -118,6 +121,13 @@ class FaciesGAN(nn.Module):
         self.total_output_channels = channels[ChannelKey.GENERATOR_OUT]
 
         self.disc_input_channels: int = self.total_output_channels
+        if options.use_disc_conditioning:
+            if options.use_wells:
+                # Wells (one-hot facies) + Well Mask
+                self.disc_input_channels += self.num_facies_channels + 1
+            if options.use_seismic:
+                # Seismic profile
+                self.disc_input_channels += 1
         self.gen_input_channels: int = channels[ChannelKey.NOISE]
         self.gen_output_channels: int = self.total_output_channels
         self.base_channel = self.total_output_channels
@@ -378,6 +388,7 @@ class FaciesGAN(nn.Module):
             discriminator_optimizers,
             facies_pyramid,
             wells_pyramid,
+            masks_pyramid,
             seismic_pyramid,
         )
         gen_metrics_tuple = self.optimize_generator(
@@ -409,6 +420,7 @@ class FaciesGAN(nn.Module):
         optimizers: dict[int, torch.optim.Optimizer],
         facies_pyramid: dict[int, torch.Tensor],
         wells_pyramid: dict[int, torch.Tensor] = {},
+        masks_pyramid: dict[int, torch.Tensor] = {},
         seismic_pyramid: dict[int, torch.Tensor] = {},
     ) -> tuple[DiscriminatorMetrics, ...]:
         """Perform discriminator optimization with gradient accumulation.
@@ -464,16 +476,51 @@ class FaciesGAN(nn.Module):
 
         def _disc_step(
             scale: int, step_idx: int, compute_gp: bool
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             self.optimizer_zero_grad(optimizers[scale])
             fake = pre_faked[scale][step_idx]
             real = facies_pyramid[scale]
 
+            # Construct conditioning tensor if flag is active
+            cond_tensor = None
+            if self.options.use_disc_conditioning:
+                cond_parts = []
+                if self.options.use_wells:
+                    w_local = wells_pyramid.get(scale)
+                    if w_local is not None:
+                        w_local = w_local.to(device_manager.device, non_blocking=True)
+                        if w_local.shape[0] != b:
+                            w_local = w_local[indexes]
+                        cond_parts.append(w_local)
+                    m_local = masks_pyramid.get(scale)
+                    if m_local is not None:
+                        m_local = m_local.to(device_manager.device, non_blocking=True)
+                        if m_local.shape[0] != b:
+                            m_local = m_local[indexes]
+                        cond_parts.append(m_local)
+                if self.options.use_seismic:
+                    s_local = seismic_pyramid.get(scale)
+                    if s_local is not None:
+                        s_local = s_local.to(device_manager.device, non_blocking=True)
+                        if s_local.shape[0] != b:
+                            s_local = s_local[indexes]
+                        cond_parts.append(s_local)
+                if cond_parts:
+                    cond_tensor = torch.cat(cond_parts, dim=1)
+
             with autocast(DeviceType.CUDA, enabled=self.use_amp, dtype=self.amp_dtype):
-                d_both = discs[scale](torch.cat([real, fake], dim=0))
+                if cond_tensor is not None:
+                    cond_both = torch.cat([cond_tensor, cond_tensor], dim=0)
+                    disc_in = torch.cat([torch.cat([real, fake], dim=0), cond_both], dim=1)
+                else:
+                    disc_in = torch.cat([real, fake], dim=0)
+                d_both = discs[scale](disc_in)
                 d_real, d_fake = d_both[:b], d_both[b:]
                 rl = -d_real.mean()
                 fl = d_fake.mean()
+
+                drift_penalty = getattr(self.options, "drift_loss_penalty", 0.001)
+                drift_loss = drift_penalty * (d_real ** 2).mean()
 
             if compute_gp:
                 disc_mod = self.uncompiled_discs.get(scale)
@@ -485,16 +532,18 @@ class FaciesGAN(nn.Module):
                     if scale == 0 and self.options.scale0_gradient_loss_penalty > 0.0
                     else self.options.gradient_loss_penalty
                 )
-                gp = compute_gradient_penalty(disc, real, fake.detach(), lambda_gp)
+                gp = compute_gradient_penalty(
+                    disc, real, fake.detach(), lambda_gp, conditioning=cond_tensor
+                )
                 gp_det = gp.detach()
                 last_gp[scale] = gp_det
                 self.last_gp_value[scale] = gp_det
             else:
                 gp = self.zero_scalar
 
-            total = rl + fl + gp
+            total = rl + fl + gp + drift_loss
             total.backward()
-            return rl.detach(), fl.detach()
+            return rl.detach(), fl.detach(), drift_loss.detach()
 
         max_steps = d * scale0_multi if (scale0_multi > 1 and 0 in sorted_scales) else d
         step_metrics: list[DiscriminatorMetrics] = [None] * len(sorted_scales)  # type: ignore
@@ -520,7 +569,7 @@ class FaciesGAN(nn.Module):
                 active_scales = [0]
                 ddp_modules = ddp_disc_0
 
-            raw_losses: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+            raw_losses: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
             for scale in active_scales:
                 self.mark_disc_compile_progress(scale)
                 raw_losses[scale] = _disc_step(scale, step_idx, compute_gp)
@@ -538,13 +587,13 @@ class FaciesGAN(nn.Module):
                     scale != 0 and step_idx == d - 1
                 )
                 if is_final_step:
-                    rl, fl = raw_losses[scale]
+                    rl, fl, dl = raw_losses[scale]
                     # Retrieve the last computed gradient penalty from self.last_gp_value
                     # to ensure it is always populated in console logs and Tensorboard
                     # even during lazy GP interval steps.
                     gp_val = self.last_gp_value.get(scale, self.zero_scalar)
                     step_metrics[sorted_scales.index(scale)] = DiscriminatorMetrics(
-                        total=rl + fl + gp_val, real=rl, fake=fl, gp=gp_val
+                        total=rl + fl + gp_val + dl, real=rl, fake=fl, gp=gp_val, drift=dl
                     )
 
         return tuple(step_metrics)
@@ -646,6 +695,7 @@ class FaciesGAN(nn.Module):
                         tv=curr_losses[5],
                         elastic=curr_losses[6],
                         seismic=curr_losses[7],
+                        integrated_rpm=curr_losses[8],
                     )
                 else:
                     metrics = cast(
@@ -771,12 +821,16 @@ class FaciesGAN(nn.Module):
                             fake_full, real_s, wells_s, masks_s, opts
                         )
                         # 2. TV + elastic + seismic
-                        tv_l, el_l, seis_l = compute_rock_physics_loss(
+                        tv_l, el_l, seis_l, _ = compute_rock_physics_loss(
                             fake_full, seismic_s_dict, _scale, opts, phys
                         )
-                        # 3. diversity (single sample → zero)
+                        # 3. integrated rpm loss
+                        int_rpm_l = compute_integrated_rpm_loss(
+                            fake_full, phys.facies_rp_means, opts, zero
+                        )
+                        # 4. diversity (single sample → zero)
                         div_l = zero
-                        # 4. adv + rec approximated as zero (cannot compute efficiently here)
+                        # 5. adv + rec approximated as zero (cannot compute efficiently here)
                         adv_l = zero
                         rec_fa_l = zero
                         rec_rp_l = zero
@@ -791,6 +845,7 @@ class FaciesGAN(nn.Module):
                                 tv_l.to(dtype=target_dtype),
                                 el_l.to(dtype=target_dtype),
                                 seis_l.to(dtype=target_dtype),
+                                int_rpm_l.to(dtype=target_dtype),
                             ]
                         )
 
@@ -820,6 +875,7 @@ class FaciesGAN(nn.Module):
                     tv=metrics.tv.detach(),
                     elastic=metrics.elastic.detach(),
                     seismic=metrics.seismic.detach(),
+                    integrated_rpm=metrics.integrated_rpm.detach(),
                 )
                 step_metrics.append(detached_metrics)
 
@@ -936,13 +992,41 @@ class FaciesGAN(nn.Module):
                 )
             fake = fake_samples[0]
 
+            # Construct conditioning tensor if flag is active
+            cond_tensor = None
+            if self.options.use_disc_conditioning:
+                cond_parts = []
+                b = fake.shape[0]
+                if self.options.use_wells:
+                    w_local = wells_pyramid.get(scale)
+                    if w_local is not None:
+                        w_local = w_local.to(device_manager.device, non_blocking=True)
+                        if w_local.shape[0] != b:
+                            w_local = w_local[indexes]
+                        cond_parts.append(w_local)
+                    m_local = masks_pyramid.get(scale)
+                    if m_local is not None:
+                        m_local = m_local.to(device_manager.device, non_blocking=True)
+                        if m_local.shape[0] != b:
+                            m_local = m_local[indexes]
+                        cond_parts.append(m_local)
+                if self.options.use_seismic:
+                    s_local = seismic_pyramid.get(scale)
+                    if s_local is not None:
+                        s_local = s_local.to(device_manager.device, non_blocking=True)
+                        if s_local.shape[0] != b:
+                            s_local = s_local[indexes]
+                        cond_parts.append(s_local)
+                if cond_parts:
+                    cond_tensor = torch.cat(cond_parts, dim=1)
+
             # WGAN generator adversarial loss
             disc_mod = self.uncompiled_discs.get(scale)
             if disc_mod is None:
                 disc_mod = self.discriminator.discs[scale]
             adv_disc = unwrap_ddp(disc_mod)
             adv_loss = compute_adversarial_loss(
-                adv_disc, fake, self.options.adversarial_loss_penalty
+                adv_disc, fake, self.options.adversarial_loss_penalty, conditioning=cond_tensor
             )
 
             well_loss = compute_masked_loss(
@@ -953,62 +1037,56 @@ class FaciesGAN(nn.Module):
                 self.options,
             )
 
-            tv_loss, elastic_loss, seismic_loss = compute_rock_physics_loss(
+            # Compute rock physics loss first to get seismic residual map
+            tv_loss, elastic_loss, seismic_loss, seismic_residual = compute_rock_physics_loss(
                 fake, seismic_pyramid, scale, self.options, self.physics_state
             )
 
+            integrated_rpm_loss = compute_integrated_rpm_loss(
+                fake, self.physics_state.facies_rp_means, self.options, self.zero_scalar
+            )
+
             div_loss = compute_diversity_loss(
-                fake_samples, self.options.diversity_loss_penalty, self.zero_scalar
+                fake_samples, getattr(self.options, "diversity_loss_penalty", 1.0), self.zero_scalar
             )
 
             if (
-                getattr(self.options, "rec_facies_loss_penalty", 0) == 0
+                getattr(self.options, "rec_facies_loss_penalty", 0.0) == 0.0
                 or self.current_epoch < self.rec_skip_epochs
             ):
                 rec_facies_loss, rec_rp_loss = self.zero_scalar, self.zero_scalar
             else:
+                # Get reconstruction noise/input
                 if precomputed_rec is not None and scale in precomputed_rec:
+                    # Special path for GradNorm-integrated reconstruction logic
                     rec = precomputed_rec[scale]
+                    # Pass seismic_residual to enable residual coupling weighting during GradNorm tasks
+                    rec_facies_loss, rec_rp_loss = calculate_reconstruction_loss_from_output(
+                        rec, real, self.options, self.zero_scalar, seismic_residual=seismic_residual
+                    )
                 else:
                     rec_noise = self.get_pyramid_noise(
                         scale, indexes, wells_pyramid, seismic_pyramid, rec=True
                     )
-                    rec = self.generator(
+                    # Logic is now centralized in metrics.py: compute_reconstruction_loss
+                    # This handles both standard and spatially-weighted (residual coupled) Ip loss.
+                    rec_facies_loss, rec_rp_loss = compute_reconstruction_loss(
+                        self.generator,
+                        self.noise_amps,
                         rec_noise,
-                        self.noise_amps[: scale + 1],
-                        in_noise=rec_in_pyramid[scale],
-                        start_scale=scale,
-                        stop_scale=scale,
+                        scale,
+                        real,
+                        rec_in_pyramid[scale],
+                        self.options,
+                        self.zero_scalar,
+                        self.current_epoch,
+                        self.rec_skip_epochs,
+                        seismic_pyramid=seismic_pyramid,
+                        physics_state=self.physics_state
                     )
-
-                if self.options.use_rock_physics:
-                    fc = self.options.num_facies_channels
-                    num_rp = sum(
-                        [
-                            getattr(self.options, "use_ip", True),
-                            getattr(self.options, "use_is", True),
-                            getattr(self.options, "use_vpvs", True),
-                        ]
-                    )
-                    rec_loss_facies = self.options.rec_facies_loss_penalty * F.mse_loss(
-                        rec[:, :fc, ...], real[:, :fc, ...]
-                    )
-                    rec_loss_rp = (
-                        self.options.rec_rock_physics_loss_penalty
-                        * F.huber_loss(
-                            rec[:, fc : fc + num_rp, ...],
-                            real[:, fc : fc + num_rp, ...],
-                        )
-                    )
-                    rec_facies_loss, rec_rp_loss = rec_loss_facies, rec_loss_rp
-                else:
-                    rec_loss_facies = self.options.rec_facies_loss_penalty * F.mse_loss(
-                        rec, real
-                    )
-                    rec_facies_loss, rec_rp_loss = rec_loss_facies, self.zero_scalar
 
             # Apply extra loss weight at scale 0 to anchor the pyramid
-            if scale == 0 and self.options.scale0_loss_multiplier != 1.0:
+            if scale == 0 and getattr(self.options, "scale0_loss_multiplier", 1.0) != 1.0:
                 scale0_weight = self.options.scale0_loss_multiplier
                 rec_facies_loss = rec_facies_loss * scale0_weight
                 rec_rp_loss = rec_rp_loss * scale0_weight
@@ -1018,6 +1096,7 @@ class FaciesGAN(nn.Module):
                 tv_loss = tv_loss * scale0_weight
                 elastic_loss = elastic_loss * scale0_weight
                 seismic_loss = seismic_loss * scale0_weight
+                integrated_rpm_loss = integrated_rpm_loss * scale0_weight
 
             if return_vector:
                 # Ensure correct order mapping to MetricKey.generator_keys()
@@ -1036,6 +1115,7 @@ class FaciesGAN(nn.Module):
                         tv_loss.to(device=indexes.device, dtype=target_dtype),
                         elastic_loss.to(device=indexes.device, dtype=target_dtype),
                         seismic_loss.to(device=indexes.device, dtype=target_dtype),
+                        integrated_rpm_loss.to(device=indexes.device, dtype=target_dtype),
                     ]
                 )
 
@@ -1048,6 +1128,7 @@ class FaciesGAN(nn.Module):
                 + tv_loss
                 + elastic_loss
                 + seismic_loss
+                + integrated_rpm_loss
             )
 
         metrics = GeneratorMetrics(
@@ -1060,6 +1141,7 @@ class FaciesGAN(nn.Module):
             tv=tv_loss.detach(),
             elastic=elastic_loss.detach(),
             seismic=seismic_loss.detach(),
+            integrated_rpm=integrated_rpm_loss.detach(),
         )
 
         return metrics

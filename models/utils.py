@@ -40,6 +40,7 @@ def calc_gradient_penalty(
     real_data: torch.Tensor,
     fake_data: torch.Tensor,
     LAMBDA: float,
+    conditioning: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Calculate gradient penalty for WGAN-GP training.
 
@@ -56,6 +57,8 @@ def calc_gradient_penalty(
         Generated fake data samples.
     LAMBDA : float
         Gradient penalty coefficient (typically 10.0).
+    conditioning : torch.Tensor, optional
+        Conditioning tensor to concatenate with the interpolates.
 
     Returns
     -------
@@ -68,7 +71,13 @@ def calc_gradient_penalty(
     batch_size = real_data.size(0)
     alpha = torch.rand(batch_size, 1, 1, 1, device=dev).expand_as(real_data)
     interpolates = (alpha * real_data + (1 - alpha) * fake_data).requires_grad_(True)
-    disc_interpolates: torch.Tensor = discriminator(interpolates)
+    
+    if conditioning is not None:
+        disc_in = torch.cat([interpolates, conditioning], dim=1)
+    else:
+        disc_in = interpolates
+
+    disc_interpolates: torch.Tensor = discriminator(disc_in)
 
     gradients: torch.Tensor = torch.autograd.grad(
         outputs=disc_interpolates,
