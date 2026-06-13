@@ -29,13 +29,14 @@ class DiscriminatorMetrics:
     """Per-scale discriminator metric container.
 
     Fields are scalar ``torch.Tensor`` values representing the total loss,
-    real/fake component losses and gradient penalty (``gp``).
+    real/fake component losses, gradient penalty (``gp``) and drift loss.
     """
 
     total: torch.Tensor
     real: torch.Tensor
     fake: torch.Tensor
     gp: torch.Tensor
+    drift: torch.Tensor
 
     def as_dict(self) -> dict[str, float]:
         """Return the metric values as a dictionary.
@@ -50,7 +51,7 @@ class DiscriminatorMetrics:
         """
         vals: list[float] = torch.stack(  # type: ignore[call-overload]
             device_manager.to_cpu(
-                [self.total, self.real, self.fake, self.gp],
+                [self.total, self.real, self.fake, self.gp, self.drift],
                 non_blocking=True,
             )
         ).tolist()  # type: ignore[return-value]
@@ -59,6 +60,7 @@ class DiscriminatorMetrics:
             MetricKey.D_REAL: vals[1],
             MetricKey.D_FAKE: vals[2],
             MetricKey.D_GP: vals[3],
+            MetricKey.D_DRIFT: vals[4],
         }
 
     def as_tuple(self) -> tuple[torch.Tensor, ...]:
@@ -68,9 +70,9 @@ class DiscriminatorMetrics:
         -------
         tuple[torch.Tensor, ...]
             Tuple of metric values in the order:
-            (total, real, fake, gp).
+            (total, real, fake, gp, drift).
         """
-        return self.total, self.real, self.fake, self.gp
+        return self.total, self.real, self.fake, self.gp, self.drift
 
 
 @dataclass
@@ -91,6 +93,7 @@ class GeneratorMetrics:
     tv: torch.Tensor
     elastic: torch.Tensor
     seismic: torch.Tensor
+    integrated_rpm: torch.Tensor
 
     def as_dict(self) -> dict[str, float]:
         """Return the metric values as a dictionary.
@@ -115,6 +118,7 @@ class GeneratorMetrics:
                     self.tv,
                     self.elastic,
                     self.seismic,
+                    self.integrated_rpm,
                 ],
                 non_blocking=True,
             )
@@ -130,6 +134,7 @@ class GeneratorMetrics:
             MetricKey.G_TV: vals[6],
             MetricKey.G_ELASTIC: vals[7],
             MetricKey.G_SEISMIC: vals[8],
+            MetricKey.G_INTEGRATED_RPM: vals[9],
         }
 
     def as_tuple(self) -> tuple[torch.Tensor, ...]:
@@ -139,7 +144,7 @@ class GeneratorMetrics:
         -------
         tuple[torch.Tensor, ...]
             Tuple of metric values in the order:
-            (total, fake, rec_facies, well, div, rp, elastic, seismic).
+            (total, fake, rec_facies, well, div, rp, elastic, seismic, integrated_rpm).
         """
         return (
             self.total,
@@ -151,6 +156,7 @@ class GeneratorMetrics:
             self.tv,
             self.elastic,
             self.seismic,
+            self.integrated_rpm,
         )
 
 
@@ -210,11 +216,18 @@ class ScaleMetrics:
                     tv=metrics[6],
                     elastic=metrics[7],
                     seismic=metrics[8],
+                    integrated_rpm=metrics[9] if len(metrics) > 9 else torch.zeros_like(metrics[0]),
                 )
                 for scale, metrics in gen_dict.items()
             },
             discriminator={
-                int(scale): DiscriminatorMetrics(*metrics)
+                int(scale): DiscriminatorMetrics(
+                    total=metrics[0],
+                    real=metrics[1],
+                    fake=metrics[2],
+                    gp=metrics[3],
+                    drift=metrics[4] if len(metrics) > 4 else torch.zeros_like(metrics[0]),
+                )
                 for scale, metrics in disc_dict.items()
             },
         )
@@ -361,10 +374,17 @@ def rms_normalize(x: torch.Tensor, eps: float = DomainConfig.EPSILON) -> torch.T
 
 
 def compute_adversarial_loss(
-    disc: torch.nn.Module, fake: torch.Tensor, penalty: float
+    disc: torch.nn.Module,
+    fake: torch.Tensor,
+    penalty: float,
+    conditioning: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute adversarial loss for a generated tensor at a scale."""
-    return penalty * (-disc(fake).mean())
+    if conditioning is not None:
+        disc_in = torch.cat([fake, conditioning], dim=1)
+    else:
+        disc_in = fake
+    return penalty * (-disc(disc_in).mean())
 
 
 import torch.nn.functional as F
@@ -400,6 +420,7 @@ def compute_gradient_penalty(
     real: torch.Tensor,
     fake: torch.Tensor,
     lambda_gp: float,
+    conditioning: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute the gradient penalty for WGAN-GP style regularization."""
     import models.utils as model_utils
@@ -410,6 +431,7 @@ def compute_gradient_penalty(
             real.float(),
             fake.float(),
             lambda_gp,
+            conditioning=conditioning,
         )
 
 
@@ -443,13 +465,13 @@ def compute_seismic_loss(
     physics_state: PhysicsState,
     dz_pixel: torch.Tensor | None = None,
     loss_fn: LossFn = LossFn.HUBER,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Calculate Geophysical Consistency Loss (Seismic Loss).
 
-    This loss is computed on soft-RMS normalized signals to ensure scale
-    invariance while maintaining robustness against low-variance patches.
-    It combines a spatial point-wise loss (Huber) with a phase-sensitive
-    correlation term.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        (Loss scalar, spatial residual map (B, 1, H, W))
     """
     from physics.seismic import calculate_synthetic_seismic
 
@@ -465,16 +487,14 @@ def compute_seismic_loss(
 
     if synth.shape != real_seismic.shape:
         synth = F.interpolate(
-            synth, size=(real_seismic.shape[2], real_seismic.shape[3])
+            synth, size=(real_seismic.shape[2], real_seismic.shape[3]), mode="bilinear"
         )
 
     # 1. Zero-mean the signals to remove DC bias
     synth_zero = synth - synth.mean(dim=(2, 3), keepdim=True)
     real_zero = real_seismic - real_seismic.mean(dim=(2, 3), keepdim=True)
 
-    # 2. Soft-RMS Normalization (Safe floor to prevent division by tiny noise)
-    # Using a larger epsilon (1e-4) to prevent gradient explosions on flat patches.
-    # Specify dim=(2, 3) to compute RMS per-sample, not across the whole batch!
+    # 2. Soft-RMS Normalization
     eps_safe = 1e-4
     synth_rms = torch.sqrt(
         torch.mean(synth_zero**2, dim=(2, 3), keepdim=True) + eps_safe
@@ -484,21 +504,23 @@ def compute_seismic_loss(
     synth_norm = synth_zero / synth_rms
     real_norm = real_zero / real_rms
 
-    # 3. Spatial Point-wise Loss
+    # 3. Spatial Point-wise Loss and Residual Map
+    # Residual map is the absolute difference in normalized space (B, 1, H, W)
+    residual_map = torch.abs(synth_norm - real_norm)
+
     if loss_fn == LossFn.HUBER:
         spatial_loss = F.huber_loss(synth_norm, real_norm)
     else:
         spatial_loss = F.mse_loss(synth_norm, real_norm)
 
     # 4. Phase-sensitive Correlation Loss (1 - Cosine Similarity)
-    # This helps anchor the waveform phase regardless of amplitude mismatches.
     cos_sim = F.cosine_similarity(
         synth_zero.flatten(1), real_zero.flatten(1), dim=1
     ).mean()
     corr_loss = 1.0 - cos_sim
 
-    # Weighted combination: spatial matching + phase anchoring
-    return spatial_loss + 0.1 * corr_loss
+    total_loss = spatial_loss + 0.1 * corr_loss
+    return total_loss, residual_map
 
 
 def total_variation_loss(
@@ -536,11 +558,14 @@ def compute_rock_physics_loss(
     options: TrainingOptions,
     physics_state: PhysicsState,
     eps: float = DomainConfig.EPSILON,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute rock physics loss."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Compute rock physics loss. Returns (tv, elastic, seismic, seismic_residual)."""
 
     def needs_phys() -> bool:
-        return options.elastic_loss_penalty > 0 or options.seismic_loss_penalty > 0
+        return (
+            getattr(options, "elastic_loss_penalty", 0.0) > 0
+            or getattr(options, "seismic_loss_penalty", 0.0) > 0
+        )
 
     fake_rock_physics = fake[:, options.num_facies_channels :, ...]
     fake_facies = fake[:, : options.num_facies_channels, ...]
@@ -552,13 +577,13 @@ def compute_rock_physics_loss(
     )
 
     tv_loss = DomainConfig.ZERO_SCALAR
-    if options.tv_loss_penalty > 0:
+    if getattr(options, "tv_loss_penalty", 0.0) > 0:
         tv_unweighted = total_variation_loss(fake_rock_physics, fake_facies)
         tv_loss = options.tv_loss_penalty * tv_unweighted
 
     elastic_loss = DomainConfig.ZERO_SCALAR
     if (
-        options.elastic_loss_penalty > 0
+        getattr(options, "elastic_loss_penalty", 0.0) > 0
         and getattr(options, "use_ip", True)
         and getattr(options, "use_is", True)
         and getattr(options, "use_vpvs", True)
@@ -572,15 +597,21 @@ def compute_rock_physics_loss(
         )
 
     seismic_loss = DomainConfig.ZERO_SCALAR
-    if (
-        options.seismic_loss_penalty > 0
+    seismic_residual = None
+    
+    # Diverse volume seismic modeling is ONLY needed if its direct penalty is active.
+    # The reconstruction volume modeling is handled separately in compute_reconstruction_loss.
+    needs_seismic_modeling = (
+        getattr(options, "seismic_loss_penalty", 0.0) > 0
         and seismic_pyramid.get(scale) is not None
         and getattr(options, "use_ip", True)
-    ):
+    )
+
+    if needs_seismic_modeling:
         vp_phys = phys["Ip"] / physics_state.rho_mean
         vp_mean = torch.mean(vp_phys).clamp(physics_state.vp_min, physics_state.vp_max)
 
-        seismic_unweighted = compute_seismic_loss(
+        seismic_unweighted, seismic_residual = compute_seismic_loss(
             fake_rock_physics[:, 0:1, ...],
             seismic_pyramid[scale],
             vp_mean,
@@ -592,9 +623,9 @@ def compute_rock_physics_loss(
             ),
             loss_fn=LossFn.HUBER,
         )
-        seismic_loss = options.seismic_loss_penalty * seismic_unweighted
+        seismic_loss = getattr(options, "seismic_loss_penalty", 0.0) * seismic_unweighted
 
-    return tv_loss, elastic_loss, seismic_loss
+    return tv_loss, elastic_loss, seismic_loss, seismic_residual
 
 
 def compute_reconstruction_loss(
@@ -608,6 +639,8 @@ def compute_reconstruction_loss(
     zero_scalar: torch.Tensor,
     current_epoch: int,
     rec_skip_epochs: int,
+    seismic_pyramid: dict[int, torch.Tensor] | None = None,
+    physics_state: PhysicsState | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute reconstruction (recovery) loss for given inputs."""
     if options.rec_facies_loss_penalty == 0 or current_epoch < rec_skip_epochs:
@@ -621,22 +654,164 @@ def compute_reconstruction_loss(
         stop_scale=scale,
     )
 
+    # If residual coupling is active, we MUST compute a specific seismic residual
+    # for the reconstruction volume to ensure spatial alignment between Ip error
+    # and seismic inconsistency.
+    seismic_residual = None
+    if (
+        getattr(options, "use_residual_coupling", False)
+        and seismic_pyramid is not None
+        and seismic_pyramid.get(scale) is not None
+        and physics_state is not None
+        and getattr(options, "use_ip", True)
+    ):
+        with torch.no_grad():
+            # Get Ip channel from reconstruction (index fc)
+            fc = options.num_facies_channels
+            rec_ip_norm = rec[:, fc : fc + 1, ...]
+
+            # Vp estimate from current Ip reconstruction
+            # Denormalize Ip (reusing physics_state logic)
+            phys_rec = physics_state.denormalize_rock_physics(rec[:, fc:, ...])
+            vp_phys = phys_rec["Ip"] / physics_state.rho_mean
+            vp_mean = torch.mean(vp_phys).clamp(physics_state.vp_min, physics_state.vp_max)
+
+            # Compute residual for reconstruction
+            _, seismic_residual = compute_seismic_loss(
+                rec_ip_norm,
+                seismic_pyramid[scale],
+                vp_mean,
+                physics_state,
+                dz_pixel=(
+                    physics_state.dz_pyramid[scale]
+                    if scale in range(len(physics_state.dz_pyramid))
+                    else PhysicsConfig.DZ_PIXEL
+                ),
+            )
+
+    return calculate_reconstruction_loss_from_output(
+        rec, real, options, zero_scalar, seismic_residual
+    )
+
+
+def calculate_reconstruction_loss_from_output(
+    rec: torch.Tensor,
+    real: torch.Tensor,
+    options: TrainingOptions,
+    zero_scalar: torch.Tensor,
+    seismic_residual: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Calculate reconstruction losses from a precomputed generator output."""
     if options.use_rock_physics:
         fc = options.num_facies_channels
-        num_rp = sum(
-            [
-                getattr(options, "use_ip", True),
-                getattr(options, "use_is", True),
-                getattr(options, "use_vpvs", True),
-            ]
-        )
+        
+        # 1. Facies reconstruction (always global MSE)
         rec_loss_facies = options.rec_facies_loss_penalty * F.mse_loss(
             rec[:, :fc, ...], real[:, :fc, ...]
         )
-        rec_loss_rp = options.rec_rock_physics_loss_penalty * F.huber_loss(
-            rec[:, fc : fc + num_rp, ...], real[:, fc : fc + num_rp, ...]
-        )
+
+        # 2. Rock physics reconstruction
+        # Build enabled indices
+        enabled_rp = []
+        if getattr(options, "use_ip", True): enabled_rp.append(0)
+        if getattr(options, "use_is", True): enabled_rp.append(1)
+        if getattr(options, "use_vpvs", True): enabled_rp.append(2)
+        
+        num_rp = len(enabled_rp)
+        rec_rp_gen = rec[:, fc : fc + num_rp, ...]
+        rec_rp_real = real[:, fc : fc + num_rp, ...]
+
+        # Residual Coupling (Physics-Informed): spatial modulation of Ip error
+        if (
+            getattr(options, "use_residual_coupling", False)
+            and seismic_residual is not None
+            and getattr(options, "use_ip", True)
+        ):
+            # seismic_residual is (B, 1, H, W). We resize it to match the current scale.
+            # IMPORTANT: Detach mask to avoid cross-sample gradient pollution.
+            mask = seismic_residual.detach()
+            if mask.shape[2:] != rec_rp_gen.shape[2:]:
+                mask = F.interpolate(mask, size=rec_rp_gen.shape[2:], mode="bilinear")
+
+            # Weight mask: 1 + strength * residual
+            weight_mask = 1.0 + getattr(options, "coupling_strength", 1.0) * mask
+
+            # Calculate Ip error map
+            ip_gen = rec_rp_gen[:, 0:1, ...]
+            ip_real = rec_rp_real[:, 0:1, ...]
+            ip_error_map = F.huber_loss(ip_gen, ip_real, reduction="none")
+            
+            # Apply weighting to Ip sum
+            weighted_ip_sum = (ip_error_map * weight_mask).sum()
+
+            # Sum errors of other RP channels (if any)
+            other_sum = 0.0
+            if num_rp > 1:
+                other_error_map = F.huber_loss(
+                    rec_rp_gen[:, 1:, ...], rec_rp_real[:, 1:, ...], reduction="none"
+                )
+                other_sum = other_error_map.sum()
+
+            # Final normalized loss: (weighted_sum + others_sum) / (B * channels * pixels)
+            total_elements = rec_rp_gen.numel()
+            rec_loss_rp = (
+                getattr(options, "rec_rock_physics_loss_penalty", 1.0)
+                * (weighted_ip_sum + other_sum) / total_elements
+            )
+        else:
+            # Standard path: simple mean across all pixels and channels
+            rec_loss_rp = (
+                getattr(options, "rec_rock_physics_loss_penalty", 1.0)
+                * F.huber_loss(rec_rp_gen, rec_rp_real)
+            )
+
         return rec_loss_facies, rec_loss_rp
     else:
         rec_loss_facies = options.rec_facies_loss_penalty * F.mse_loss(rec, real)
         return rec_loss_facies, zero_scalar
+
+
+def compute_integrated_rpm_loss(
+    fake: torch.Tensor,
+    facies_rp_means: torch.Tensor,
+    options: TrainingOptions,
+    zero_scalar: torch.Tensor,
+) -> torch.Tensor:
+    """Compute strict rock physics model coupling loss (coupling loss)."""
+    if not options.use_rock_physics or getattr(options, "integrated_rpm_penalty", 0.0) <= 0.0:
+        return zero_scalar
+
+    # Build enabled indices
+    enabled_indices = []
+    if getattr(options, "use_ip", True):
+        enabled_indices.append(0)
+    if getattr(options, "use_is", True):
+        enabled_indices.append(1)
+    if getattr(options, "use_vpvs", True):
+        enabled_indices.append(2)
+
+    if not enabled_indices:
+        return zero_scalar
+
+    num_facies = options.num_facies_channels
+    facies = fake[:, :num_facies, ...]
+    fake_rp = fake[:, num_facies:, ...]
+
+    # Mapeamento do range de normalização para [0, 1] para extrair probabilidades
+    norm_min = float(min(options.normalization_range))
+    norm_max = float(max(options.normalization_range))
+    norm_diff = norm_max - norm_min + 1e-10
+
+    # Probabilidades das fácies
+    R = torch.clamp((facies[:, 0:1, ...] - norm_min) / norm_diff, 0.0, 1.0)
+    G = torch.clamp((facies[:, 1:2, ...] - norm_min) / norm_diff, 0.0, 1.0)
+    B = torch.clamp((facies[:, 2:3, ...] - norm_min) / norm_diff, 0.0, 1.0)
+    W0 = torch.clamp(1.0 - R - G - B, 0.0, 1.0)
+    probs = torch.cat([W0, R, B, G], dim=1) # (B, 4, H, W)
+
+    # Slice facies_rp_means along dim=2
+    rp_means = facies_rp_means[:, :, enabled_indices, ...]
+    rp_expected = torch.sum(probs.unsqueeze(2) * rp_means.to(device=fake.device), dim=1)
+
+    return getattr(options, "integrated_rpm_penalty", 5.0) * F.mse_loss(fake_rp, rp_expected)
+

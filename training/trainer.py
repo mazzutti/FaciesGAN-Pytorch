@@ -1178,7 +1178,7 @@ class Trainer:
         # Save into the first scale's directory (arbitrary but deterministic)
         ckpt_path = Path(scale_paths[min(scales)]) / CheckpointFilenames.EPOCH_CKPT
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Saving epoch checkpoint at epoch {epoch} (batch {batch_id})...")
+        print(f"\nSaving epoch checkpoint at epoch {epoch} (batch {batch_id})...")
         try:
             torch.save(checkpoint.to_dict(), str(ckpt_path))
             print(f"Epoch checkpoint saved: {ckpt_path}")
@@ -1953,7 +1953,7 @@ class Trainer:
 
         # ── Rank-0 only I/O ─────────────────────────────────────────
         if device_manager.is_main_process:
-            _print_table = global_step % 100 == 0
+            _print_table = global_step % 100 == 0 or _is_last_step
             if self.time_unit == TimeUnit.EPOCH:
                 _is_epoch_end = self._current_batch_id == self._total_batches - 1
                 _log_tb = (
@@ -1999,10 +1999,12 @@ class Trainer:
                             _LK.G_TV: v[6],
                             _LK.G_ELASTIC: v[7],
                             _LK.G_SEISMIC: v[8],
-                            _LK.D_TOTAL: v[9],
-                            _LK.D_REAL: v[10],
-                            _LK.D_FAKE: v[11],
-                            _LK.D_GP: v[12],
+                            _LK.G_INTEGRATED_RPM: v[9],
+                            _LK.D_TOTAL: v[10],
+                            _LK.D_REAL: v[11],
+                            _LK.D_FAKE: v[12],
+                            _LK.D_GP: v[13],
+                            _LK.D_DRIFT: v[14],
                         }
                         for s, v in _cached_floats.items()
                     }
@@ -2179,8 +2181,9 @@ class Trainer:
             g_tv,
             g_elastic,
             g_seismic,
-        ) = vals[:9]
-        d_total, d_real, d_fake, d_gp = vals[9:13]
+            g_integrated_rpm,
+        ) = vals[:10]
+        d_total, d_real, d_fake, d_gp, d_drift = vals[10:15]
 
         global_step = global_step if global_step is not None else epoch
 
@@ -2189,20 +2192,20 @@ class Trainer:
         rec_facies_active = getattr(self.options, "rec_facies_loss_penalty", 10.0) > 0
         well_active = (
             getattr(self.options, "use_wells", False)
-            and getattr(self.options, "well_loss_penalty", 10.0) > 0
+            and getattr(self.options, "well_loss_penalty", 0.0) > 0
         )
         div_active = getattr(self.options, "diversity_loss_penalty", 1.0) > 0
         rec_rp_active = (
             getattr(self.options, "use_rock_physics", False)
-            and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
+            and getattr(self.options, "rec_rock_physics_loss_penalty", 0.0) > 0
         )
         tv_active = (
             getattr(self.options, "use_rock_physics", False)
-            and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+            and getattr(self.options, "tv_loss_penalty", 0.0) > 0
         )
         elastic_active = (
             getattr(self.options, "use_rock_physics", False)
-            and getattr(self.options, "elastic_loss_penalty", 0.1) > 0
+            and getattr(self.options, "elastic_loss_penalty", 0.0) > 0
             and getattr(self.options, "use_ip", True)
             and getattr(self.options, "use_is", True)
             and getattr(self.options, "use_vpvs", True)
@@ -2210,10 +2213,15 @@ class Trainer:
         seismic_active = (
             getattr(self.options, "use_rock_physics", False)
             and getattr(self.options, "use_seismic", False)
-            and getattr(self.options, "seismic_loss_penalty", 0.1) > 0
+            and getattr(self.options, "seismic_loss_penalty", 0.0) > 0
             and getattr(self.options, "use_ip", True)
         )
-        gp_active = getattr(self.options, "gradient_loss_penalty", 10.0) > 0
+        int_rpm_active = (
+            getattr(self.options, "use_rock_physics", False)
+            and getattr(self.options, "integrated_rpm_penalty", 0.0) > 0
+        )
+        gp_active = getattr(self.options, "gradient_loss_penalty", 0.0) > 0
+        drift_active = getattr(self.options, "drift_loss_penalty", 0.0) > 0
 
         writer.add_scalar("G/Total", g_total, global_step)  # type: ignore
         if adv_active:
@@ -2232,12 +2240,16 @@ class Trainer:
             writer.add_scalar("G/Elastic", g_elastic, global_step)  # type: ignore
         if seismic_active:
             writer.add_scalar("G/Seismic", g_seismic, global_step)  # type: ignore
+        if int_rpm_active:
+            writer.add_scalar("G/Integrated_RPM", g_integrated_rpm, global_step)  # type: ignore
 
         writer.add_scalar("D/Total", d_total, global_step)  # type: ignore
         writer.add_scalar("D/Real", d_real, global_step)  # type: ignore
         writer.add_scalar("D/Fake", d_fake, global_step)  # type: ignore
         if gp_active:
             writer.add_scalar("D/GP", d_gp, global_step)  # type: ignore
+        if drift_active:
+            writer.add_scalar("D/Drift", d_drift, global_step)  # type: ignore
 
         step = global_step
 
@@ -2248,6 +2260,8 @@ class Trainer:
             writer.add_scalar(  # type: ignore
                 "Loss/train/discriminator/gradient_penalty", d_gp, step
             )
+        if drift_active:
+            writer.add_scalar("Loss/train/discriminator/drift", d_drift, step)  # type: ignore
         writer.add_scalar("Loss/train/discriminator", d_total, step)  # type: ignore
 
         # Log to TensorBoard - generator losses
@@ -2267,6 +2281,8 @@ class Trainer:
             writer.add_scalar("Loss/train/generator/elastic", g_elastic, step)  # type: ignore
         if seismic_active:
             writer.add_scalar("Loss/train/generator/seismic", g_seismic, step)  # type: ignore
+        if int_rpm_active:
+            writer.add_scalar("Loss/train/generator/integrated_rpm", g_integrated_rpm, step)  # type: ignore
         writer.add_scalar("Loss/train/generator", g_total, step)  # type: ignore
 
     def _print_metrics_table(
@@ -2286,9 +2302,9 @@ class Trainer:
 
         for scale in scales:
             if scale not in self._table_smoother:
-                # 9 G-metrics + 4 D-metrics = 13 total
+                # 10 G-metrics + 5 D-metrics = 15 total
                 self._table_smoother[scale] = [
-                    MetricSmoother(alpha=_sm_alpha) for _ in range(13)
+                    MetricSmoother(alpha=_sm_alpha) for _ in range(15)
                 ]
 
         # Determine active statuses from self.options
@@ -2296,20 +2312,20 @@ class Trainer:
         rec_facies_active = getattr(self.options, "rec_facies_loss_penalty", 10.0) > 0
         well_active = (
             getattr(self.options, "use_wells", False)
-            and getattr(self.options, "well_loss_penalty", 10.0) > 0
+            and getattr(self.options, "well_loss_penalty", 0.0) > 0
         )
         div_active = getattr(self.options, "diversity_loss_penalty", 1.0) > 0
         rec_rp_active = (
             getattr(self.options, "use_rock_physics", False)
-            and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
+            and getattr(self.options, "rec_rock_physics_loss_penalty", 0.0) > 0
         )
         tv_active = (
             getattr(self.options, "use_rock_physics", False)
-            and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+            and getattr(self.options, "tv_loss_penalty", 0.0) > 0
         )
         elastic_active = (
             getattr(self.options, "use_rock_physics", False)
-            and getattr(self.options, "elastic_loss_penalty", 0.1) > 0
+            and getattr(self.options, "elastic_loss_penalty", 0.0) > 0
             and getattr(self.options, "use_ip", True)
             and getattr(self.options, "use_is", True)
             and getattr(self.options, "use_vpvs", True)
@@ -2317,10 +2333,15 @@ class Trainer:
         seismic_active = (
             getattr(self.options, "use_rock_physics", False)
             and getattr(self.options, "use_seismic", False)
-            and getattr(self.options, "seismic_loss_penalty", 0.1) > 0
+            and getattr(self.options, "seismic_loss_penalty", 0.0) > 0
             and getattr(self.options, "use_ip", True)
         )
-        gp_active = getattr(self.options, "gradient_loss_penalty", 10.0) > 0
+        int_rpm_active = (
+            getattr(self.options, "use_rock_physics", False)
+            and getattr(self.options, "integrated_rpm_penalty", 0.0) > 0
+        )
+        gp_active = getattr(self.options, "gradient_loss_penalty", 0.0) > 0
+        drift_active = getattr(self.options, "drift_loss_penalty", 0.0) > 0
 
         # Build dynamic generator columns
         g_cols = [("Scale", 5), ("G_total", 10)]
@@ -2340,6 +2361,8 @@ class Trainer:
             g_cols.append(("G_el", 10))
         if seismic_active:
             g_cols.append(("G_seis", 10))
+        if int_rpm_active:
+            g_cols.append(("G_int_rp", 10))
 
         g_box_width = sum(w for _, w in g_cols) + 3 * len(g_cols) - 1
         g_header_line = (
@@ -2376,7 +2399,7 @@ class Trainer:
 
             sm: list[MetricSmoother] = self._table_smoother[scale]
             v: list[float] = []
-            for i in range(13):
+            for i in range(15):
                 if i == 12 and raw[i] == 0.0:
                     v.append(
                         cast(float, sm[i].value) if sm[i].value is not None else 0.0
@@ -2405,6 +2428,8 @@ class Trainer:
                 row_vals.append(v_fmt[7])
             if seismic_active:
                 row_vals.append(v_fmt[8])
+            if int_rpm_active:
+                row_vals.append(v_fmt[9])
 
             lines.append("  │ " + " │ ".join(row_vals) + " │")
         lines.append("  └" + "─" * g_box_width + "┘")
@@ -2413,6 +2438,8 @@ class Trainer:
         d_cols = [("Scale", 5), ("D_total", 10), ("D_real", 10), ("D_fake", 10)]
         if gp_active:
             d_cols.append(("D_gp", 10))
+        if drift_active:
+            d_cols.append(("D_drift", 10))
 
         d_box_width = sum(w for _, w in d_cols) + 3 * len(d_cols) - 1
         d_header_line = (
@@ -2426,9 +2453,11 @@ class Trainer:
 
         for i, scale in enumerate(scales):
             v_fmt = cached_v[i]
-            row_vals = [f"{scale:^5d}", v_fmt[9], v_fmt[10], v_fmt[11]]
+            row_vals = [f"{scale:^5d}", v_fmt[10], v_fmt[11], v_fmt[12]]
             if gp_active:
-                row_vals.append(v_fmt[12])
+                row_vals.append(v_fmt[13])
+            if drift_active:
+                row_vals.append(v_fmt[14])
             lines.append("  │ " + " │ ".join(row_vals) + " │")
         lines.append("  └" + "─" * d_box_width + "┘")
         # Use plain print so the loss table is always shown on stdout
@@ -2464,7 +2493,7 @@ class Trainer:
     ) -> list[float]:
         """Convert metric tensors to a flat list of Python floats (single sync).
 
-        Layout:  [0..8] raw G metrics, [9..12] D metrics.  13 total.
+        Layout:  [0..9] raw G metrics, [10..14] D metrics.  15 total.
 
         If *_cached* is provided it is returned directly, avoiding a
         redundant GPU→CPU transfer when the caller has already converted

@@ -152,24 +152,24 @@ class TensorBoardVisualizer:
         if key == MetricKey.G_WELL:
             return (
                 getattr(self.options, "use_wells", False)
-                and getattr(self.options, "well_loss_penalty", 10.0) > 0
+                and getattr(self.options, "well_loss_penalty", 0.0) > 0
             )
         if key == MetricKey.G_DIV:
             return getattr(self.options, "diversity_loss_penalty", 1.0) > 0
         if key == MetricKey.G_REC_ROCK_PHYSICS:
             return (
                 getattr(self.options, "use_rock_physics", False)
-                and getattr(self.options, "rec_rock_physics_loss_penalty", 10.0) > 0
+                and getattr(self.options, "rec_rock_physics_loss_penalty", 0.0) > 0
             )
         if key == MetricKey.G_TV:
             return (
                 getattr(self.options, "use_rock_physics", False)
-                and getattr(self.options, "tv_loss_penalty", 1e-4) > 0
+                and getattr(self.options, "tv_loss_penalty", 0.0) > 0
             )
         if key == MetricKey.G_ELASTIC:
             return (
                 getattr(self.options, "use_rock_physics", False)
-                and getattr(self.options, "elastic_loss_penalty", 0.1) > 0
+                and getattr(self.options, "elastic_loss_penalty", 0.0) > 0
                 and getattr(self.options, "use_ip", True)
                 and getattr(self.options, "use_is", True)
                 and getattr(self.options, "use_vpvs", True)
@@ -178,7 +178,7 @@ class TensorBoardVisualizer:
             return (
                 getattr(self.options, "use_rock_physics", False)
                 and getattr(self.options, "use_seismic", False)
-                and getattr(self.options, "seismic_loss_penalty", 0.1) > 0
+                and getattr(self.options, "seismic_loss_penalty", 0.0) > 0
                 and getattr(self.options, "use_ip", True)
             )
         if key == MetricKey.D_TOTAL:
@@ -188,7 +188,14 @@ class TensorBoardVisualizer:
         if key == MetricKey.D_FAKE:
             return True
         if key == MetricKey.D_GP:
-            return getattr(self.options, "gradient_loss_penalty", 10.0) > 0
+            return getattr(self.options, "gradient_loss_penalty", 0.0) > 0
+        if key == MetricKey.D_DRIFT:
+            return getattr(self.options, "drift_loss_penalty", 0.0) > 0
+        if key == MetricKey.G_INTEGRATED_RPM:
+            return (
+                getattr(self.options, "use_rock_physics", False)
+                and getattr(self.options, "integrated_rpm_penalty", 0.0) > 0
+            )
 
         return True
 
@@ -251,6 +258,7 @@ class TensorBoardVisualizer:
                 MetricKey.D_REAL,
                 MetricKey.D_FAKE,
                 MetricKey.D_GP,
+                MetricKey.D_DRIFT,
             ]
             if self._is_metric_active(key)
         ]
@@ -266,6 +274,7 @@ class TensorBoardVisualizer:
                 MetricKey.G_TV,
                 MetricKey.G_ELASTIC,
                 MetricKey.G_SEISMIC,
+                MetricKey.G_INTEGRATED_RPM,
             ]
             if self._is_metric_active(key)
         ]

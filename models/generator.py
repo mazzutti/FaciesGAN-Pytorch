@@ -162,7 +162,9 @@ class Generator(nn.Module):
         self.gens = nn.ModuleList()  # type: ignore[assignment]
 
         # Color quantization layer (framework-specific)
-        self.color_quantizer = FaciesQuantization(temperature=0.5)
+        self.color_quantizer = FaciesQuantization(
+            temperature=0.5, normalization_range=normalization_range
+        )
 
         # Residual add + clamp fused into a single callable so that
         # torch.compile can merge them into one Inductor kernel,
