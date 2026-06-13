@@ -114,6 +114,9 @@ class NeuralSmoother(BaseInterpolator):
 
     def _compile_model(self) -> None:
         """Attempt to JIT/compile the model when supported."""
+        if not device_manager.is_cuda:
+            logger.debug("torch.compile() skipped: CUDA is not available")
+            return
         try:
             self.model = torch.compile(  # pyright: ignore
                 self.model,

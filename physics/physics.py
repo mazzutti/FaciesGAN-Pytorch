@@ -82,15 +82,13 @@ class PhysicsState(nn.Module):
         self.register_buffer("phys_diff", phys_diff_tensor.view(1, -1, 1, 1))
         self.register_buffer("phys_min", phys_min_tensor.view(1, -1, 1, 1))
 
-        seis_min = phys_min[DataFiles.SEISMIC.name]
-        self.register_buffer("seis_min", seis_min)
-        self.register_buffer("seis_max", seis_min + phys_diff[DataFiles.SEISMIC.name])
-
         # Register normalization range for synthetic seismic generation
+        norm_range_min = float(self.options.normalization_range[0])
+        norm_range_max = float(self.options.normalization_range[1])
         self.register_buffer(
             "norm_min",
             torch.tensor(
-                self.options.normalization_range[0],
+                norm_range_min,
                 dtype=torch.float32,
                 device=device_manager.device,
             ),
@@ -98,11 +96,61 @@ class PhysicsState(nn.Module):
         self.register_buffer(
             "norm_max",
             torch.tensor(
-                self.options.normalization_range[1],
+                norm_range_max,
                 dtype=torch.float32,
                 device=device_manager.device,
             ),
         )
+
+        # --- Compute Facies-Specific Rock Physics Means ---
+        import numpy as np
+
+        # Default fallback values in [0, 1] range (will be remapped to norm_range):
+        # Class 0: Floodplain, Class 1: Point bar, Class 2: Channel, Class 3: Boundary
+        default_means_01 = torch.tensor([
+            [0.25, 0.20, 0.90], # Floodplain (0) - Low Ip, low Is, High VpVs
+            [0.55, 0.50, 0.40], # Point Bar (1)   - Mid values
+            [0.85, 0.80, 0.15], # Channel (2)     - High Ip, high Is, Low VpVs
+            [0.50, 0.50, 0.50], # Boundary (3)    - Mid transition
+        ], dtype=torch.float32)
+
+        means_tensor_01 = None
+        if "facies_rp_means" in stats:
+            try:
+                # Load raw means and normalize them on the fly using stats min/max bounds to [0, 1]
+                computed_means_01 = np.zeros((4, 3), dtype=np.float32)
+                for c in range(4):
+                    c_str = str(c)
+                    if c_str in stats["facies_rp_means"]:
+                        c_stats = stats["facies_rp_means"][c_str]
+                        ip_val = float(c_stats["Ip"])
+                        is_val = float(c_stats["Is"])
+                        vpvs_val = float(c_stats["VP_VS"])
+
+                        ip_01 = (ip_val - stats["Ip"]["min"]) / (stats["Ip"]["max"] - stats["Ip"]["min"] + 1e-10)
+                        is_01 = (is_val - stats["Is"]["min"]) / (stats["Is"]["max"] - stats["Is"]["min"] + 1e-10)
+                        vpvs_01 = (vpvs_val - stats["VP_VS"]["min"]) / (stats["VP_VS"]["max"] - stats["VP_VS"]["min"] + 1e-10)
+
+                        computed_means_01[c, 0] = ip_01
+                        computed_means_01[c, 1] = is_01
+                        computed_means_01[c, 2] = vpvs_01
+                    else:
+                        computed_means_01[c] = default_means_01[c].numpy()
+                means_tensor_01 = torch.from_numpy(computed_means_01)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Error parsing facies RP means from stats: {e}. Using fallback defaults.")
+
+        if means_tensor_01 is None:
+            means_tensor_01 = default_means_01
+
+        # Remap [0, 1] means to norm_range
+        means_norm = means_tensor_01 * (norm_range_max - norm_range_min) + norm_range_min
+        self.register_buffer("facies_rp_means", means_norm.view(1, 4, 3, 1, 1))
+
+        seis_min = phys_min[DataFiles.SEISMIC.name]
+        self.register_buffer("seis_min", seis_min)
+        self.register_buffer("seis_max", seis_min + phys_diff[DataFiles.SEISMIC.name])
 
         self.register_buffer(
             "padding_value",

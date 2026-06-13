@@ -303,6 +303,7 @@ def main() -> None:
     # 1. Argument parsing and post-processing
     parser = get_arguments()
     options = parser.parse_args(namespace=TrainingOptions())
+    options.post_process()
     _post_process_args(options)
 
     # When file logging is disabled, suppress INFO/DEBUG noise but keep

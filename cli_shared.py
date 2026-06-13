@@ -360,13 +360,19 @@ def add_physics_args(parser: ArgumentParser) -> None:
     parser.add_argument(
         "--well-loss-penalty",
         type=float,
+        dest="_well_loss_penalty",
         help="weight multiplier for well/mask reconstruction loss",
-        default=10.0,
+        default=None,
     )
     parser.add_argument(
         "--use-seismic",
         action="store_true",
         help="enable using seismic data during data loading",
+    )
+    parser.add_argument(
+        "--use-disc-conditioning",
+        action="store_true",
+        help="enable discriminator input conditioning by spatial signals (wells and/or seismic)",
     )
     parser.add_argument(
         "--use-rock-physics",
@@ -398,29 +404,29 @@ def add_physics_args(parser: ArgumentParser) -> None:
     parser.add_argument(
         "--rec-rock-physics-loss-penalty",
         type=float,
-        dest="rec_rock_physics_loss_penalty",
-        default=1.0,
+        dest="_rec_rock_physics_loss_penalty",
+        default=None,
         help="Extra loss multiplier for rock-physics reconstruction on the generated volume (default: 1.0).",
     )
     parser.add_argument(
         "--tv-loss-penalty",
         type=float,
-        dest="tv_loss_penalty",
-        default=1.0,
+        dest="_tv_loss_penalty",
+        default=None,
         help="Scalar multiplier for the total-variation smoothness loss (default: 1.0).",
     )
     parser.add_argument(
         "--elastic-loss-penalty",
         type=float,
-        dest="elastic_loss_penalty",
-        default=0.1,
+        dest="_elastic_loss_penalty",
+        default=None,
         help="Scalar multiplier for the elastic-consistency loss (default: 0.1).",
     )
     parser.add_argument(
         "--seismic-loss-penalty",
         type=float,
-        dest="seismic_loss_penalty",
-        default=0.1,
+        dest="_seismic_loss_penalty",
+        default=None,
         help="Scalar multiplier for the seismic physics loss (default: 0.1).",
     )
     parser.add_argument(
@@ -462,6 +468,30 @@ def add_physics_args(parser: ArgumentParser) -> None:
         nargs=2,
         default=(1.0, 99.0),
         help="Percentiles for robust Vp/Vs range (default: 1.0 99.0).",
+    )
+    parser.add_argument(
+        "--integrated-rpm-penalty",
+        type=float,
+        dest="_integrated_rpm_penalty",
+        default=None,
+        help="Weight multiplier for integrated rock physics coupling loss (default: 0.0).",
+    )
+    parser.add_argument(
+        "--use-extra-rp-loss",
+        action="store_true",
+        dest="use_extra_rp_loss",
+        help="Enable integrated RPM and drift losses with default penalties (5.0 and 0.001).",
+    )
+    parser.add_argument(
+        "--use-residual-coupling",
+        action="store_true",
+        help="Enable physics-informed residual coupling where seismic error weights Ip loss.",
+    )
+    parser.add_argument(
+        "--coupling-strength",
+        type=float,
+        default=1.0,
+        help="Strength multiplier for seismic residual coupling (default: 1.0).",
     )
 
 
@@ -563,6 +593,14 @@ def add_gan_loss_args(
         help="multiplier for generator adversarial loss (default: 1.0)",
         default=d.get("adversarial_loss_penalty", 1.0),
     )
+    parser.add_argument(
+        "--drift-loss-penalty",
+        type=float,
+        dest="_drift_loss_penalty",
+        help="multiplier for discriminator drift penalty loss (default: 0.0)",
+        default=None,
+    )
+
 
 
 def add_runtime_args(parser: ArgumentParser) -> None:

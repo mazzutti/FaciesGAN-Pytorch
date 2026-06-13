@@ -55,7 +55,6 @@ class TrainingOptions(argparse.Namespace):
         noise_amp: float = 0.1,
         min_noise_amp: float = 0.1,
         scale0_noise_amp: float = 1.0,
-        well_loss_penalty: float = 10.0,
         grad_clip_norm: float = 1.0,
         diversity_loss_penalty: float = 1.0,
         adversarial_loss_penalty: float = 1.0,
@@ -82,6 +81,7 @@ class TrainingOptions(argparse.Namespace):
         use_cpu: bool = False,
         use_wells: bool = False,
         use_seismic: bool = False,
+        use_disc_conditioning: bool = False,
         use_rock_physics: bool = False,
         use_ip: bool = True,
         use_is: bool = True,
@@ -95,10 +95,6 @@ class TrainingOptions(argparse.Namespace):
         gp_interval: int = 16,
         gradient_checkpointing: bool = False,
         amp_dtype: str = "bf16",
-        rec_rock_physics_loss_penalty: float = 10.0,
-        tv_loss_penalty: float = 1e-4,
-        elastic_loss_penalty: float = 0.1,
-        seismic_loss_penalty: float = 0.1,
         dz_pixel: float = 1.0,
         wavelet_f_peak: float = 26.0,
         wavelet_dt: float = 0.001,
@@ -120,6 +116,16 @@ class TrainingOptions(argparse.Namespace):
         gradnorm_interval: int = 16,
         gradnorm_alpha: float = 0.15,
         gradnorm_lr: float = 0.0005,
+        integrated_rpm_penalty: float | None = None,
+        drift_loss_penalty: float | None = None,
+        use_extra_rp_loss: bool = False,
+        well_loss_penalty: float | None = None,
+        rec_rock_physics_loss_penalty: float | None = None,
+        tv_loss_penalty: float | None = None,
+        elastic_loss_penalty: float | None = None,
+        seismic_loss_penalty: float | None = None,
+        use_residual_coupling: bool = False,
+        coupling_strength: float = 1.0,
     ) -> None:
         """Create a TrainingOptions namespace with defaults for training.
 
@@ -181,6 +187,10 @@ class TrainingOptions(argparse.Namespace):
             Minimum noise amplitude floor for diversity. Default is 0.1.
         scale0_noise_amp : float, optional
             Noise amplitude at scale 0 (controls structural diversity). Default is 1.0.
+        well_loss_penalty : float, optional
+            Weight for well/mask reconstruction loss. Default is 10.0 (if wells active).
+        grad_clip_norm : float, optional
+            Max gradient norm for generator clipping. Default is 1.0.
         diversity_loss_penalty : float, optional
             Scalar multiplier for the generator diversity loss. Default is 1.0.
         adversarial_loss_penalty : float, optional
@@ -200,8 +210,20 @@ class TrainingOptions(argparse.Namespace):
             Number of layers per block/scale. Default is 5.
         num_real_facies : int, optional
             Number of real facies used when composing result grids. Default is 5.
+        num_train_pyramids : int, optional
+            Number of training samples per scale. Default is 200.
+        num_parallel_scales : int, optional
+            Number of parallel scales to train. Default is 2.
+        noise_channels : int, optional
+            Number of noise channels to generate per scale. Default is 3.
+        num_workers : int, optional
+            Number of workers for data loading. Default is 0.
+        prefetch_factor : int, optional
+            Prefetch factor for data loading. Default is 4.
         output_path : str, optional
             Output directory for checkpoints and outputs. Default is "outputs/."
+        normalization_range : tuple[float, ...]
+            Normalization range. Default is NORMALIZATION_RANGE.
         padding_size : int, optional
             Padding size applied in network layers. Default is 0.
         regen_npy_gz : bool, optional
@@ -210,6 +232,8 @@ class TrainingOptions(argparse.Namespace):
         save_interval : int, optional
             Interval (in epochs) between saving generated outputs. Default is
             100.
+        checkpoint_interval : int, optional
+            Interval (in epochs) between saving training state checkpoints for resume (default: 1).
         start_scale : int, optional
             Starting scale index for training. Default is 0.
         stride : int, optional
@@ -222,6 +246,8 @@ class TrainingOptions(argparse.Namespace):
             If True, enable loading/using well data (filter dataset by `wells`). Default is False.
         use_seismic : bool, optional
             If True, enable loading/using seismic data during training. Default is False.
+        use_disc_conditioning : bool, optional
+            If True, condition the discriminator with wells and/or seismic. Default is False.
         use_rock_physics : bool, optional
             If True, use Ip, Is, and Vp/Vs data as continuous outputs. Default is False.
         enable_tensorboard : bool, optional
@@ -229,11 +255,11 @@ class TrainingOptions(argparse.Namespace):
         enable_plot_outputs : bool, optional
             Enable saving generated output visualizations (facies and rock physics) during training. Default is True.
         tv_loss_penalty : float, optional
-            Scalar multiplier for the total variation loss (smoothness) applied to rock physics. Default is 1e-4.
+            Scalar multiplier for total variation loss. Default is 1e-4 (if rock physics active).
         elastic_loss_penalty : float, optional
-            Scalar multiplier for the elastic consistency loss (MSE between Ip/Is and VpVs). Default is 1.0.
+            Scalar multiplier for elastic consistency loss. Default is 0.1 (if rock physics active).
         seismic_loss_penalty : float, optional
-            Scalar multiplier for the geophysical seismic loss (MSE between synthetic and real seismic). Default is 1e-4.
+            Scalar multiplier for seismic loss. Default is 0.1 (if rock physics/seismic active).
         dz_pixel : float, optional
             Vertical resolution of the target scale in meters per pixel. Default is 1.0.
             Note: The real seismic dataset is convolved sample-by-sample (effectively
@@ -250,6 +276,12 @@ class TrainingOptions(argparse.Namespace):
         seismic_stretch_percentile : int, optional
             Percentile for TensorBoard seismic contrast stretch (display-only).
             Allowed: 95, 98, 99 (default: 98).
+        use_extra_rp_loss : bool, optional
+            Enable integrated RPM and drift losses with recommended defaults. Default is False.
+        use_residual_coupling : bool, optional
+            Enable physics-informed residual coupling where seismic error weights Ip loss. Default is False.
+        coupling_strength : float, optional
+            Strength of the residual coupling modulation. Default is 1.0.
 
         Notes
         -----
@@ -284,7 +316,6 @@ class TrainingOptions(argparse.Namespace):
         self.noise_amp = noise_amp
         self.min_noise_amp = min_noise_amp
         self.scale0_noise_amp = scale0_noise_amp
-        self.well_loss_penalty = well_loss_penalty
         self.grad_clip_norm = grad_clip_norm
         self.diversity_loss_penalty = diversity_loss_penalty
         self.adversarial_loss_penalty = adversarial_loss_penalty
@@ -311,6 +342,7 @@ class TrainingOptions(argparse.Namespace):
         self.use_cpu = use_cpu
         self.use_wells = use_wells
         self.use_seismic = use_seismic
+        self.use_disc_conditioning = use_disc_conditioning
         self.use_rock_physics = use_rock_physics
         self.use_ip = use_ip
         self.use_is = use_is
@@ -329,10 +361,7 @@ class TrainingOptions(argparse.Namespace):
         self.gp_interval = gp_interval
         self.gradient_checkpointing = gradient_checkpointing
         self.amp_dtype = amp_dtype
-        self.rec_rock_physics_loss_penalty = rec_rock_physics_loss_penalty
-        self.tv_loss_penalty = tv_loss_penalty
-        self.elastic_loss_penalty = elastic_loss_penalty
-        self.seismic_loss_penalty = seismic_loss_penalty
+
         self.dz_pixel = dz_pixel
         self.wavelet_f_peak = wavelet_f_peak
         self.wavelet_dt = wavelet_dt
@@ -361,6 +390,75 @@ class TrainingOptions(argparse.Namespace):
         self.gradnorm_interval = gradnorm_interval
         self.gradnorm_alpha = gradnorm_alpha
         self.gradnorm_lr = gradnorm_lr
+        self.use_extra_rp_loss = use_extra_rp_loss
+
+        # Store raw penalty inputs for deferred resolution in post_process()
+        self._well_loss_penalty = well_loss_penalty
+        self._rec_rock_physics_loss_penalty = rec_rock_physics_loss_penalty
+        self._tv_loss_penalty = tv_loss_penalty
+        self._elastic_loss_penalty = elastic_loss_penalty
+        self._seismic_loss_penalty = seismic_loss_penalty
+        self._integrated_rpm_penalty = integrated_rpm_penalty
+        self._drift_loss_penalty = drift_loss_penalty
+
+        # Default initialization (will be resolved by post_process)
+        self.well_loss_penalty = 0.0
+        self.rec_rock_physics_loss_penalty = 0.0
+        self.tv_loss_penalty = 0.0
+        self.elastic_loss_penalty = 0.0
+        self.seismic_loss_penalty = 0.0
+        self.integrated_rpm_penalty = 0.0
+        self.drift_loss_penalty = 0.0
+
+        # Residual coupling
+        self.use_residual_coupling = use_residual_coupling
+        self.coupling_strength = coupling_strength
+
+    def post_process(self) -> None:
+        """Resolve conditional penalties after argparse has populated the flags.
+
+        This ensures that flags like --use-wells or --use-seismic correctly
+        trigger their recommended default penalties.
+        """
+        # 1. Well loss
+        if self._well_loss_penalty is None:
+            self.well_loss_penalty = 10.0 if self.use_wells else 0.0
+        else:
+            self.well_loss_penalty = self._well_loss_penalty
+
+        # 2. Rock physics basics
+        if self._rec_rock_physics_loss_penalty is None:
+            self.rec_rock_physics_loss_penalty = 1.0 if self.use_rock_physics else 0.0
+        else:
+            self.rec_rock_physics_loss_penalty = self._rec_rock_physics_loss_penalty
+
+        if self._tv_loss_penalty is None:
+            self.tv_loss_penalty = 1e-4 if self.use_rock_physics else 0.0
+        else:
+            self.tv_loss_penalty = self._tv_loss_penalty
+
+        if self._elastic_loss_penalty is None:
+            self.elastic_loss_penalty = 0.1 if self.use_rock_physics else 0.0
+        else:
+            self.elastic_loss_penalty = self._elastic_loss_penalty
+
+        # 3. Seismic
+        if self._seismic_loss_penalty is None:
+            # Seismic requires both rock physics and the seismic flag
+            self.seismic_loss_penalty = 0.1 if (self.use_rock_physics and self.use_seismic) else 0.0
+        else:
+            self.seismic_loss_penalty = self._seismic_loss_penalty
+
+        # 4. Extra losses
+        if self._integrated_rpm_penalty is None:
+            self.integrated_rpm_penalty = 5.0 if getattr(self, "use_extra_rp_loss", False) else 0.0
+        else:
+            self.integrated_rpm_penalty = self._integrated_rpm_penalty
+
+        if self._drift_loss_penalty is None:
+            self.drift_loss_penalty = 0.001 if getattr(self, "use_extra_rp_loss", False) else 0.0
+        else:
+            self.drift_loss_penalty = self._drift_loss_penalty
 
 
 @dataclass
@@ -392,6 +490,9 @@ class ExperimentOptions(TrainingOptions):
         ],
         embedding_per_facies: bool = False,
         no_embeddings: bool = False,
+        zscore_rp: bool = False,
+        use_residual_coupling: bool = False,
+        coupling_strength: float = 1.0,
         variants: list[str] = [
             "wells_seismic",
             "wells_only",
@@ -428,6 +529,13 @@ class ExperimentOptions(TrainingOptions):
         no_embeddings : bool, optional
             If True, disable all manifold learning and latent space
             visualizations. Default is False.
+        zscore_rp : bool, optional
+            If True, apply sample-wise Z-score normalization to rock physics
+            features in embeddings. Default is False.
+        use_residual_coupling : bool, optional
+            Enable physics-informed residual coupling. Default is False.
+        coupling_strength : float, optional
+            Strength of the residual coupling modulation. Default is 1.0.
         variants : list of str, optional
             List of variant IDs to train/evaluate. Default is None (all variants).
         **kwargs : Any
@@ -443,6 +551,9 @@ class ExperimentOptions(TrainingOptions):
         self.embedding_data = embedding_data
         self.embedding_per_facies = embedding_per_facies
         self.no_embeddings = no_embeddings
+        self.zscore_rp = zscore_rp
+        self.use_residual_coupling = use_residual_coupling
+        self.coupling_strength = coupling_strength
         self.variants = variants
 
 

@@ -23,6 +23,7 @@ class MetricKey(StrEnum):
     D_REAL = "d_real"
     D_FAKE = "d_fake"
     D_GP = "d_gp"
+    D_DRIFT = "d_drift"
 
     G_TOTAL = "g_total"
     G_FAKE = "g_fake"
@@ -33,6 +34,7 @@ class MetricKey(StrEnum):
     G_TV = "g_tv"
     G_ELASTIC = "g_elastic"
     G_SEISMIC = "g_seismic"
+    G_INTEGRATED_RPM = "g_integrated_rpm"
 
     @classmethod
     def generator_keys(cls) -> list["MetricKey"]:
@@ -45,6 +47,7 @@ class MetricKey(StrEnum):
             cls.G_TV,
             cls.G_ELASTIC,
             cls.G_SEISMIC,
+            cls.G_INTEGRATED_RPM,
         ]
 
 

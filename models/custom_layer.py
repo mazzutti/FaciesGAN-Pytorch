@@ -509,7 +509,7 @@ class FaciesQuantization(nn.Module):
     performs a hard nearest-color lookup to produce discrete colors.
 
     The palette is registered as a buffer and expects generator outputs in
-    the ``[-1, 1]`` range (tanh output).
+    the ``normalization_range`` (usually [-1, 1] for tanh output).
 
     By default, the palette contains 4 pure colors (K=4) registered under the
     buffer name ``pure_colors`` with shape ``(4, 3)``. Change the buffer if a
@@ -522,6 +522,7 @@ class FaciesQuantization(nn.Module):
     def __init__(
         self,
         temperature: float = 0.5,
+        normalization_range: tuple[float, ...] = (-1.0, 1.0),
     ) -> None:
         """Create a ColorQuantization module.
 
@@ -532,6 +533,8 @@ class FaciesQuantization(nn.Module):
             Higher values produce softer (more differentiable) assignments
             enabling better gradient flow; lower values produce sharper
             (more discrete) outputs. Default is 0.5.
+        normalization_range : tuple of float, optional
+            Target range for the quantized colors (default: (-1.0, 1.0)).
         """
         super().__init__()  # type: ignore
         self.register_buffer(
@@ -543,20 +546,15 @@ class FaciesQuantization(nn.Module):
             ),
         )
 
-        # Define pure colors in [-1, 1] range (tanh output range)
-        # Black, Red, Green, Blue
+        from models.palette import PALETTE_RGB
+
+        lo, hi = float(min(normalization_range)), float(max(normalization_range))
+        colors_rgb = torch.tensor(PALETTE_RGB, dtype=torch.float32)
+        colors_norm = colors_rgb * (hi - lo) + lo
+
         self.register_buffer(
             "pure_colors",
-            torch.tensor(
-                [
-                    [-1.0, -1.0, -1.0],
-                    [1.0, -1.0, -1.0],
-                    [-1.0, -1.0, 1.0],
-                    [-1.0, 1.0, -1.0],
-                ],
-                dtype=torch.float32,
-                device=device_manager.device,
-            ),
+            colors_norm.to(device=device_manager.device),
         )
 
     def _sq_distances_nchw(self, x: torch.Tensor) -> torch.Tensor:
