@@ -57,6 +57,7 @@ def _has_loadable_scale(model_path: str, max_scan: int = 64) -> bool:
 def main() -> None:
     parser = get_arguments()
     args = parser.parse_args(namespace=ExperimentOptions())
+    args.post_process()
 
     if not getattr(args, "enable_logging", False):
         logging.disable(logging.CRITICAL)
@@ -543,7 +544,11 @@ def main() -> None:
             # Ensure boolean flags are strictly bool (not int) to satisfy
             # type expectations of compute_shared_embeddings.
             coerced_args = {
-                k: (bool(v) if k in ("rock_physics_only", "seismic_only") else v)
+                k: (
+                    bool(v)
+                    if k in ("rock_physics_only", "seismic_only", "zscore_rp")
+                    else v
+                )
                 for k, v in emb_args.items()
             }
 
@@ -565,6 +570,7 @@ def main() -> None:
                 methods=emb_methods,
                 rock_physics_only=rock_physics_only,
                 seismic_only=seismic_only,
+                zscore_rp=args.zscore_rp,
                 **coerced_args,
             )
 

@@ -276,20 +276,41 @@ def prepare_features(
         # Seismic is typically the last channel (-1)
         if arr.shape[1] > 1:
             arr = arr[:, -1:, ...]
+        # Symmetric robust percentile-based local scaling per slice/volume
+        norm_lo = float(min(dataset.options.normalization_range or (-1.0, 1.0)))
+        norm_hi = float(max(dataset.options.normalization_range or (-1.0, 1.0)))
+        for i in range(len(arr)):
+            s = arr[i]
+            # Remove DC bias (zero-mean)
+            s_zero = s - np.mean(s)
+            p2 = float(np.percentile(s_zero, 2))
+            p98 = float(np.percentile(s_zero, 98))
+            max_abs = max(abs(p2), abs(p98), 1e-6)
+            s_norm = np.clip(s_zero / max_abs, -1.0, 1.0)
+            arr[i] = (s_norm + 1.0) / 2.0 * (norm_hi - norm_lo) + norm_lo
     elif rock_physics_only:
-        # Rock physics channels follow the facies channels.
-        if arr.shape[1] == n_facies + 3:
-            idx = channel_index if channel_index is not None else n_facies
-        elif arr.shape[1] == 4:
-            idx = (channel_index - (n_facies - 1)) if channel_index is not None else 1
-        elif arr.shape[1] == 3:
-            idx = (
-                (channel_index - n_facies)
-                if (channel_index is not None and channel_index >= n_facies)
-                else 0
-            )
-        else:
+        # If the input contains only 1 channel, it's already the extracted property (e.g. generated Ip)
+        if arr.shape[1] == 1:
             idx = 0
+        else:
+            # The input contains facies + rock physics channels (e.g. real_tensor).
+            # Determine the active rock physics properties in the dataset to find the correct index.
+            use_ip = getattr(dataset.options, "use_ip", True)
+            use_is = getattr(dataset.options, "use_is", True)
+            
+            # Map channel_index back to the property type:
+            # - channel_index == n_facies: Ip
+            # - channel_index == n_facies + 1: Is
+            # - channel_index == n_facies + 2: VP_VS
+            if channel_index == n_facies:  # Ip
+                idx = n_facies
+            elif channel_index == n_facies + 1:  # Is
+                idx = n_facies + (1 if use_ip else 0)
+            elif channel_index == n_facies + 2:  # VP_VS
+                idx = n_facies + (1 if use_ip else 0) + (1 if use_is else 0)
+            else:
+                idx = n_facies  # Fallback to first rock physics channel
+                
         arr = arr[:, idx : idx + 1, ...]
     else:
         # Default: Extract only facies channels (structural features)
@@ -316,6 +337,7 @@ def compute_shared_embeddings(
     rock_physics_only: bool = False,
     seismic_only: bool = False,
     channel_index: Optional[int] = None,
+    zscore_rp: bool = False,
 ) -> _SharedEmbeddings:
     """Orchestrates the full manifold embedding pipeline.
 
@@ -395,9 +417,9 @@ def compute_shared_embeddings(
 
     all_data = np.concatenate([real_flat] + f_list, axis=0)
 
-    # Apply sample-wise Z-score normalization to seismic features to ensure
-    # we compare structural geometry/phase independent of convolved amplitude/gain differences.
-    if seismic_only:
+    # Apply sample-wise Z-score normalization if flag is set.
+    # This helps compare structural geometry/phase independent of absolute amplitudes.
+    if zscore_rp and (seismic_only or rock_physics_only):
         means = all_data.mean(axis=1, keepdims=True)
         stds = all_data.std(axis=1, keepdims=True) + 1e-6
         all_data = (all_data - means) / stds

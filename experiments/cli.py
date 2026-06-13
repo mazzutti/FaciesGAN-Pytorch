@@ -264,12 +264,22 @@ def build_training_args(
         cmd.extend(["--dz-pixel", str(args.dz_pixel)])
         cmd.extend(["--wavelet-f-peak", str(args.wavelet_f_peak)])
         cmd.extend(["--wavelet-dt", str(args.wavelet_dt)])
+        if getattr(args, "use_extra_rp_loss", False):
+            cmd.append("--use-extra-rp-loss")
+        if getattr(args, "integrated_rpm_penalty", 0.0) > 0:
+            cmd.extend(["--integrated-rpm-penalty", str(args.integrated_rpm_penalty)])
+        if getattr(args, "drift_loss_penalty", 0.0) > 0:
+            cmd.extend(["--drift-loss-penalty", str(args.drift_loss_penalty)])
 
     if args.use_gradnorm:
         cmd.append("--use-gradnorm")
         cmd.extend(["--gradnorm-interval", str(args.gradnorm_interval)])
         cmd.extend(["--gradnorm-alpha", str(args.gradnorm_alpha)])
         cmd.extend(["--gradnorm-lr", str(args.gradnorm_lr)])
+
+    if args.use_residual_coupling:
+        cmd.append("--use-residual-coupling")
+        cmd.extend(["--coupling-strength", str(args.coupling_strength)])
 
     return cmd
 
@@ -299,4 +309,9 @@ def _add_latent_space_args(parser: ArgumentParser) -> None:
         "--no-embeddings",
         action="store_true",
         help="Disable all latent space visualization (plots only comparison grids).",
+    )
+    parser.add_argument(
+        "--zscore-rp",
+        action="store_true",
+        help="Apply sample-wise Z-score normalization to rock physics features in embeddings.",
     )
