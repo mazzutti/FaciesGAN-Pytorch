@@ -26,6 +26,8 @@ class VariantQuantResult(TypedDict):
     is_std: float
     vpvs_mean: float
     vpvs_std: float
+    seismic_mean: float
+    seismic_std: float
 
 
 class QuantitativeResults(TypedDict):
@@ -37,6 +39,8 @@ class QuantitativeResults(TypedDict):
     real_is_std: float
     real_vpvs_mean: float
     real_vpvs_std: float
+    real_seismic_mean: float
+    real_seismic_std: float
 
 
 ConnectivityMetrics = dict[str, dict[str, float]]
@@ -96,6 +100,7 @@ def compute_quantitative_results(
     real_ip_mean, real_ip_std = 7335.7, 1213.3
     real_is_mean, real_is_std = 3863.8, 534.0
     real_vpvs_mean, real_vpvs_std = 1.895, 0.151
+    real_seismic_mean, real_seismic_std = 0.0, 0.118
 
     # Load from stats.json for dynamic data
     try:
@@ -115,6 +120,10 @@ def compute_quantitative_results(
         vpvs_stats = stats.get(DataFiles.VP_VS.name, {})
         real_vpvs_mean = vpvs_stats.get(StatKey.MEAN, real_vpvs_mean)
         real_vpvs_std = vpvs_stats.get(StatKey.STD, real_vpvs_std)
+
+        seismic_stats = stats.get(DataFiles.SEISMIC.name, {})
+        real_seismic_mean = seismic_stats.get(StatKey.MEAN, real_seismic_mean)
+        real_seismic_std = seismic_stats.get(StatKey.STD, real_seismic_std)
     except Exception as e:
         print(f"Warning: Could not load robust stats from stats.json: {e}")
 
@@ -154,6 +163,7 @@ def compute_quantitative_results(
         ip_mean, ip_std = 0.0, 0.0
         is_mean, is_std = 0.0, 0.0
         vpvs_mean, vpvs_std = 0.0, 0.0
+        seismic_mean, seismic_std = 0.0, 0.0
 
         ip_dir = outputs_dir / var / "generated" / "ip"
         if ip_dir.exists():
@@ -176,6 +186,13 @@ def compute_quantitative_results(
                 vals = [np.load(f) for f in npy_files[:200]]
                 vpvs_mean, vpvs_std = float(np.mean(vals)), float(np.std(vals))
 
+        seismic_dir = outputs_dir / var / "generated" / "seismic"
+        if seismic_dir.exists():
+            npy_files = list(seismic_dir.glob("*.npy"))
+            if npy_files:
+                vals = [np.load(f) for f in npy_files[:200]]
+                seismic_mean, seismic_std = float(np.mean(vals)), float(np.std(vals))
+
         results[var] = {
             "proportions": proportions,
             "rmse_error": rmse_error,
@@ -187,6 +204,8 @@ def compute_quantitative_results(
             "is_std": is_std,
             "vpvs_mean": vpvs_mean,
             "vpvs_std": vpvs_std,
+            "seismic_mean": seismic_mean,
+            "seismic_std": seismic_std,
         }
 
     return {
@@ -198,6 +217,8 @@ def compute_quantitative_results(
         "real_is_std": real_is_std,
         "real_vpvs_mean": real_vpvs_mean,
         "real_vpvs_std": real_vpvs_std,
+        "real_seismic_mean": real_seismic_mean,
+        "real_seismic_std": real_seismic_std,
     }
 
 

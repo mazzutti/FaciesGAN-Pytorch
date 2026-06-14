@@ -87,6 +87,8 @@ def generate_html_report(
     real_is_std = float(quant["real_is_std"])
     real_vpvs_mean = float(quant["real_vpvs_mean"])
     real_vpvs_std = float(quant["real_vpvs_std"])
+    real_seismic_mean = float(quant["real_seismic_mean"])
+    real_seismic_std = float(quant["real_seismic_std"])
 
     lowest_rmse_var: str | None = None
     min_rmse = 999.0
@@ -328,18 +330,22 @@ def generate_html_report(
             "is_std": f"{real_is_std:.1f}",
             "vpvs_mean": f"{real_vpvs_mean:.3f}",
             "vpvs_std": f"{real_vpvs_std:.3f}",
+            "seismic_mean": f"{real_seismic_mean:.3f}",
+            "seismic_std": f"{real_seismic_std:.3f}",
         },
         "variants": [],
     }
     for var in VARIANTS:
         if var in results:
             r = results[var]
-            ip_mean_dev = ((r["ip_mean"] - real_ip_mean) / real_ip_mean) * 100
-            ip_std_dev = ((r["ip_std"] - real_ip_std) / real_ip_std) * 100
-            is_mean_dev = ((r["is_mean"] - real_is_mean) / real_is_mean) * 100
-            is_std_dev = ((r["is_std"] - real_is_std) / real_is_std) * 100
-            vpvs_mean_dev = ((r["vpvs_mean"] - real_vpvs_mean) / real_vpvs_mean) * 100
-            vpvs_std_dev = ((r["vpvs_std"] - real_vpvs_std) / real_vpvs_std) * 100
+            ip_mean_dev = ((r["ip_mean"] - real_ip_mean) / (abs(real_ip_mean) + 1e-8)) * 100
+            ip_std_dev = ((r["ip_std"] - real_ip_std) / (abs(real_ip_std) + 1e-8)) * 100
+            is_mean_dev = ((r["is_mean"] - real_is_mean) / (abs(real_is_mean) + 1e-8)) * 100
+            is_std_dev = ((r["is_std"] - real_is_std) / (abs(real_is_std) + 1e-8)) * 100
+            vpvs_mean_dev = ((r["vpvs_mean"] - real_vpvs_mean) / (abs(real_vpvs_mean) + 1e-8)) * 100
+            vpvs_std_dev = ((r["vpvs_std"] - real_vpvs_std) / (abs(real_vpvs_std) + 1e-8)) * 100
+            seismic_mean_dev = ((r["seismic_mean"] - real_seismic_mean) / (abs(real_seismic_mean) + 1e-8)) * 100
+            seismic_std_dev = ((r["seismic_std"] - real_seismic_std) / (abs(real_seismic_std) + 1e-8)) * 100
 
             rock_physics_stats["variants"].append(
                 {
@@ -350,6 +356,8 @@ def generate_html_report(
                     "is_std_html": format_dev_other(r["is_std"], is_std_dev),
                     "vpvs_mean_html": format_dev_vpvs(r["vpvs_mean"], vpvs_mean_dev),
                     "vpvs_std_html": format_dev_vpvs(r["vpvs_std"], vpvs_std_dev),
+                    "seismic_mean_html": format_dev_vpvs(r["seismic_mean"], seismic_mean_dev),
+                    "seismic_std_html": format_dev_vpvs(r["seismic_std"], seismic_std_dev),
                 }
             )
 
