@@ -177,7 +177,6 @@ class TensorBoardVisualizer:
         if key == MetricKey.G_SEISMIC:
             return (
                 getattr(self.options, "use_rock_physics", False)
-                and getattr(self.options, "use_seismic", False)
                 and getattr(self.options, "seismic_loss_penalty", 0.0) > 0
                 and getattr(self.options, "use_ip", True)
             )

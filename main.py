@@ -230,7 +230,7 @@ def _tune_performance() -> None:
         except (AttributeError, Exception):
             logger.debug("Failed to tune backend attribute %s", attr, exc_info=True)
 
-    # Use TF32 precision globally for matmuls (Ampere+ GPUs)
+    # Use medium precision globally for matmuls (Tensor Cores / Ampere+ GPUs)
     try:
         torch.set_float32_matmul_precision("high")  # type: ignore
     except (AttributeError, Exception):
@@ -353,7 +353,7 @@ def main() -> None:
         # Load Inductor cache artifacts
         if getattr(options, "compile_backend", False):
             try:
-                cache_path = Path(options.output_path) / "inductor_cache.bin"
+                cache_path = Path("inductor_cache.bin")
                 if cache_path.is_file():
                     torch.compiler.load_cache_artifacts(cache_path)  # type: ignore
             except Exception:
@@ -442,7 +442,8 @@ def main() -> None:
     # Persist Inductor cache artifacts
     if device_manager.is_main_process and getattr(options, "compile_backend", False):
         try:
-            torch.compiler.save_cache_artifacts()
+            cache_path = Path("inductor_cache.bin")
+            torch.compiler.save_cache_artifacts(cache_path)  # type: ignore
         except Exception:
             logger.debug("Failed saving inductor cache artifacts", exc_info=True)
 

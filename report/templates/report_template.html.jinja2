@@ -149,8 +149,8 @@
       .carousel-slide { display: block !important; flex: none !important; width: 100% !important; padding: 10px 0 !important; box-sizing: border-box !important; break-inside: avoid; }
       .carousel-slide:not(.milestone-print) { display: none !important; }
       /* Grid layout for single-image carousels */
-      #carousel-rock-physics, #carousel-distribution, #carousel-spatial { display: grid !important; grid-template-columns: repeat(2, 1fr) !important; gap: 20px !important; }
-      #carousel-rock-physics .carousel-slide, #carousel-distribution .carousel-slide, #carousel-spatial .carousel-slide { width: auto !important; border: 1px solid #eee !important; border-radius: 6px !important; padding: 10px !important; background: #fafafa !important; }
+      #carousel-distribution, #carousel-spatial { display: grid !important; grid-template-columns: repeat(2, 1fr) !important; gap: 20px !important; }
+      #carousel-distribution .carousel-slide, #carousel-spatial .carousel-slide { width: auto !important; border: 1px solid #eee !important; border-radius: 6px !important; padding: 10px !important; background: #fafafa !important; }
     }
   </style>
 </head>
@@ -181,12 +181,11 @@
         <li><a href="#hyperparameters" class="nav-link">4. Hyperparameters</a></li>
         <li><a href="#comparison-grids" class="nav-link">5. Comparison Grids</a></li>
         <li><a href="#quantitative-analysis" class="nav-link">6. Quantitative Analysis</a></li>
-        <li><a href="#rock-physics-correlation" class="nav-link">7. Rock Physics Correlation</a></li>
-        <li><a href="#experiment-variants" class="nav-link">8. Experiment Variants</a></li>
-        <li><a href="#cross-variant-synthesis" class="nav-link">9. Cross-Variant Manifolds</a></li>
-        <li><a href="#distribution-analysis" class="nav-link">10. Distribution Analysis</a></li>
-        <li><a href="#spatial-continuity" class="nav-link">11. Spatial Continuity</a></li>
-        <li><a href="#timing-performance" class="nav-link">12. Timing & Performance</a></li>
+        <li><a href="#experiment-variants" class="nav-link">7. Experiment Variants</a></li>
+        <li><a href="#cross-variant-synthesis" class="nav-link">8. Cross-Variant Manifolds</a></li>
+        <li><a href="#distribution-analysis" class="nav-link">9. Distribution Analysis</a></li>
+        <li><a href="#spatial-continuity" class="nav-link">10. Spatial Continuity</a></li>
+        <li><a href="#timing-performance" class="nav-link">11. Timing & Performance</a></li>
       </ul>
     </aside>
 
@@ -255,7 +254,7 @@
             <div class="tab-container">
               <div class="tab-headers">
                 {% for pyr in available_pyramids %}
-                  <button class="tab-btn{% if loop.first %} active{% endif %}">{{ pyr.label.split(' ')[0] }}</button>
+                  <button class="tab-btn{% if loop.first %} active{% endif %}">{{ pyr.label }}</button>
                 {% endfor %}
               </div>
               <div class="tab-panes">
@@ -329,15 +328,17 @@
           <div class="discussion-box" style="margin-bottom: 15px;">
             <strong>Property Interpretation Guide:</strong><br>
             • <strong>Facies:</strong> Sand channels (blue) and point bars (red) embedded in floodplain mud (grey). Notice how conditional variants restrict channels to specific paths, while unconditional samples show arbitrary positions.<br>
-            • <strong>Acoustic Impedance (Ip) & Shear Impedance (Is):</strong> Elastic properties matching the lithology. Higher impedance corresponds to sand bodies, reflecting compacted channel sands.<br>
+            • <strong>Acoustic Impedance (Ip){% if use_is %} & Shear Impedance (Is){% endif %}:</strong> Elastic properties matching the lithology. Higher impedance corresponds to sand bodies, reflecting compacted channel sands.<br>
+            {% if use_vpvs %}
             • <strong>Vp/Vs Ratio:</strong> Key fluid and lithology indicator. Mudstone/floodplain typically exhibits higher Vp/Vs than sand reservoirs.<br>
+            {% endif %}
             • <strong>Synthetic Seismic:</strong> Simulated seismic response of the property grids. A realistic seismic reflection response confirms the geophysical consistency of the generated geological realizations.
           </div>
           {% if comparison_grids %}
             <div class="tab-container">
               <div class="tab-headers">
                 {% for grid in comparison_grids %}
-                  <button class="tab-btn{% if loop.first %} active{% endif %}">{{ grid.label.split(' ')[0] }}</button>
+                  <button class="tab-btn{% if loop.first %} active{% endif %}">{{ grid.label }}</button>
                 {% endfor %}
               </div>
               <div class="tab-panes">
@@ -474,7 +475,7 @@
         {% if scorecard_table %}
           <div class="card">
             <h3 class="card-title">🏆 Variant Ranking Scorecard</h3>
-            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Composite score ranking each variant based on weighted facies RMSE (40%), Ip deviation (20%), Is deviation (20%), and Vp/Vs deviation (20%). Lower is better.</p>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Composite score ranking each variant based on weighted facies RMSE (25%), Rock Physics deviations (25%), Channel Connectivity deviation (25%), and Spatial Conditioning deviation (25%). Lower is better.</p>
             <div style="overflow-x: auto;">
               <table>
                 <thead>
@@ -491,6 +492,8 @@
                     {% if use_vpvs %}
                     <th style="text-align: center;">Vp/Vs Dev (%)</th>
                     {% endif %}
+                    <th style="text-align: center;">Connectivity Dev (%)</th>
+                    <th style="text-align: center;">Spatial Dev (%)</th>
                     <th style="text-align: center;">Overall Score</th>
                   </tr>
                 </thead>
@@ -509,6 +512,8 @@
                       {% if use_vpvs %}
                       <td style="text-align: center; font-family: monospace;">{{ row.vpvs_dev }}</td>
                       {% endif %}
+                      <td style="text-align: center; font-family: monospace;">{{ row.conn_dev }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.ssim_dev }}</td>
                       <td style="text-align: center;">
                         <span style="font-family: monospace; font-weight: 600;">{{ row.overall }}</span>
                         <span class="score-bar" style="width: {{ row.bar_width }}px;"></span>
@@ -624,56 +629,10 @@
         {% endif %}
       </section>
 
-      <!-- Section 7: Rock Physics Correlation -->
-      <section id="rock-physics-correlation">
-        <h2 class="section-title">7. Rock Physics Cross-Property Correlation</h2>
-        <div class="card">
-          <p>Crossplots of Acoustic Impedance (Ip) versus Shear Impedance (Is) color-coded by facies class. These plots compare the physical correlations learned by each variant against the real validation dataset, showing if the model preserves distinct geological and elastic property clusters:</p>
-          
-          <div style="display: flex; justify-content: center; gap: 16px; margin: 15px 0 10px 0; flex-wrap: wrap; background-color: rgba(0,0,0,0.12); padding: 8px 16px; border-radius: 8px; border: 1px solid var(--card-border);">
-            <span style="display: flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 500;"><span style="width: 10px; height: 10px; border-radius: 50%; background-color: #00e5ff; display: inline-block;"></span> Floodplain</span>
-            <span style="display: flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 500;"><span style="width: 10px; height: 10px; border-radius: 50%; background-color: #ff2d9b; display: inline-block;"></span> Point Bar</span>
-            <span style="display: flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 500;"><span style="width: 10px; height: 10px; border-radius: 50%; background-color: #ffb300; display: inline-block;"></span> Channel</span>
-            <span style="display: flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 500;"><span style="width: 10px; height: 10px; border-radius: 50%; background-color: #76ff03; display: inline-block;"></span> Boundary</span>
-          </div>
-
-          {% if existing_rp|length > 1 %}
-            <div class="carousel-wrapper">
-              <div class="carousel-viewport" id="carousel-rock-physics">
-                {% for rp in existing_rp %}
-                  <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
-                    <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">Scenario: {{ rp.label }}</div>
-                    <img src="{{ rp.rel_path }}" alt="{{ rp.label }}" style="width: 100%; max-width: 580px; display: inline-block; border-radius: 8px;">
-                  </div>
-                {% endfor %}
-              </div>
-              <button class="carousel-control-btn prev" onclick="moveCarousel('rock-physics', -1)">❮</button>
-              <button class="carousel-control-btn next" onclick="moveCarousel('rock-physics', 1)">❯</button>
-              <div class="carousel-indicator-bar">
-                {% for rp in existing_rp %}
-                  <span class="carousel-indicator-dot{% if loop.first %} active{% endif %}" onclick="jumpToSlide('rock-physics', {{ loop.index0 }})"></span>
-                {% endfor %}
-              </div>
-            </div>
-          {% elif existing_rp|length == 1 %}
-            <div style="text-align: center; margin-top: 15px;">
-              <img src="{{ existing_rp[0].rel_path }}" alt="{{ existing_rp[0].label }}" style="width: 100%; max-width: 580px; display: inline-block; border-radius: 8px;">
-            </div>
-          {% else %}
-            <p style="color: var(--text-muted);">Rock physics crossplots not available.</p>
-          {% endif %}
-
-          <div class="discussion-box">
-            <strong>Physics Consistency Analysis:</strong><br>
-            • <strong>Facies Separation:</strong> The scatter plots show how the model distinguishes between facies classes in elastic space. Floodplain (grey) has lower Ip and Is, point bars (red) and channels (blue) form higher-velocity clusters, and boundary facies (green) reside in intermediate transitions, matching the validation trend.<br>
-            • <strong>Constraint Influence:</strong> Conditional variants (<code>wells_seismic</code>, <code>wells_only</code>, and <code>seismic_only</code>) recover the tight physical correlations between Ip and Is better than the unconditional variant, which exhibits slightly larger dispersion but still respects the overall physical trends.
-          </div>
-        </div>
-      </section>
 
       <!-- Section 8: Experiment Variants -->
       <section id="experiment-variants">
-        <h2 class="section-title">8. Experiment Variants</h2>
+        <h2 class="section-title">7. Experiment Variants</h2>
         <div class="card">
           <p>This section displays the detailed training history and outputs for each of the four conditioning scenarios. For each variant, you can inspect:</p>
           <ul>
@@ -763,7 +722,7 @@
                     <div style="display: flex; align-items: center; gap: 15px;">
                       <div class="anim-speed">
                         <span>Speed:</span>
-                        <input type="range" id="speed-{{ var.id }}" min="100" max="2000" step="100" value="800" style="direction: rtl;">
+                        <input type="range" id="speed-{{ var.id }}" min="100" max="2000" step="100" value="1300" style="accent-color: var(--accent); cursor: pointer;">
                       </div>
                       <button class="anim-btn" id="btn-anim-{{ var.id }}" onclick="toggleAnimation('{{ var.id }}')">▶ Play</button>
                     </div>
@@ -794,8 +753,8 @@
                   
                   {% if var.gallery.use_scrubber %}
                     <div class="carousel-indicator-bar" style="align-items: center; gap: 10px; width: 100%; max-width: 400px; margin: 12px auto;">
-                      <input type="range" id="scrubber-{{ var.id }}" min="0" max="{{ var.gallery.slides|length - 1 }}" value="0" oninput="jumpToSlide('{{ var.id }}', parseInt(this.value))" style="flex-grow: 1; accent-color: var(--accent); cursor: pointer;">
-                      <span id="scrubber-label-{{ var.id }}" style="font-size: 0.85rem; color: var(--text-muted); font-family: monospace;">{{ var.gallery.default_epoch_label }} (1/{{ var.gallery.slides|length }})</span>
+                      <input type="range" id="scrubber-{{ var.id }}" min="0" max="{{ var.gallery.slides|length - 1 }}" value="{{ var.gallery.slides|length - 1 }}" oninput="jumpToSlide('{{ var.id }}', {{ var.gallery.slides|length - 1 }} - parseInt(this.value))" style="flex-grow: 1; accent-color: var(--accent); cursor: pointer;">
+                      <span id="scrubber-label-{{ var.id }}" style="font-size: 0.85rem; color: var(--text-muted); font-family: monospace;">{{ var.gallery.default_epoch_label }} ({{ var.gallery.slides|length }}/{{ var.gallery.slides|length }})</span>
                     </div>
                   {% else %}
                     <div class="carousel-indicator-bar">
@@ -843,7 +802,7 @@
 
       <!-- Section 9: Cross-Variant Projections -->
       <section id="cross-variant-synthesis">
-        <h2 class="section-title">9. Cross-Variant Embedding Synthesis</h2>
+        <h2 class="section-title">8. Cross-Variant Embedding Synthesis</h2>
         <div class="card">
           <p>Manifold learning methods (MDS, UMAP, Isomap, and t-SNE) project high-dimensional geological models into a 2D space. This allows us to visualize the latent structure learned by the networks and evaluate model generalization:</p>
           <div class="discussion-box" style="margin-bottom: 15px;">
@@ -858,7 +817,7 @@
             <summary style="font-size: 0.95rem; font-weight: 600; color: var(--accent); cursor: pointer;">📖 What are Latent Space Projections (Embeddings)?</summary>
             <div style="margin-top: 12px; font-size: 0.9rem; line-height: 1.6; color: var(--text-main); padding: 15px; border-left: 3px solid var(--accent); background-color: rgba(255,255,255,0.02); border-radius: 0 8px 8px 0;">
               <p style="margin-bottom: 15px;">
-                <strong>Latent Space Projection</strong> is a technique used to visualize high-dimensional data by mapping it onto a 2D or 3D coordinate system. In the context of FaciesGAN, each generated geological model consists of thousands of pixels across multiple rock properties (Facies, Ip, Is, Vp/Vs). To understand the diversity and quality of these models, we "project" them into a lower-dimensional **Latent Space**.
+                <strong>Latent Space Projection</strong> is a technique used to visualize high-dimensional data by mapping it onto a 2D or 3D coordinate system. In the context of FaciesGAN, each generated geological model consists of thousands of pixels across multiple rock properties (Facies, Ip{% if use_is %}, Is{% endif %}{% if use_vpvs %}, Vp/Vs{% endif %}). To understand the diversity and quality of these models, we "project" them into a lower-dimensional **Latent Space**.
               </p>
               <p style="margin-bottom: 15px;">
                 Models that share similar spatial features (e.g., similar channel orientation, connectivity, or rock physics correlations) will be positioned close to each other in this space, while geologically distinct models will be far apart. This allows us to visually confirm if our GAN is covering the full range of variability seen in the real reservoir data.
@@ -931,7 +890,7 @@
 
       <!-- Section 10: Distribution Analysis -->
       <section id="distribution-analysis">
-        <h2 class="section-title">10. Distribution Analysis</h2>
+        <h2 class="section-title">9. Distribution Analysis</h2>
         <div class="card">
           <p>Overlaid histograms comparing the categorical and continuous property distributions of the real validation data vs. all generated variants. This visualization helps identify potential bias or mode collapse in the latent representations and physical parameter space:</p>
           <div class="discussion-box" style="margin-bottom: 15px;">
@@ -971,9 +930,9 @@
 
       <!-- Section 11: Spatial Continuity -->
       <section id="spatial-continuity">
-        <h2 class="section-title">11. Spatial Continuity Analysis</h2>
+        <h2 class="section-title">10. Spatial Continuity Analysis</h2>
         <div class="card">
-          <p>Variograms quantify the spatial correlation and continuity of geological properties by measuring how the variance between data points increases with distance (lag). This analysis evaluates whether the GAN-generated realizations (Ip, Is, Vp/Vs, and Seismic) correctly capture the characteristic spatial structures of the original reservoir data.</p>
+          <p>Variograms quantify the spatial correlation and continuity of geological properties by measuring how the variance between data points increases with distance (lag). This analysis evaluates whether the GAN-generated realizations (Facies, Ip{% if use_is %}, Is{% endif %}{% if use_vpvs %}, Vp/Vs{% endif %}, and Seismic) correctly capture the characteristic spatial structures of the original reservoir data.</p>
           <p>Key variogram parameters used for evaluation include:</p>
           <ul>
             <li><strong>Sill</strong>: The maximum variance reached at large distances, indicating the total variability of the field.</li>
@@ -1018,7 +977,7 @@
 
       <!-- Section 12: Timing & Performance -->
       <section id="timing-performance">
-        <h2 class="section-title">12. Timing & Performance</h2>
+        <h2 class="section-title">11. Timing & Performance</h2>
         <div class="card">
           <p>Computational metrics including training duration and total model size (checkpoints) for each variant:</p>
           <div class="discussion-box" style="margin-bottom: 15px;">
@@ -1088,7 +1047,8 @@
         btn.classList.remove('active');
       } else {
         const speedInput = document.getElementById('speed-' + variant);
-        const interval = parseInt(speedInput.value || 800);
+        const val = parseInt(speedInput.value || 1300);
+        const interval = 2100 - val;
         
         btn.innerHTML = '⏸ Stop';
         btn.classList.add('active');
@@ -1160,10 +1120,10 @@
         const scrubber = indicatorBar.querySelector('input[type="range"]');
         const label = indicatorBar.querySelector('span');
         if (scrubber && label) {
-          scrubber.value = slideIdx;
+          scrubber.value = (slides.length - 1) - slideIdx;
           const slideHeader = slides[slideIdx].querySelector('.epoch-number-label');
           const epochStr = slideHeader ? slideHeader.textContent : '';
-          label.textContent = `${epochStr} (${slideIdx + 1}/${slides.length})`;
+          label.textContent = `${epochStr} (${slides.length - slideIdx}/${slides.length})`;
         }
         const dots = indicatorBar.querySelectorAll('.carousel-indicator-dot');
         dots.forEach((dot, idx) => {

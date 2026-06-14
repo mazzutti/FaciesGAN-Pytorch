@@ -92,19 +92,31 @@ def compute_quantitative_results(
         except Exception:
             pass
 
-    real_ip_mean, real_ip_std = 7335.7, 1302.6
-    real_is_mean, real_is_std = 3863.8, 613.7
-    real_vpvs_mean, real_vpvs_std = 1.895, 0.163
-    stats_json_path = data_dir / "stats.json"
-    if stats_json_path.exists():
-        try:
-            with open(stats_json_path, encoding="utf-8") as f:
-                stats = json.load(f)
-                real_ip_mean = stats["Ip"]["mean"]
-                real_is_mean = stats["Is"]["mean"]
-                real_vpvs_mean = stats["VP_VS"]["mean"]
-        except Exception:
-            pass
+    # Rock physics defaults (from global dataset stats)
+    real_ip_mean, real_ip_std = 7335.7, 1213.3
+    real_is_mean, real_is_std = 3863.8, 534.0
+    real_vpvs_mean, real_vpvs_std = 1.895, 0.151
+
+    # Load from stats.json for dynamic data
+    try:
+        from datasets.utils import get_global_stats
+        from enums import DataFiles, StatKey
+
+        stats = get_global_stats(str(data_dir))
+
+        ip_stats = stats.get(DataFiles.Ip.name, {})
+        real_ip_mean = ip_stats.get(StatKey.MEAN, real_ip_mean)
+        real_ip_std = ip_stats.get(StatKey.STD, real_ip_std)
+
+        is_stats = stats.get(DataFiles.Is.name, {})
+        real_is_mean = is_stats.get(StatKey.MEAN, real_is_mean)
+        real_is_std = is_stats.get(StatKey.STD, real_is_std)
+
+        vpvs_stats = stats.get(DataFiles.VP_VS.name, {})
+        real_vpvs_mean = vpvs_stats.get(StatKey.MEAN, real_vpvs_mean)
+        real_vpvs_std = vpvs_stats.get(StatKey.STD, real_vpvs_std)
+    except Exception as e:
+        print(f"Warning: Could not load robust stats from stats.json: {e}")
 
     results: dict[str, VariantQuantResult] = {}
     for var in VARIANTS:

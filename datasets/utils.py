@@ -158,7 +158,12 @@ def get_global_stats(data_dir: str | None = None) -> dict[str, dict[str, float]]
     if stats_path.exists():
         try:
             with open(stats_path, "r") as f:
-                return json.load(f)
+                loaded_stats = json.load(f)
+                # Check if 'std' exists in the main rock physics components
+                rp_components = [DataFiles.Ip.name, DataFiles.Is.name, DataFiles.VP_VS.name]
+                if all(c in loaded_stats and StatKey.STD in loaded_stats[c] for c in rp_components):
+                    return loaded_stats
+                logger.info("'std' missing or incomplete in %s; recomputing stats...", stats_path)
         except (OSError, json.JSONDecodeError) as e:
             logger.warning("Failed to load stats from %s: %e", stats_path, e)
 
@@ -193,6 +198,7 @@ def get_global_stats(data_dir: str | None = None) -> dict[str, dict[str, float]]
                             StatKey.MIN: float(combined.min()),
                             StatKey.MAX: float(combined.max()),
                             StatKey.MEAN: float(combined.mean()),
+                            StatKey.STD: float(combined.std()),
                         }
             except (OSError, KeyError, ValueError) as e:
                 logger.warning(f"Failed to compute stats for {comp.name}: {e}")
@@ -255,31 +261,34 @@ def _compute_derived_global_stats(
     data_dir: Path, component: DataFiles
 ) -> dict[str, float]:
     """Helper to compute global stats for derived attributes (Ip, Is, Vp/Vs)."""
-    facies_samples = load_samples(DataFiles.FACIES, str(data_dir))
     vp_samples = load_samples(DataFiles.VP, str(data_dir))
     vs_samples = load_samples(DataFiles.VS, str(data_dir))
     rho_samples = load_samples(DataFiles.RHO, str(data_dir))
 
-    c_min, c_max = float("inf"), float("-inf")
-    c_sum, c_count = 0.0, 0
+    all_values: list[NDArray[np.float32]] = []
 
-    for name in facies_samples.keys():
+    for name in vp_samples.keys():
         derived = _derive_rock_physics_component(
             component, name, vp_samples, vs_samples, rho_samples
         )
 
         if derived is not None:
-            c_min = min(c_min, float(derived.min()))
-            c_max = max(c_max, float(derived.max()))
-            c_sum += float(derived.sum())
-            c_count += derived.size
+            all_values.append(derived.flatten())
 
-    if c_min == float("inf"):
-        return {str(StatKey.MIN): 0.0, str(StatKey.MAX): 1.0, str(StatKey.MEAN): 0.5}
+    if not all_values:
+        return {
+            str(StatKey.MIN): 0.0,
+            str(StatKey.MAX): 1.0,
+            str(StatKey.MEAN): 0.5,
+            str(StatKey.STD): 0.1,
+        }
+
+    combined = np.concatenate(all_values)
     return {
-        str(StatKey.MIN): c_min,
-        str(StatKey.MAX): c_max,
-        str(StatKey.MEAN): c_sum / c_count if c_count > 0 else (c_min + c_max) / 2.0,
+        str(StatKey.MIN): float(combined.min()),
+        str(StatKey.MAX): float(combined.max()),
+        str(StatKey.MEAN): float(combined.mean()),
+        str(StatKey.STD): float(combined.std()),
     }
 
 

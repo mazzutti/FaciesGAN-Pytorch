@@ -30,7 +30,7 @@ compute_channel_connectivity_fn = cast(
     getattr(report_metrics, "compute_channel_connectivity"),
 )
 compute_distribution_metrics_fn = cast(
-    Callable[[Path], dict[str, Any]],
+    Callable[[Path, Path], dict[str, Any]],
     getattr(report_metrics, "compute_distribution_metrics"),
 )
 get_performance_data_fn = cast(
@@ -60,7 +60,9 @@ def generate_html_report(
     channel_connectivity: dict[str, dict[str, float]] = compute_channel_connectivity_fn(
         outputs_dir, data_dir
     )
-    distribution_metrics: dict[str, Any] = compute_distribution_metrics_fn(outputs_dir)
+    distribution_metrics: dict[str, Any] = compute_distribution_metrics_fn(
+        outputs_dir, data_dir
+    )
     performance_data: dict[str, dict[str, float]] = get_performance_data_fn(outputs_dir)
 
     if output is None:
@@ -128,25 +130,41 @@ def generate_html_report(
         )
         facies_rmse = float(r["rmse_error"]) * 100
 
-        # Weighted score (lower is better)
-        # We distribute the 60% rock physics weight equally among active properties.
+        # Channel Connectivity Deviation (largest connected component fraction difference)
+        real_conn = channel_connectivity.get("Real", {}).get("largest_frac", 1.0)
+        var_conn = channel_connectivity.get(var, {}).get("largest_frac", 0.0)
+        conn_dev = abs(real_conn - var_conn) * 100
+
+        # Spatial Conditioning Fidelity (SSIM deviation from 1.0)
+        # For unconditional, avg_ssim is 0, giving a 100% ssim_dev penalty.
+        ssim_val = float(r.get("avg_ssim", 0.0))
+        ssim_dev = (1.0 - ssim_val) * 100
+
+        # Weighted score (lower is better, each of the 4 pillars has a 25% weight)
         active_rp_count = sum([use_ip, use_is, use_vpvs])
         if active_rp_count > 0:
-            rp_weight = 0.6 / active_rp_count
-            overall = (
-                (facies_rmse * 0.4)
-                + (ip_dev * rp_weight if use_ip else 0.0)
-                + (is_dev * rp_weight if use_is else 0.0)
-                + (vpvs_dev * rp_weight if use_vpvs else 0.0)
-            )
+            rp_dev = (
+                (ip_dev if use_ip else 0.0)
+                + (is_dev if use_is else 0.0)
+                + (vpvs_dev if use_vpvs else 0.0)
+            ) / active_rp_count
         else:
-            overall = facies_rmse
+            rp_dev = 0.0
+
+        overall = (
+            (facies_rmse * 0.25)
+            + (rp_dev * 0.25)
+            + (conn_dev * 0.25)
+            + (ssim_dev * 0.25)
+        )
 
         scorecard[var] = {
             "facies_rmse": facies_rmse,
             "ip_dev": ip_dev,
             "is_dev": is_dev,
             "vpvs_dev": vpvs_dev,
+            "conn_dev": conn_dev,
+            "ssim_dev": ssim_dev,
             "overall": overall,
         }
 
@@ -342,7 +360,7 @@ def generate_html_report(
             sc = scorecard[var]
             rank = rank_map[var]
             medal = medal_map.get(rank, f"#{rank}")
-            bar_width = max(5, min(100, int(100 - sc["overall"] * 5)))
+            bar_width = max(5, min(100, int(100 - sc["overall"])))
             scorecard_table.append(
                 {
                     "rank": rank,
@@ -352,6 +370,8 @@ def generate_html_report(
                     "ip_dev": f"{sc['ip_dev']:.2f}",
                     "is_dev": f"{sc['is_dev']:.2f}",
                     "vpvs_dev": f"{sc['vpvs_dev']:.2f}",
+                    "conn_dev": f"{sc['conn_dev']:.2f}",
+                    "ssim_dev": f"{sc['ssim_dev']:.2f}",
                     "overall": f"{sc['overall']:.2f}",
                     "bar_width": bar_width,
                     "is_first": rank == 1,
@@ -420,21 +440,8 @@ def generate_html_report(
                 }
             )
 
-    # 7. Rock Physics Crossplots
-    rp_plots = [
-        ("rock_physics_real.png", "Real Validation Data"),
-        ("rock_physics_wells_seismic.png", "Wells + Seismic"),
-        ("rock_physics_wells_only.png", "Wells Only"),
-        ("rock_physics_seismic_only.png", "Seismic Only"),
-        ("rock_physics_unconditional.png", "Unconditional"),
-    ]
+    # 7. Rock Physics Crossplots (Removed)
     existing_rp: list[dict[str, str]] = []
-    for filename, label in rp_plots:
-        img_path = outputs_dir / filename
-        if img_path.exists():
-            existing_rp.append(
-                {"label": label, "rel_path": md_relpath(img_path, report_dir)}
-            )
 
     # Global milestone targets for variant galleries
     global_epoch_indices: list[int] = []
@@ -464,21 +471,25 @@ def generate_html_report(
         global_epoch_indices = sorted(list(set(global_epoch_indices)))
         global_milestone_targets = get_milestones(global_epoch_indices)
 
-    # 8. Experiment Variants Detailed View
     properties = [
         ("Facies", "Facies"),
         ("Ip", "Ip (<i>I<sub>p</sub></i>)"),
-        ("Is", "Is (<i>I<sub>s</sub></i>)"),
-        ("VpVs", "Vp/Vs"),
-        ("Seismic", "Seismic"),
     ]
+    if use_is:
+        properties.append(("Is", "Is (<i>I<sub>s</sub></i>)"))
+    if use_vpvs:
+        properties.append(("VpVs", "Vp/Vs"))
+    properties.append(("Seismic", "Seismic"))
+
     kinds = [
         ("facies", "Facies Categorical Map"),
         ("ip", "Acoustic Impedance (Ip)"),
-        ("is", "Shear Impedance (Is)"),
-        ("vp_vs", "Vp/Vs Ratio"),
-        ("seismic", "Synthetic Seismic"),
     ]
+    if use_is:
+        kinds.append(("is", "Shear Impedance (Is)"))
+    if use_vpvs:
+        kinds.append(("vp_vs", "Vp/Vs Ratio"))
+    kinds.append(("seismic", "Synthetic Seismic"))
 
     variant_details: list[dict[str, Any]] = []
     for var in VARIANTS:
@@ -680,10 +691,13 @@ def generate_html_report(
     dist_plots = [
         ("distribution_hist_facies.png", "Facies Categories"),
         ("distribution_hist_ip.png", "Acoustic Impedance (Ip)"),
-        ("distribution_hist_is.png", "Shear Impedance (Is)"),
-        ("distribution_hist_vpvs.png", "Vp/Vs Ratio"),
-        ("distribution_hist_seismic.png", "Synthetic Seismic Amplitude"),
     ]
+    if use_is:
+        dist_plots.append(("distribution_hist_is.png", "Shear Impedance (Is)"))
+    if use_vpvs:
+        dist_plots.append(("distribution_hist_vpvs.png", "Vp/Vs Ratio"))
+    dist_plots.append(("distribution_hist_seismic.png", "Synthetic Seismic Amplitude"))
+
     distribution_analysis: list[dict[str, str]] = []
     for filename, label in dist_plots:
         img_path = outputs_dir / filename
@@ -696,10 +710,13 @@ def generate_html_report(
     var_plots = [
         ("variogram_facies.png", "Facies Categories"),
         ("variogram_ip.png", "Acoustic Impedance (Ip)"),
-        ("variogram_is.png", "Shear Impedance (Is)"),
-        ("variogram_vp_vs.png", "Vp/Vs Ratio"),
-        ("variogram_seismic.png", "Synthetic Seismic"),
     ]
+    if use_is:
+        var_plots.append(("variogram_is.png", "Shear Impedance (Is)"))
+    if use_vpvs:
+        var_plots.append(("variogram_vp_vs.png", "Vp/Vs Ratio"))
+    var_plots.append(("variogram_seismic.png", "Synthetic Seismic"))
+
     spatial_continuity: list[dict[str, str]] = []
     for filename, label in var_plots:
         img_path = outputs_dir / filename

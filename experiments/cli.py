@@ -113,6 +113,10 @@ def build_training_args(
         str(args.num_parallel_scales),
         "--stop-scale",
         str(args.stop_scale),
+        "--min-size",
+        str(args.min_size),
+        "--crop-size",
+        str(args.crop_size),
         "--start-scale",
         str(start_scale),
         "--checkpoint-interval",
@@ -227,6 +231,8 @@ def build_training_args(
         cmd.append("--use-wells")
     if variant.use_seismic:
         cmd.append("--use-seismic")
+    if getattr(args, "use_disc_conditioning", False) and (variant.use_wells or variant.use_seismic):
+        cmd.append("--use-disc-conditioning")
 
     # Rock physics flags
     if args.use_rock_physics:

@@ -225,8 +225,9 @@ class DataFiles(IntEnum):
 
 
 class StatKey(StrEnum):
-    """String keys for global statistics dictionaries (min/max/mean)."""
+    """String keys for global statistics dictionaries (min/max/mean/std)."""
 
     MIN = "min"
     MAX = "max"
     MEAN = "mean"
+    STD = "std"

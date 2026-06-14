@@ -63,4 +63,7 @@
   "python.analysis.typeEvaluation.analyzeUnannotatedFunctions": true,
   "python.analysis.languageServerMode": "full",
   "python.analysis.supportRestructuredText": true,
+  "[jsonc]": {
+    "editor.defaultFormatter": "vscode.json-language-features"
+  },
 }

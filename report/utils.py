@@ -140,6 +140,6 @@ def ensure_all_report_images(outputs_dir: Path, data_dir: Path) -> None:
     ensure_pyramid_images(outputs_dir)
     ensure_training_pyramid_image(outputs_dir, data_dir)
     ensure_loss_plots(outputs_dir)
-    ensure_rock_physics_crossplots(outputs_dir, data_dir)
+    # ensure_rock_physics_crossplots(outputs_dir, data_dir)
     ensure_distribution_histograms(outputs_dir, data_dir)
     ensure_variogram_plots(outputs_dir, data_dir)

@@ -315,6 +315,38 @@ class Trainer:
                     masks_pyramid,
                     seismic_pyramid,
                 ) = batch
+
+                # Pre-build conditioning tensors for the discriminator for each scale
+                cond_tensors: dict[int, torch.Tensor | None] = {}
+                if self.options.use_disc_conditioning:
+                    for scale in scales:
+                        cond_parts = []
+                        b = facies_pyramid[scale].shape[0]
+                        if self.options.use_wells:
+                            w_local = wells_pyramid.get(scale)
+                            if w_local is not None:
+                                w_local = w_local.to(device_manager.device, non_blocking=True)
+                                if w_local.shape[0] != b:
+                                    w_local = w_local[indexes]
+                                cond_parts.append(w_local)
+                            m_local = masks_pyramid.get(scale)
+                            if m_local is not None:
+                                m_local = m_local.to(device_manager.device, non_blocking=True)
+                                if m_local.shape[0] != b:
+                                    m_local = m_local[indexes]
+                                cond_parts.append(m_local)
+                        if self.options.use_seismic:
+                            s_local = seismic_pyramid.get(scale)
+                            if s_local is not None:
+                                s_local = s_local.to(device_manager.device, non_blocking=True)
+                                if s_local.shape[0] != b:
+                                    s_local = s_local[indexes]
+                                cond_parts.append(s_local)
+                        cond_tensors[scale] = torch.cat(cond_parts, dim=1) if cond_parts else None
+                else:
+                    for scale in scales:
+                        cond_tensors[scale] = None
+
                 rec_in_pyramid: dict[int, torch.Tensor] = {}
                 for s in range(max(scales) + 1):
                     if len(self.model.rec_noise) <= s:
@@ -341,7 +373,12 @@ class Trainer:
 
                 # Trigger discriminator traces
                 for scale in scales:
-                    self.model.discriminator.discs[scale](facies_pyramid[scale])
+                    disc_in = facies_pyramid[scale]
+                    cond_tensor = cond_tensors.get(scale)
+                    if cond_tensor is not None:
+                        disc_in = torch.cat([disc_in, cond_tensor], dim=1)
+
+                    self.model.discriminator.discs[scale](disc_in)
 
                 # Trigger a dummy call to compute_generator_metrics to satisfy linting
                 # and ensure masks_pyramid is functionally traced (if compiled in future).
@@ -369,10 +406,15 @@ class Trainer:
                         )
 
                         # Discriminator train trace
-                        scores_fake = self.model.discriminator.discs[scale](fake_tr)
-                        scores_real = self.model.discriminator.discs[scale](
-                            facies_pyramid[scale]
-                        )
+                        disc_in_fake = fake_tr
+                        disc_in_real = facies_pyramid[scale]
+                        cond_tensor = cond_tensors.get(scale)
+                        if cond_tensor is not None:
+                            disc_in_fake = torch.cat([fake_tr, cond_tensor], dim=1)
+                            disc_in_real = torch.cat([facies_pyramid[scale], cond_tensor], dim=1)
+
+                        scores_fake = self.model.discriminator.discs[scale](disc_in_fake)
+                        scores_real = self.model.discriminator.discs[scale](disc_in_real)
 
                         # Backward trace
                         loss_tr = (scores_fake.mean() + scores_real.mean()) * 0.0
@@ -2212,7 +2254,6 @@ class Trainer:
         )
         seismic_active = (
             getattr(self.options, "use_rock_physics", False)
-            and getattr(self.options, "use_seismic", False)
             and getattr(self.options, "seismic_loss_penalty", 0.0) > 0
             and getattr(self.options, "use_ip", True)
         )
@@ -2332,7 +2373,6 @@ class Trainer:
         )
         seismic_active = (
             getattr(self.options, "use_rock_physics", False)
-            and getattr(self.options, "use_seismic", False)
             and getattr(self.options, "seismic_loss_penalty", 0.0) > 0
             and getattr(self.options, "use_ip", True)
         )

@@ -155,13 +155,9 @@ def _generate_samples(
                 all_facies.append(facies_np)
 
                 # Save categorical indices to disk (more compact for users)
-                # Move argmax result to CPU non-blocking and convert to numpy
-                facies_idx_t = torch.argmax(facies_t.squeeze(0), dim=0)
-                facies_idx = (
-                    device_manager.to_cpu(facies_idx_t, non_blocking=True)
-                    .numpy()
-                    .astype(np.int64)
-                )
+                # Map continuous RGB outputs back to discrete facies class indices using Euclidean distance
+                import utils
+                facies_idx = utils.rgb_to_facies(facies_t.squeeze(0)).astype(np.int64)
                 np.save(
                     facies_dir / f"{DataFiles.FACIES.name.lower()}_{idx:04d}.npy",
                     facies_idx,

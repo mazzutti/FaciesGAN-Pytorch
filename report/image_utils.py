@@ -358,13 +358,48 @@ def ensure_training_pyramid_image(outputs_dir: Path, data_dir: Path) -> None:
         num_scales = len(dataset.scales)
         num_facies_ch = opt.num_facies_channels
 
+        use_ip = getattr(opt, "use_ip", True)
+        use_is = getattr(opt, "use_is", True)
+        use_vpvs = getattr(opt, "use_vpvs", True)
+
+        active_props = ["Facies"]
+        prop_labels = ["Facies (Real)"]
+        if use_ip:
+            active_props.append("Ip")
+            prop_labels.append("Ip")
+        if use_is:
+            active_props.append("Is")
+            prop_labels.append("Is")
+        if use_vpvs:
+            active_props.append("Vp/Vs")
+            prop_labels.append("Vp/Vs")
+        active_props.append("Wells")
+        prop_labels.append("Wells")
+        active_props.append("Seismic")
+        prop_labels.append("Seismic")
+
+        num_rows = len(active_props)
+
+        # Determine channel indices dynamically
+        ch_idx = num_facies_ch
+        ip_ch_idx = -1
+        is_ch_idx = -1
+        vpvs_ch_idx = -1
+        if use_ip:
+            ip_ch_idx = ch_idx
+            ch_idx += 1
+        if use_is:
+            is_ch_idx = ch_idx
+            ch_idx += 1
+        if use_vpvs:
+            vpvs_ch_idx = ch_idx
+            ch_idx += 1
+
         # Use squeeze=False to ensure axes is always 2D
         fig, axes = plt.subplots(  # type: ignore
-            6, num_scales, figsize=(3 * num_scales, 18), squeeze=False
+            num_rows, num_scales, figsize=(3 * num_scales, 3 * num_rows), squeeze=False
         )
         fig.patch.set_facecolor("#151b26")
-
-        prop_labels = ["Facies (Real)", "Ip", "Is", "Vp/Vs", "Wells", "Seismic"]
 
         for scale in range(num_scales):
             facies_batch, wells_batch, _, seismic_batch = dataset.get_scale_data(scale)
@@ -385,126 +420,74 @@ def ensure_training_pyramid_image(outputs_dir: Path, data_dir: Path) -> None:
                 for spine in ax_obj.spines.values():
                     spine.set_visible(False)
 
-            # 1. Facies (Row 0)
-            ax = axes[0, scale]
-            if num_facies_ch == 3:
-                f_idx = utils.rgb_to_facies(f[:3])
-            else:
-                f_idx = torch.argmax(f[:num_facies_ch], dim=0).numpy()
+            for row_idx, prop in enumerate(active_props):
+                ax = axes[row_idx, scale]
 
-            ax.imshow(utils.facies_to_rgb(f_idx).transpose(1, 2, 0))
-            clean_axis(ax)
-            h, w_facies = f_idx.shape[0], f_idx.shape[1]
-            ax.set_title(
-                f"Scale {scale}\n({w_facies}×{h})",
-                fontsize=10,
-                fontweight="bold",
-                color="#f0f4f9",
-            )
-            if scale == 0:
-                ax.set_ylabel(
-                    prop_labels[0],
-                    fontsize=12,
-                    fontweight="bold",
-                    rotation=90,
-                    labelpad=15,
-                    color="#f0f4f9",
-                )
+                if prop == "Facies":
+                    if num_facies_ch == 3:
+                        f_idx = utils.rgb_to_facies(f[:3])
+                    else:
+                        f_idx = torch.argmax(f[:num_facies_ch], dim=0).numpy()
+                    ax.imshow(utils.facies_to_rgb(f_idx).transpose(1, 2, 0))
+                    h, w_facies = f_idx.shape[0], f_idx.shape[1]
+                    ax.set_title(
+                        f"Scale {scale}\n({w_facies}×{h})",
+                        fontsize=10,
+                        fontweight="bold",
+                        color="#f0f4f9",
+                    )
 
-            # 2. Ip (Row 1)
-            ax = axes[1, scale]
-            if num_channels > num_facies_ch:
-                ip = f[num_facies_ch].numpy()
-                ax.imshow(ip, cmap="magma")
-            clean_axis(ax)
-            if scale == 0:
-                ax.set_ylabel(
-                    prop_labels[1],
-                    fontsize=12,
-                    fontweight="bold",
-                    rotation=90,
-                    labelpad=15,
-                    color="#f0f4f9",
-                )
+                elif prop == "Ip":
+                    if ip_ch_idx != -1 and num_channels > ip_ch_idx:
+                        ip = f[ip_ch_idx].numpy()
+                        ax.imshow(ip, cmap="magma")
 
-            # 3. Is (Row 2)
-            ax = axes[2, scale]
-            if num_channels > num_facies_ch + 1:
-                is_ = f[num_facies_ch + 1].numpy()
-                ax.imshow(is_, cmap="magma")
-            clean_axis(ax)
-            if scale == 0:
-                ax.set_ylabel(
-                    prop_labels[2],
-                    fontsize=12,
-                    fontweight="bold",
-                    rotation=90,
-                    labelpad=15,
-                    color="#f0f4f9",
-                )
+                elif prop == "Is":
+                    if is_ch_idx != -1 and num_channels > is_ch_idx:
+                        is_ = f[is_ch_idx].numpy()
+                        ax.imshow(is_, cmap="magma")
 
-            # 4. Vp/Vs (Row 3)
-            ax = axes[3, scale]
-            if num_channels > num_facies_ch + 2:
-                vpvs = f[num_facies_ch + 2].numpy()
-                ax.imshow(vpvs, cmap="viridis")
-            clean_axis(ax)
-            if scale == 0:
-                ax.set_ylabel(
-                    prop_labels[3],
-                    fontsize=12,
-                    fontweight="bold",
-                    rotation=90,
-                    labelpad=15,
-                    color="#f0f4f9",
-                )
+                elif prop == "Vp/Vs":
+                    if vpvs_ch_idx != -1 and num_channels > vpvs_ch_idx:
+                        vpvs = f[vpvs_ch_idx].numpy()
+                        ax.imshow(vpvs, cmap="viridis")
 
-            # 5. Wells (Row 4)
-            ax = axes[4, scale]
-            if w is not None:
-                well_cmap = mcolors.ListedColormap(PALETTE_RGB)
-                if w.shape[0] == 3:
-                    w_idx = utils.rgb_to_facies(w).astype(float)
-                else:
-                    w_idx = torch.argmax(w, dim=0).numpy().astype(float)
+                elif prop == "Wells":
+                    if w is not None:
+                        well_cmap = mcolors.ListedColormap(PALETTE_RGB)
+                        if w.shape[0] == 3:
+                            w_idx = utils.rgb_to_facies(w).astype(float)
+                        else:
+                            w_idx = torch.argmax(w, dim=0).numpy().astype(float)
 
-                mask = (
-                    (w.abs().sum(dim=0) < 1e-3)
-                    if opt.normalization_range[0] == 0
-                    else (w < opt.normalization_range[0] + 0.1).all(dim=0)
-                )
-                w_idx[mask] = np.nan
-                ax.imshow(w_idx, cmap=well_cmap, vmin=0, vmax=len(PALETTE_RGB) - 1)
-            clean_axis(ax)
-            if scale == 0:
-                ax.set_ylabel(
-                    prop_labels[4],
-                    fontsize=12,
-                    fontweight="bold",
-                    rotation=90,
-                    labelpad=15,
-                    color="#f0f4f9",
-                )
+                        mask = (
+                            (w.abs().sum(dim=0) < 1e-3)
+                            if opt.normalization_range[0] == 0
+                            else (w < opt.normalization_range[0] + 0.1).all(dim=0)
+                        )
+                        w_idx[mask] = np.nan
+                        ax.imshow(w_idx, cmap=well_cmap, vmin=0, vmax=len(PALETTE_RGB) - 1)
 
-            # 6. Seismic (Row 5)
-            ax = axes[5, scale]
-            if s is not None:
-                s_np = s[0].numpy() if s.ndim == 3 else s.numpy()
-                s_plot = s_np - np.mean(s_np)
-                p_lo = float(np.percentile(s_plot, 2))
-                p_hi = float(np.percentile(s_plot, 98))
-                max_abs = max(abs(p_lo), abs(p_hi), 1e-6)
-                ax.imshow(s_plot, cmap="RdBu", vmin=-max_abs, vmax=max_abs)
-            clean_axis(ax)
-            if scale == 0:
-                ax.set_ylabel(
-                    prop_labels[5],
-                    fontsize=12,
-                    fontweight="bold",
-                    rotation=90,
-                    labelpad=15,
-                    color="#f0f4f9",
-                )
+                elif prop == "Seismic":
+                    if s is not None:
+                        s_np = s[0].numpy() if s.ndim == 3 else s.numpy()
+                        s_plot = s_np - np.mean(s_np)
+                        p_lo = float(np.percentile(s_plot, 2))
+                        p_hi = float(np.percentile(s_plot, 98))
+                        max_abs = max(abs(p_lo), abs(p_hi), 1e-6)
+                        ax.imshow(s_plot, cmap="RdBu", vmin=-max_abs, vmax=max_abs)
+
+                clean_axis(ax)
+
+                if scale == 0:
+                    ax.set_ylabel(
+                        prop_labels[row_idx],
+                        fontsize=12,
+                        fontweight="bold",
+                        rotation=90,
+                        labelpad=15,
+                        color="#f0f4f9",
+                    )
 
         fig.suptitle(  # type: ignore
             "Ground Truth Training Pyramids — Multi-Resolution Dataset",
@@ -1154,6 +1137,9 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
                                 lags, g = compute_variogram(
                                     field, max_lag=30, direction=direction
                                 )
+                                var_val = np.var(field)
+                                if var_val > 1e-8:
+                                    g = g / var_val
                                 all_gammas.append(g)
                             if all_gammas:
                                 mean_gamma = np.mean(all_gammas, axis=0)
@@ -1190,6 +1176,9 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
                         lags, g = compute_variogram(
                             field, max_lag=30, direction=direction
                         )
+                        var_val = np.var(field)
+                        if var_val > 1e-8:
+                            g = g / var_val
                         all_gammas.append(g)
                     if all_gammas:
                         mean_gamma = np.mean(all_gammas, axis=0)
@@ -1209,7 +1198,7 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
                     color="#f0f4f9",
                 )
                 ax.set_xlabel("Lag (pixels)", fontsize=10, color="#8c9eb5")
-                ax.set_ylabel("γ(h)", fontsize=10, color="#8c9eb5")
+                ax.set_ylabel("γ(h) / Variance", fontsize=10, color="#8c9eb5")
                 ax.tick_params(
                     axis="both", which="major", labelsize=9, colors="#8c9eb5"
                 )
