@@ -445,6 +445,8 @@
                   <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ rock_physics_stats.real.vpvs_mean }}</td>
                   <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ rock_physics_stats.real.vpvs_std }}</td>
                   {% endif %}
+                  <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ rock_physics_stats.real.seismic_mean }}</td>
+                  <td style="text-align: center; font-family: monospace; font-size: 0.9rem;">{{ rock_physics_stats.real.seismic_std }}</td>
                 </tr>
                 {% for var in rock_physics_stats.variants %}
                   <tr>
@@ -461,6 +463,8 @@
                     <td style="text-align: center;">{{ var.vpvs_mean_html|safe }}</td>
                     <td style="text-align: center;">{{ var.vpvs_std_html|safe }}</td>
                     {% endif %}
+                    <td style="text-align: center;">{{ var.seismic_mean_html|safe }}</td>
+                    <td style="text-align: center;">{{ var.seismic_std_html|safe }}</td>
                   </tr>
                 {% endfor %}
               </tbody>

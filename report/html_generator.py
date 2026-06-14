@@ -240,12 +240,33 @@ def generate_html_report(
     if configs:
         for cat_name, params in HPARAM_CATEGORIES.items():
             row_params: list[dict[str, Any]] = []
+            
+            # Categories where we want to hide "disabled" (0.0) parameters
+            hide_if_disabled_categories = [
+                "⚖️ Loss & Consistency Penalties",
+                "🌐 Physics Properties",
+            ]
+            should_filter = cat_name in hide_if_disabled_categories
+
             for key, label in params:
+                # Check if this parameter is "active" in at least one variant
+                is_active = False
                 variant_vals: list[dict[str, Any]] = []
+                
                 for v in VARIANTS:
                     if v in configs:
-                        val = configs[v].get(key, "—")
-                        formatted = format_value(val)
+                        val = configs[v].get(key)
+                        
+                        # Parameter activity logic
+                        if val not in (None, 0, 0.0, False, "—"):
+                            is_active = True
+                            
+                        # If filtering is active for this row, and value is disabled, show empty/dash
+                        if should_filter and val in (None, 0, 0.0, False):
+                            formatted = "—"
+                        else:
+                            formatted = format_value(val) if val is not None else "—"
+
                         variant_vals.append(
                             {
                                 "formatted": formatted,
@@ -253,8 +274,13 @@ def generate_html_report(
                                 "is_no": formatted == "No",
                             }
                         )
-                row_params.append({"label": label, "values": variant_vals})
-            hparams_table.append({"category": cat_name, "params": row_params})
+                
+                # Only add row if it is not filtered or if it is active in at least one variant
+                if not should_filter or is_active:
+                    row_params.append({"label": label, "values": variant_vals})
+            
+            if row_params:
+                hparams_table.append({"category": cat_name, "params": row_params})
 
     # 5. Realization Comparison Grids
     grids = [
