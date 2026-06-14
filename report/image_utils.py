@@ -1036,144 +1036,94 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
             properties_list.append(("seismic", "Synthetic Seismic"))
 
         for prop_key, prop_label in properties_list:
-            fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+            # Grid of 4 variants (rows) x 2 directions (columns)
+            fig, axes = plt.subplots(4, 2, figsize=(14, 18))
             fig.patch.set_facecolor("#151b26")
 
-            for ax_idx, (direction, dir_label) in enumerate(
-                [("omni", "Omnidirectional"), ("horizontal", "Horizontal")]
-            ):
-                ax = axes[ax_idx]
-                ax.set_facecolor("#111622")
+            # 1. Precompute Real Variograms (Ground Truth)
+            real_gammas: dict[str, NDArray[np.float64]] = {}
+            real_lags: NDArray[np.int_] = np.array([], dtype=np.int_)
+            try:
+                import torch
+                import utils
+                from datasets.dataset import PyramidsDataset
+                from options import TrainingOptions
 
-                for variant_name, color in variant_colors.items():
-                    if variant_name == "Real":
-                        try:
-                            import torch
+                base_options_path = outputs_dir / "wells_seismic" / "options.json"
+                latest_params: dict[str, Any] = {}
+                if base_options_path.exists():
+                    with open(base_options_path, encoding="utf-8") as f_opts:
+                        latest_params = json.load(f_opts)
+                opt = TrainingOptions()
+                for key, val in latest_params.items():
+                    if hasattr(opt, key):
+                        setattr(opt, key, val)
+                opt.input_path = str(data_dir)
+                opt.use_rock_physics = True
+                opt.use_seismic = True
+                opt.use_wells = True
+                dataset = PyramidsDataset(opt)
+                num_scales = len(dataset.scales)
+                num_facies_ch = opt.num_facies_channels
+                (
+                    facies_batch,
+                    _,
+                    _,
+                    seismic_batch,
+                ) = dataset.get_scale_data(num_scales - 1)
 
-                            import utils
-                            from datasets.dataset import PyramidsDataset
-                            from options import TrainingOptions
+                denormalize = get_denormalize_fn(data_dir)
+                denormalize_any = cast(Any, denormalize)
 
-                            base_options_path = (
-                                outputs_dir / "wells_seismic" / "options.json"
-                            )
-                            latest_params: dict[str, Any] = {}
-                            if base_options_path.exists():
-                                with open(
-                                    base_options_path, encoding="utf-8"
-                                ) as f_opts:
-                                    latest_params = json.load(f_opts)
-                            opt = TrainingOptions()
-                            for key, val in latest_params.items():
-                                if hasattr(opt, key):
-                                    setattr(opt, key, val)
-                            opt.input_path = str(data_dir)
-                            opt.use_rock_physics = True
-                            opt.use_seismic = True
-                            opt.use_wells = True
-                            dataset = PyramidsDataset(opt)
-                            num_scales = len(dataset.scales)
-                            num_facies_ch = opt.num_facies_channels
-                            (
-                                facies_batch,
-                                _,
-                                _,
-                                seismic_batch,
-                            ) = dataset.get_scale_data(num_scales - 1)
+                for direction in ["omni", "horizontal"]:
+                    if prop_key == "seismic":
+                        data_source = seismic_batch
+                        ch_idx = 0
+                    else:
+                        data_source = facies_batch
+                        active_properties = []
+                        if getattr(opt, "use_ip", True):
+                            active_properties.append("Ip")
+                        if getattr(opt, "use_is", True):
+                            active_properties.append("Is")
+                        if getattr(opt, "use_vpvs", True):
+                            active_properties.append("VP_VS")
+                        prop_indices = {
+                            name: idx
+                            for idx, name in enumerate(active_properties)
+                        }
 
-                            if prop_key == "seismic":
-                                data_source = seismic_batch
-                                ch_idx = 0
-                            else:
-                                data_source = facies_batch
-                                active_properties: list[str] = []
-                                if getattr(opt, "use_ip", True):
-                                    active_properties.append("Ip")
-                                if getattr(opt, "use_is", True):
-                                    active_properties.append("Is")
-                                if getattr(opt, "use_vpvs", True):
-                                    active_properties.append("VP_VS")
-                                prop_indices = {
-                                    name: idx
-                                    for idx, name in enumerate(active_properties)
-                                }
+                        if prop_key == "ip" and "Ip" in prop_indices:
+                            ch_idx = num_facies_ch + prop_indices["Ip"]
+                        elif prop_key == "is" and "Is" in prop_indices:
+                            ch_idx = num_facies_ch + prop_indices["Is"]
+                        elif prop_key == "vp_vs" and "VP_VS" in prop_indices:
+                            ch_idx = num_facies_ch + prop_indices["VP_VS"]
+                        else:
+                            ch_idx = -1
 
-                                if prop_key == "ip" and "Ip" in prop_indices:
-                                    ch_idx = num_facies_ch + prop_indices["Ip"]
-                                elif prop_key == "is" and "Is" in prop_indices:
-                                    ch_idx = num_facies_ch + prop_indices["Is"]
-                                elif prop_key == "vp_vs" and "VP_VS" in prop_indices:
-                                    ch_idx = num_facies_ch + prop_indices["VP_VS"]
-                                else:
-                                    ch_idx = -1
-
-                            denormalize = get_denormalize_fn(data_dir)
-                            denormalize_any = cast(Any, denormalize)
-
-                            all_gammas: list[NDArray[np.float64]] = []
-                            lags: NDArray[np.int_] = np.array([], dtype=np.int_)
-                            for s_idx in range(min(5, data_source.shape[0])):
-                                if prop_key == "facies":
-                                    f = data_source[s_idx].cpu()
-                                    if num_facies_ch == 3:
-                                        field = utils.rgb_to_facies(f[:3]).astype(float)
-                                    else:
-                                        field = (
-                                            torch.argmax(f[:num_facies_ch], dim=0)
-                                            .numpy()
-                                            .astype(float)
-                                        )
-                                else:
-                                    field = data_source[s_idx, ch_idx].cpu().numpy()
-                                    field = np.asarray(
-                                        denormalize_any(field, prop_key, opt)
-                                    )
-
-                                if prop_key == "seismic":
-                                    field = (field - np.mean(field)) / (
-                                        np.std(field) + 1e-8
-                                    )
-
-                                lags, g = compute_variogram(
-                                    field, max_lag=30, direction=direction
-                                )
-                                var_val = np.var(field)
-                                if var_val > 1e-8:
-                                    g = g / var_val
-                                all_gammas.append(g)
-                            if all_gammas:
-                                mean_gamma = np.mean(all_gammas, axis=0)
-                                ax.plot(
-                                    lags,
-                                    mean_gamma,
-                                    color=color,
-                                    linewidth=2.5,
-                                    label="Real",
-                                    alpha=0.9,
-                                    zorder=10,
-                                )
-                        except Exception as e:
-                            print(f"Error computing Real variogram for {prop_key}: {e}")
-                        continue
-
-                    v_dir_key = "vp_vs" if prop_key == "vp_vs" else prop_key
-                    gen_dir = outputs_dir / variant_name / "generated" / v_dir_key
-                    if not gen_dir.exists():
-                        continue
-                    npy_files = sorted(list(gen_dir.glob("*.npy")))[:20]
-                    if not npy_files:
-                        continue
                     all_gammas: list[NDArray[np.float64]] = []
-                    lags: NDArray[np.int_] = np.array([], dtype=np.int_)
-                    for nf in npy_files:
-                        field = np.asarray(np.load(nf))
-                        if field.ndim == 3:
-                            field = field[0]
+                    for s_idx in range(min(10, data_source.shape[0])):
+                        if prop_key == "facies":
+                            f = data_source[s_idx].cpu()
+                            if num_facies_ch == 3:
+                                field = utils.rgb_to_facies(f[:3]).astype(float)
+                            else:
+                                field = (
+                                    torch.argmax(f[:num_facies_ch], dim=0)
+                                    .numpy()
+                                    .astype(float)
+                                )
+                        else:
+                            if ch_idx == -1:
+                                continue
+                            field = data_source[s_idx, ch_idx].cpu().numpy()
+                            field = np.asarray(denormalize_any(field, prop_key, opt))
 
                         if prop_key == "seismic":
                             field = (field - np.mean(field)) / (np.std(field) + 1e-8)
 
-                        lags, g = compute_variogram(
+                        real_lags, g = compute_variogram(
                             field, max_lag=30, direction=direction
                         )
                         var_val = np.var(field)
@@ -1181,52 +1131,120 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
                             g = g / var_val
                         all_gammas.append(g)
                     if all_gammas:
-                        mean_gamma = np.mean(all_gammas, axis=0)
+                        real_gammas[direction] = np.mean(all_gammas, axis=0)
+            except Exception as e:
+                print(f"Error computing Real variogram reference for {prop_key}: {e}")
+
+            # 2. Plot variants in a grid
+            for v_idx, variant_name in enumerate(VARIANTS):
+                for d_idx, (direction, dir_label) in enumerate(
+                    [("omni", "Omnidirectional"), ("horizontal", "Horizontal")]
+                ):
+                    ax = axes[v_idx, d_idx]
+                    ax.set_facecolor("#111622")
+
+                    # Plot Real background reference
+                    if direction in real_gammas:
                         ax.plot(
-                            lags,
-                            mean_gamma,
-                            color=color,
+                            real_lags,
+                            real_gammas[direction],
+                            color="#f0f4f9",
+                            linestyle="--",
                             linewidth=2.0,
-                            label=VARIANT_LABELS[variant_name],
-                            alpha=0.85,
+                            label="Real Data (Reference)",
+                            alpha=0.4,
+                            zorder=1,
                         )
 
-                ax.set_title(
-                    f"{dir_label} Variogram",
-                    fontsize=11,
-                    fontweight="bold",
-                    color="#f0f4f9",
-                )
-                ax.set_xlabel("Lag (pixels)", fontsize=10, color="#8c9eb5")
-                ax.set_ylabel("γ(h) / Variance", fontsize=10, color="#8c9eb5")
-                ax.tick_params(
-                    axis="both", which="major", labelsize=9, colors="#8c9eb5"
-                )
-                ax.grid(True, alpha=0.15, color="#8c9eb5")
-                for spine in ax.spines.values():
-                    spine.set_color("#222d41")
-                ax.legend(
-                    loc="best",
-                    fontsize=8,
-                    frameon=True,
-                    facecolor="#151b26",
-                    edgecolor="#222d41",
-                    labelcolor="#f0f4f9",
-                )
+                    # Compute and plot Variant
+                    v_dir_key = "vp_vs" if prop_key == "vp_vs" else prop_key
+                    gen_dir = outputs_dir / variant_name / "generated" / v_dir_key
+                    if gen_dir.exists():
+                        npy_files = sorted(list(gen_dir.glob("*.npy")))[:50]
+                        if npy_files:
+                            all_gammas = []
+                            v_lags = np.array([], dtype=np.int_)
+                            for nf in npy_files:
+                                field = np.asarray(np.load(nf))
+                                if field.ndim == 3:
+                                    field = field[0]
+
+                                if prop_key == "seismic":
+                                    field = (field - np.mean(field)) / (
+                                        np.std(field) + 1e-8
+                                    )
+
+                                v_lags, g = compute_variogram(
+                                    field, max_lag=30, direction=direction
+                                )
+                                var_val = np.var(field)
+                                if var_val > 1e-8:
+                                    g = g / var_val
+                                all_gammas.append(g)
+
+                            if all_gammas:
+                                mean_gamma = np.mean(all_gammas, axis=0)
+                                ax.plot(
+                                    v_lags,
+                                    mean_gamma,
+                                    color=variant_colors[variant_name],
+                                    linewidth=2.5,
+                                    label=f"Variant: {VARIANT_LABELS[variant_name]}",
+                                    alpha=1.0,
+                                    zorder=5,
+                                )
+
+                    # Subplot styling
+                    if v_idx == 0:
+                        ax.set_title(
+                            f"{dir_label}",
+                            fontsize=12,
+                            fontweight="bold",
+                            color="#f0f4f9",
+                            pad=10,
+                        )
+                    if d_idx == 0:
+                        ax.set_ylabel(
+                            f"{VARIANT_LABELS[variant_name]}\n\nγ(h) / Variance",
+                            fontsize=10,
+                            fontweight="bold",
+                            color=variant_colors[variant_name],
+                        )
+                    else:
+                        ax.set_ylabel("γ(h) / Variance", fontsize=9, color="#8c9eb5")
+
+                    if v_idx == 3:
+                        ax.set_xlabel("Lag (pixels)", fontsize=10, color="#8c9eb5")
+
+                    ax.tick_params(
+                        axis="both", which="major", labelsize=8, colors="#8c9eb5"
+                    )
+                    ax.grid(True, alpha=0.1, color="#8c9eb5", linestyle=":")
+                    for spine in ax.spines.values():
+                        spine.set_color("#222d41")
+
+                    ax.legend(
+                        loc="lower right",
+                        fontsize=7,
+                        frameon=True,
+                        facecolor="#151b26",
+                        edgecolor="#222d41",
+                        labelcolor="#f0f4f9",
+                    )
 
             y_label_extra = " (Standardized)" if prop_key == "seismic" else ""
             fig.suptitle(
-                f"Experimental Variograms — {prop_label}{y_label_extra}",
-                fontsize=14,
+                f"Spatial Continuity Analysis: {prop_label}{y_label_extra}\nComparison of Experimental Variograms vs. Real Data",
+                fontsize=16,
                 fontweight="bold",
                 color="#f0f4f9",
-                y=0.98,
+                y=0.985,
             )
             out_path = outputs_dir / f"variogram_{prop_key}.png"
-            plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
-            plt.savefig(out_path, dpi=120, bbox_inches="tight", facecolor="#151b26")
+            plt.tight_layout(rect=(0.0, 0.02, 1.0, 0.965))
+            plt.savefig(out_path, dpi=140, bbox_inches="tight", facecolor="#151b26")
             plt.close()
-            print(f"Generated variogram plot: {out_path}")
+            print(f"Generated variogram grid plot: {out_path}")
 
     except Exception as e:
         print(f"Error generating variogram plots: {e}")
