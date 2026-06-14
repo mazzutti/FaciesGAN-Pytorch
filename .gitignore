@@ -10,11 +10,16 @@
 .pytest_cache
 **/__pycache__/**
 logs/**
+# Outputs
 outputs/**
-outputs*/**
+!outputs/experiments/
+!outputs/experiments/**/
+!outputs/experiments/**/*.png
+# Other transient output folders
+outputs_*/
+results*/**
 tools/
 scripts/
 scratch/
-results*/**
 **/events.out.tfevents*
 
