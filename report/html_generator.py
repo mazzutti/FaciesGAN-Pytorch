@@ -335,6 +335,8 @@ def generate_html_report(
             if abs(dev) < 5.0
             else ("#fbbf24" if abs(dev) < 15.0 else "#f87171")
         )
+        if abs(val) < 1e-4:
+            val = 0.0
         val_str = f"{val:.3f}"
         return f"<span style='font-family: monospace; font-size: 0.9rem;'>{val_str}</span> <span style='font-size: 0.75rem; color: {color}; font-weight: 500;'>({sign}{dev:+.2f}%)</span>"
 
@@ -370,7 +372,10 @@ def generate_html_report(
             is_std_dev = ((r["is_std"] - real_is_std) / (abs(real_is_std) + 1e-8)) * 100
             vpvs_mean_dev = ((r["vpvs_mean"] - real_vpvs_mean) / (abs(real_vpvs_mean) + 1e-8)) * 100
             vpvs_std_dev = ((r["vpvs_std"] - real_vpvs_std) / (abs(real_vpvs_std) + 1e-8)) * 100
-            seismic_mean_dev = ((r["seismic_mean"] - real_seismic_mean) / (abs(real_seismic_mean) + 1e-8)) * 100
+            if abs(real_seismic_mean) < 0.01:
+                seismic_mean_dev = ((r["seismic_mean"] - real_seismic_mean) / (real_seismic_std + 1e-8)) * 100
+            else:
+                seismic_mean_dev = ((r["seismic_mean"] - real_seismic_mean) / (abs(real_seismic_mean) + 1e-8)) * 100
             seismic_std_dev = ((r["seismic_std"] - real_seismic_std) / (abs(real_seismic_std) + 1e-8)) * 100
 
             rock_physics_stats["variants"].append(
