@@ -91,6 +91,10 @@
     @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     @media (max-width: 992px) { .layout-container { flex-direction: column; } aside { width: 100%; position: relative; top: 0; } }
     
+    /* Theme-adaptive plots */
+    body:not([data-theme='light']) .light-plot { display: none !important; }
+    body[data-theme='light'] .dark-plot { display: none !important; }
+
     /* Light theme */
     [data-theme='light'] {
       --bg-color: #f5f7fa;
@@ -261,7 +265,12 @@
                 {% for pyr in available_pyramids %}
                   <div class="tab-pane{% if loop.first %} active{% endif %}">
                     <div class="tab-print-title">{{ pyr.label }}</div>
-                    <img src="{{ pyr.rel_path }}" alt="{{ pyr.label }}" style="width: 100%; border-radius: 8px;">
+                    {% if pyr.rel_path_light %}
+                      <img src="{{ pyr.rel_path }}" alt="{{ pyr.label }}" class="dark-plot" style="width: 100%; border-radius: 8px;">
+                      <img src="{{ pyr.rel_path_light }}" alt="{{ pyr.label }}" class="light-plot" style="width: 100%; border-radius: 8px;">
+                    {% else %}
+                      <img src="{{ pyr.rel_path }}" alt="{{ pyr.label }}" style="width: 100%; border-radius: 8px;">
+                    {% endif %}
                     <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 8px;">{{ pyr.description }}</p>
                   </div>
                 {% endfor %}
@@ -332,7 +341,7 @@
             {% if use_vpvs %}
             • <strong>Vp/Vs Ratio:</strong> Key fluid and lithology indicator. Mudstone/floodplain typically exhibits higher Vp/Vs than sand reservoirs.<br>
             {% endif %}
-            • <strong>Synthetic Seismic:</strong> Simulated seismic response of the property grids. A realistic seismic reflection response confirms the geophysical consistency of the generated geological realizations.
+            • <strong>Seismic (Comp. from Ip):</strong> Simulated seismic response of the property grids. A realistic seismic reflection response confirms the geophysical consistency of the generated geological realizations.
           </div>
           {% if comparison_grids %}
             <div class="tab-container">
@@ -345,7 +354,12 @@
                 {% for grid in comparison_grids %}
                   <div class="tab-pane{% if loop.first %} active{% endif %}">
                     <div class="tab-print-title">{{ grid.label }}</div>
-                    <img src="{{ grid.rel_path }}" alt="{{ grid.label }}" style="width: 100%; border-radius: 8px;">
+                    {% if grid.rel_path_light %}
+                      <img src="{{ grid.rel_path }}" alt="{{ grid.label }}" class="dark-plot" style="width: 100%; border-radius: 8px;">
+                      <img src="{{ grid.rel_path_light }}" alt="{{ grid.label }}" class="light-plot" style="width: 100%; border-radius: 8px;">
+                    {% else %}
+                      <img src="{{ grid.rel_path }}" alt="{{ grid.label }}" style="width: 100%; border-radius: 8px;">
+                    {% endif %}
                     <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 8px;">Realization grid for {{ grid.label.lower() }}. Columns show: Real ground-truth, Wells+Seismic, Wells Only, Seismic Only, and Unconditional respectively.</p>
                   </div>
                 {% endfor %}
@@ -481,7 +495,7 @@
         {% if scorecard_table %}
           <div class="card">
             <h3 class="card-title">🏆 Variant Ranking Scorecard</h3>
-            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Composite score ranking each variant based on weighted facies RMSE (25%), Rock Physics deviations (25%), Channel Connectivity deviation (25%), and Spatial Conditioning deviation (25%). Lower is better.</p>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Composite score evaluating the quality and diversity of generated realizations. Weights: Facies Accuracy (20%), Rock Physics Match (20%), Pairwise Structural Diversity (30%), and Uncertainty Spread (Proportions + Ip) (30%). Lower is better.</p>
             <div style="overflow-x: auto;">
               <table>
                 <thead>
@@ -489,17 +503,10 @@
                     <th style="text-align: center; width: 60px;">Rank</th>
                     <th style="text-align: left;">Variant</th>
                     <th style="text-align: center;">Facies RMSE (%)</th>
-                    {% if use_ip %}
-                    <th style="text-align: center;">Ip Dev (%)</th>
-                    {% endif %}
-                    {% if use_is %}
-                    <th style="text-align: center;">Is Dev (%)</th>
-                    {% endif %}
-                    {% if use_vpvs %}
-                    <th style="text-align: center;">Vp/Vs Dev (%)</th>
-                    {% endif %}
-                    <th style="text-align: center;">Connectivity Dev (%)</th>
-                    <th style="text-align: center;">Spatial Dev (%)</th>
+                    <th style="text-align: center;">Physics Dev (%)</th>
+                    <th style="text-align: center;">Struct. Div. Penalty</th>
+                    <th style="text-align: center;">Prop. Var. Penalty</th>
+                    <th style="text-align: center;">Ip Spread Penalty</th>
                     <th style="text-align: center;">Overall Score</th>
                   </tr>
                 </thead>
@@ -509,17 +516,10 @@
                       <td style="text-align: center;"><span class="scorecard-rank">{{ row.medal }}</span></td>
                       <td style="font-weight: 600;">{{ row.label }}</td>
                       <td style="text-align: center; font-family: monospace;">{{ row.facies_rmse }}</td>
-                      {% if use_ip %}
-                      <td style="text-align: center; font-family: monospace;">{{ row.ip_dev }}</td>
-                      {% endif %}
-                      {% if use_is %}
-                      <td style="text-align: center; font-family: monospace;">{{ row.is_dev }}</td>
-                      {% endif %}
-                      {% if use_vpvs %}
-                      <td style="text-align: center; font-family: monospace;">{{ row.vpvs_dev }}</td>
-                      {% endif %}
-                      <td style="text-align: center; font-family: monospace;">{{ row.conn_dev }}</td>
-                      <td style="text-align: center; font-family: monospace;">{{ row.ssim_dev }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.rp_dev }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.pairwise_ssim_penalty|round(2) }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.variance_matching_penalty|round(2) }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.ip_spread_penalty|round(2) }}</td>
                       <td style="text-align: center;">
                         <span style="font-family: monospace; font-weight: 600;">{{ row.overall }}</span>
                         <span class="score-bar" style="width: {{ row.bar_width }}px;"></span>
@@ -530,12 +530,12 @@
               </table>
             </div>
             <div class="discussion-box" style="margin-top: 15px;">
-              <strong>Scorecard Metrics Interpretation:</strong><br>
-              • <strong>Facies RMSE (%):</strong> Root Mean Squared Error of the generated facies proportions relative to the real validation dataset. Represents how accurately the model reproduces the volumetric proportions of different geological facies (lower is better).<br>
-              • <strong>Property Dev (%):</strong> Average percentage deviation of the generated continuous properties (e.g., Acoustic Impedance) from the validation dataset mean values. Measures physical value preservation (lower is better).<br>
-              • <strong>Connectivity Dev (%):</strong> The absolute difference in the largest channel component fraction between the variant and the real validation data (expressed in percentage points). Indicates how well the main flow-path size is matched (lower is better).<br>
-              • <strong>Spatial Dev (%):</strong> Measures deviation from the conditioning target based on Structural Similarity Index Measure (SSIM), computed as <code>(1.0 - SSIM) * 100</code>. A lower value means higher conditioning fidelity (unconditional variant defaults to a 100% penalty).<br>
-              • <strong>Overall Score:</strong> A composite score computed as the weighted average of the four pillars (25% weight each). A lower score indicates a more balanced and high-fidelity realization.
+              <strong>Diversity-Focused Scorecard Metrics Interpretation:</strong><br>
+              • <strong>Facies RMSE & Physics Dev:</strong> Measures how well the mean generated properties match the global real validation statistics. Lower is better.<br>
+              • <strong>Struct. Div. Penalty:</strong> Derived from pairwise SSIM. A high penalty means generated samples look too identical (mode collapse). Lower is better.<br>
+              • <strong>Prop. Var. Penalty:</strong> Checks if the standard deviation of facies proportions across realizations matches the natural geological variation seen in real data. Lower is better.<br>
+              • <strong>Ip Spread Penalty:</strong> Ensures that Ip (and other continuous properties) fluctuate reasonably across realizations, representing realistic geological uncertainty rather than deterministic output. Lower is better.<br>
+              • <strong>Overall Score:</strong> A composite score computed as the weighted average of the penalties. A lower score indicates a more balanced, high-fidelity, and sufficiently diverse realization set.
             </div>
           </div>
         {% endif %}
@@ -681,7 +681,12 @@
                               {% for path in var.losses.g %}
                                 <div class="image-card">
                                   <div class="image-title">{{ path.label }}</div>
-                                  <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                                  {% if path.rel_path_light %}
+                                    <img src="{{ path.rel_path }}" alt="{{ path.label }}" class="dark-plot">
+                                    <img src="{{ path.rel_path_light }}" alt="{{ path.label }}" class="light-plot">
+                                  {% else %}
+                                    <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                                  {% endif %}
                                 </div>
                               {% endfor %}
                             </div>
@@ -693,7 +698,12 @@
                               {% for path in var.losses.d %}
                                 <div class="image-card">
                                   <div class="image-title">{{ path.label }}</div>
-                                  <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                                  {% if path.rel_path_light %}
+                                    <img src="{{ path.rel_path }}" alt="{{ path.label }}" class="dark-plot">
+                                    <img src="{{ path.rel_path_light }}" alt="{{ path.label }}" class="light-plot">
+                                  {% else %}
+                                    <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                                  {% endif %}
                                 </div>
                               {% endfor %}
                             </div>
@@ -714,7 +724,12 @@
                         {% for path in loss_list %}
                           <div class="image-card">
                             <div class="image-title">{{ path.label }}</div>
-                            <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                            {% if path.rel_path_light %}
+                              <img src="{{ path.rel_path }}" alt="{{ path.label }}" class="dark-plot">
+                              <img src="{{ path.rel_path_light }}" alt="{{ path.label }}" class="light-plot">
+                            {% else %}
+                              <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                            {% endif %}
                           </div>
                         {% endfor %}
                       </div>
@@ -728,7 +743,12 @@
                 <details style="margin-bottom: 20px;">
                   <summary style="font-size: 0.95rem; font-weight: 600; color: var(--accent); cursor: pointer;">🏢 View Multi-Scale Generated Realizations</summary>
                   <div style="margin-top: 15px;">
-                    <img src="{{ var.pyramid_overview }}" alt="Pyramid Overview" style="width: 100%; border-radius: 8px;">
+                    {% if var.pyramid_overview_light %}
+                      <img src="{{ var.pyramid_overview }}" alt="Pyramid Overview" class="dark-plot" style="width: 100%; border-radius: 8px;">
+                      <img src="{{ var.pyramid_overview_light }}" alt="Pyramid Overview" class="light-plot" style="width: 100%; border-radius: 8px;">
+                    {% else %}
+                      <img src="{{ var.pyramid_overview }}" alt="Pyramid Overview" style="width: 100%; border-radius: 8px;">
+                    {% endif %}
                   </div>
                 </details>
               {% endif %}
@@ -803,7 +823,12 @@
                             {% for method in proj.methods %}
                               <div class="projection-card">
                                 <div class="image-title">{{ method.label }}</div>
-                                <img src="{{ method.rel_path }}" alt="{{ method.label }}">
+                                {% if method.rel_path_light %}
+                                  <img src="{{ method.rel_path }}" alt="{{ method.label }}" class="dark-plot">
+                                  <img src="{{ method.rel_path_light }}" alt="{{ method.label }}" class="light-plot">
+                                {% else %}
+                                  <img src="{{ method.rel_path }}" alt="{{ method.label }}">
+                                {% endif %}
                               </div>
                             {% endfor %}
                           </div>
@@ -888,7 +913,12 @@
                                 {% for img in method.images %}
                                   <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
                                     <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">{{ img.label }}</div>
-                                    <img src="{{ img.rel_path }}" alt="{{ img.label }}" style="width: 100%; max-width: 500px; display: inline-block; border-radius: 8px;">
+                                    {% if img.rel_path_light %}
+                                      <img src="{{ img.rel_path }}" alt="{{ img.label }}" class="dark-plot" style="width: 100%; max-width: 500px; display: inline-block; border-radius: 8px;">
+                                      <img src="{{ img.rel_path_light }}" alt="{{ img.label }}" class="light-plot" style="width: 100%; max-width: 500px; display: inline-block; border-radius: 8px;">
+                                    {% else %}
+                                      <img src="{{ img.rel_path }}" alt="{{ img.label }}" style="width: 100%; max-width: 500px; display: inline-block; border-radius: 8px;">
+                                    {% endif %}
                                   </div>
                                 {% endfor %}
                               </div>
@@ -903,7 +933,12 @@
                           {% else %}
                             <div style="background-color: rgba(0,0,0,0.15); border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; text-align: center;">
                               <div class="image-title">Final Grid</div>
-                              <img src="{{ method.images[0].rel_path }}" alt="Final Grid" style="max-width: 50%; min-width: 260px; border-radius: 4px;">
+                              {% if method.images[0].rel_path_light %}
+                                <img src="{{ method.images[0].rel_path }}" alt="Final Grid" class="dark-plot" style="max-width: 50%; min-width: 260px; border-radius: 4px; display: inline-block;">
+                                <img src="{{ method.images[0].rel_path_light }}" alt="Final Grid" class="light-plot" style="max-width: 50%; min-width: 260px; border-radius: 4px; display: inline-block;">
+                              {% else %}
+                                <img src="{{ method.images[0].rel_path }}" alt="Final Grid" style="max-width: 50%; min-width: 260px; border-radius: 4px;">
+                              {% endif %}
                             </div>
                           {% endif %}
                         </div>
@@ -937,7 +972,12 @@
                 {% for dist in distribution_analysis %}
                   <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
                     <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">Property: {{ dist.label }}</div>
-                    <img src="{{ dist.rel_path }}" alt="{{ dist.label }}" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+                    {% if dist.rel_path_light %}
+                      <img src="{{ dist.rel_path }}" alt="{{ dist.label }}" class="dark-plot" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+                      <img src="{{ dist.rel_path_light }}" alt="{{ dist.label }}" class="light-plot" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+                    {% else %}
+                      <img src="{{ dist.rel_path }}" alt="{{ dist.label }}" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+                    {% endif %}
                   </div>
                 {% endfor %}
               </div>
@@ -951,7 +991,12 @@
             </div>
           {% elif distribution_analysis|length == 1 %}
             <div style="text-align: center; margin-top: 15px;">
-              <img src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+              {% if distribution_analysis[0].rel_path_light %}
+                <img src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" class="dark-plot" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+                <img src="{{ distribution_analysis[0].rel_path_light }}" alt="{{ distribution_analysis[0].label }}" class="light-plot" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+              {% else %}
+                <img src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+              {% endif %}
             </div>
           {% else %}
             <p style="color: var(--text-muted);">Distribution histograms not available.</p>
@@ -984,7 +1029,12 @@
                 {% for var_plot in spatial_continuity %}
                   <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
                     <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">Property: {{ var_plot.label }}</div>
-                    <img src="{{ var_plot.rel_path }}" alt="{{ var_plot.label }}" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                    {% if var_plot.rel_path_light %}
+                      <img src="{{ var_plot.rel_path }}" alt="{{ var_plot.label }}" class="dark-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                      <img src="{{ var_plot.rel_path_light }}" alt="{{ var_plot.label }}" class="light-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                    {% else %}
+                      <img src="{{ var_plot.rel_path }}" alt="{{ var_plot.label }}" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                    {% endif %}
                   </div>
                 {% endfor %}
               </div>
@@ -998,7 +1048,12 @@
             </div>
           {% elif spatial_continuity|length == 1 %}
             <div style="text-align: center; margin-top: 15px;">
-              <img src="{{ spatial_continuity[0].rel_path }}" alt="{{ spatial_continuity[0].label }}" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+              {% if spatial_continuity[0].rel_path_light %}
+                <img src="{{ spatial_continuity[0].rel_path }}" alt="{{ spatial_continuity[0].label }}" class="dark-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                <img src="{{ spatial_continuity[0].rel_path_light }}" alt="{{ spatial_continuity[0].label }}" class="light-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+              {% else %}
+                <img src="{{ spatial_continuity[0].rel_path }}" alt="{{ spatial_continuity[0].label }}" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+              {% endif %}
             </div>
           {% else %}
             <p style="color: var(--text-muted);">Variogram plots not available.</p>

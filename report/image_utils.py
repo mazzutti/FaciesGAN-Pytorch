@@ -8,7 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from report.constants import VARIANT_LABELS, VARIANTS
-from report.utils import get_denormalize_fn, smooth
+from report.utils import get_denormalize_fn, smooth, save_dual_theme_plot
 
 
 def ensure_seismic_images(data_dir: Path) -> None:
@@ -171,7 +171,7 @@ def ensure_well_images(data_dir: Path) -> None:
         print(f"Error generating well crossline images: {e}")
 
 
-def ensure_pyramid_images(outputs_dir: Path) -> None:
+def ensure_pyramid_images(outputs_dir: Path, data_dir: Path) -> None:
     """Generate composite pyramid visualizations showing all scales for each variant."""
     try:
         import matplotlib.pyplot as plt
@@ -179,6 +179,8 @@ def ensure_pyramid_images(outputs_dir: Path) -> None:
     except ImportError:
         return
     plt = cast(Any, plt)
+
+    dataset_cache: Any = None
 
     for variant in VARIANTS:
         variant_dir = outputs_dir / variant
@@ -189,7 +191,7 @@ def ensure_pyramid_images(outputs_dir: Path) -> None:
 
         # Load option parameters from options.json for this variant
         options_path = variant_dir / "options.json"
-        use_ip, use_is, use_vpvs = True, True, True
+        use_ip, use_is, use_vpvs, use_seismic_cond = True, True, True, False
         if options_path.exists():
             try:
                 with open(options_path, encoding="utf-8") as f:
@@ -197,23 +199,24 @@ def ensure_pyramid_images(outputs_dir: Path) -> None:
                     use_ip = opt_dict.get("use_ip", True)
                     use_is = opt_dict.get("use_is", True)
                     use_vpvs = opt_dict.get("use_vpvs", True)
+                    use_seismic_cond = opt_dict.get("use_seismic", False)
             except Exception:
                 pass
 
         properties = ["Facies"]
-        prop_labels = ["Facies"]
+        prop_labels = ["Facies (Generated)"]
         if use_ip:
             properties.append("Ip")
-            prop_labels.append("Ip")
+            prop_labels.append("Ip (Generated)")
         if use_is:
             properties.append("Is")
-            prop_labels.append("Is")
+            prop_labels.append("Is (Generated)")
         if use_vpvs:
             properties.append("VpVs")
-            prop_labels.append("Vp/Vs")
+            prop_labels.append("Vp/Vs (Generated)")
         if use_ip:  # seismic requires Ip
             properties.append("Seismic")
-            prop_labels.append("Seismic")
+            prop_labels.append("Seismic (Comp. from Ip)")
 
         # Discover available scales
         scale_dirs = sorted(
@@ -258,6 +261,17 @@ def ensure_pyramid_images(outputs_dir: Path) -> None:
         if not all_exist:
             continue
 
+        if use_seismic_cond and dataset_cache is None:
+            import torch
+            from datasets.dataset import PyramidsDataset
+            from options import TrainingOptions
+            opt = TrainingOptions()
+            opt.input_path = str(data_dir)
+            opt.use_rock_physics = True
+            opt.use_seismic = True
+            opt.use_wells = True
+            dataset_cache = PyramidsDataset(opt)
+
         # Build composite figure: rows = properties, cols = scales
         fig, axes = plt.subplots(
             len(properties),
@@ -270,23 +284,45 @@ def ensure_pyramid_images(outputs_dir: Path) -> None:
         for row, (prop, prop_label) in enumerate(zip(properties, prop_labels)):
             for col in range(num_scales):
                 ax = axes[row, col]
-                viz_dir = variant_dir / "training_visualizations" / f"Scale_{col}"
-                img_path = viz_dir / f"{prop}_epoch_{final_epoch:05d}.png"
-                img = Image.open(img_path)
-                ax.imshow(img)
+                if prop == "Seismic_Cond":
+                    _, _, _, seismic_batch = dataset_cache.get_scale_data(col)
+                    if seismic_batch is not None and seismic_batch.shape[0] > 0:
+                        s = seismic_batch[0].cpu().numpy()
+                        if s.ndim == 3:
+                            s = s[0]
+                        s_plot = s - np.mean(s)
+                        p_lo = float(np.percentile(s_plot, 2))
+                        p_hi = float(np.percentile(s_plot, 98))
+                        max_abs = max(abs(p_lo), abs(p_hi), 1e-6)
+                        ax.imshow(s_plot, cmap="RdBu", vmin=-max_abs, vmax=max_abs)
+                else:
+                    viz_dir = variant_dir / "training_visualizations" / f"Scale_{col}"
+                    img_path = viz_dir / f"{prop}_epoch_{final_epoch:05d}.png"
+                    if img_path.exists():
+                        img = Image.open(img_path)
+                        ax.imshow(img)
+                
                 ax.set_xticks([])
                 ax.set_yticks([])
                 ax.set_facecolor("#111622")
                 for spine in ax.spines.values():
                     spine.set_visible(False)
                 if row == 0:
-                    w, h = img.size
-                    ax.set_title(
-                        f"Scale {col}\n({w}×{h})",
-                        fontsize=10,
-                        fontweight="bold",
-                        color="#f0f4f9",
-                    )
+                    if prop != "Seismic_Cond" and img_path.exists():
+                        w, h = img.size
+                        ax.set_title(
+                            f"Scale {col}\n({w}×{h})",
+                            fontsize=10,
+                            fontweight="bold",
+                            color="#f0f4f9",
+                        )
+                    else:
+                        ax.set_title(
+                            f"Scale {col}",
+                            fontsize=10,
+                            fontweight="bold",
+                            color="#f0f4f9",
+                        )
                 if col == 0:
                     ax.set_ylabel(
                         prop_label,
@@ -305,12 +341,7 @@ def ensure_pyramid_images(outputs_dir: Path) -> None:
             color="#f0f4f9",
         )
         plt.tight_layout()
-        plt.savefig(  # type: ignore
-            out_path,
-            dpi=120,
-            bbox_inches="tight",
-            facecolor="#151b26",
-        )
+        save_dual_theme_plot(fig, axes, out_path, dpi=120)
         plt.close()
         print(f"Generated pyramid overview: {out_path}")
 
@@ -363,20 +394,20 @@ def ensure_training_pyramid_image(outputs_dir: Path, data_dir: Path) -> None:
         use_vpvs = getattr(opt, "use_vpvs", True)
 
         active_props = ["Facies"]
-        prop_labels = ["Facies (Real)"]
+        prop_labels = ["Facies (Ground Truth)"]
         if use_ip:
             active_props.append("Ip")
-            prop_labels.append("Ip")
+            prop_labels.append("Ip (Ground Truth)")
         if use_is:
             active_props.append("Is")
-            prop_labels.append("Is")
+            prop_labels.append("Is (Ground Truth)")
         if use_vpvs:
             active_props.append("Vp/Vs")
-            prop_labels.append("Vp/Vs")
+            prop_labels.append("Vp/Vs (Ground Truth)")
         active_props.append("Wells")
-        prop_labels.append("Wells")
+        prop_labels.append("Wells (Input Cond.)")
         active_props.append("Seismic")
-        prop_labels.append("Seismic")
+        prop_labels.append("Seismic (Input Cond.)")
 
         num_rows = len(active_props)
 
@@ -497,12 +528,7 @@ def ensure_training_pyramid_image(outputs_dir: Path, data_dir: Path) -> None:
             color="#f0f4f9",
         )
         plt.tight_layout()
-        plt.savefig(  # type: ignore
-            out_path,
-            dpi=120,
-            bbox_inches="tight",
-            facecolor="#151b26",
-        )
+        save_dual_theme_plot(fig, axes, out_path, dpi=120)
         plt.close()
         print(f"Generated training pyramid samples: {out_path}")
     except Exception as e:
@@ -636,12 +662,7 @@ def ensure_rock_physics_crossplots(outputs_dir: Path, data_dir: Path) -> None:
 
             out_path = outputs_dir / out_filename
             plt.tight_layout()
-            plt.savefig(  # type: ignore
-                out_path,
-                dpi=120,
-                bbox_inches="tight",
-                facecolor="#151b26",
-            )
+            save_dual_theme_plot(fig, ax, out_path, dpi=120)
             plt.close()
             print(f"Generated individual rock physics plot: {out_path}")
 
@@ -728,7 +749,7 @@ def ensure_rock_physics_crossplots(outputs_dir: Path, data_dir: Path) -> None:
                     spine.set_color("#222d41")
                 out_path = outputs_dir / out_file
                 plt.tight_layout()
-                plt.savefig(out_path, dpi=120, bbox_inches="tight", facecolor="#151b26")
+                save_dual_theme_plot(fig, ax, out_path, dpi=120)
                 plt.close()
                 print(f"Generated placeholder rock physics plot: {out_path}")
 
@@ -856,7 +877,7 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
             properties.append(("vpvs", "Vp/Vs Ratio", real_vpvs_arr))
         if getattr(opt, "use_ip", True) and real_seismic_arr is not None:
             properties.append(
-                ("seismic", "Synthetic Seismic Amplitude", real_seismic_arr)
+                ("seismic", "Seismic (Comp. from Ip)", real_seismic_arr)
             )
 
         facies_labels = ["Floodplain", "Point Bar", "Channel", "Boundary"]
@@ -964,7 +985,7 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
 
             out_path = outputs_dir / f"distribution_hist_{prop_key}.png"
             plt.tight_layout()
-            plt.savefig(out_path, dpi=120, bbox_inches="tight", facecolor="#151b26")
+            save_dual_theme_plot(fig, ax, out_path, dpi=120)
             plt.close()
             print(f"Generated distribution histogram: {out_path}")
 
@@ -1242,7 +1263,7 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
             )
             out_path = outputs_dir / f"variogram_{prop_key}.png"
             plt.tight_layout(rect=(0.0, 0.02, 1.0, 0.965))
-            plt.savefig(out_path, dpi=140, bbox_inches="tight", facecolor="#151b26")
+            save_dual_theme_plot(fig, axes, out_path, dpi=140)
             plt.close()
             print(f"Generated variogram grid plot: {out_path}")
 
@@ -1323,7 +1344,7 @@ def ensure_loss_plots(outputs_dir: Path) -> None:
                 ax.set_ylabel("Loss Value", fontsize=9, color="#8c9eb5")  # type: ignore[reportUnknownMemberType]
 
                 plt.tight_layout()
-                plt.savefig(out_path, dpi=120, bbox_inches="tight", facecolor="#151b26")  # type: ignore[reportUnknownMemberType]
+                save_dual_theme_plot(fig, ax, out_path, dpi=120)
                 plt.close()
         except Exception as e:
             print(f"Error generating loss plots for {variant}: {e}")

@@ -114,11 +114,17 @@ def generate_html_report(
 
     # Compute robust variant scorecard
     scorecard: dict[str, dict[str, float]] = {}
+    real_prop_std = float(quant.get("real_proportion_std", 0.05))
+
     for var in VARIANTS:
         if var not in results:
             continue
         r = results[var]
-        # Calculate deviations for the scorecard
+        
+        # 1. Facies Realism: RMSE of facies proportions
+        facies_rmse = float(r["rmse_error"]) * 100
+
+        # 2. Physical Consistency: IP deviation from real validation mean
         ip_dev = (
             abs(((r["ip_mean"] - real_ip_mean) / real_ip_mean) * 100) if use_ip else 0.0
         )
@@ -130,19 +136,7 @@ def generate_html_report(
             if use_vpvs
             else 0.0
         )
-        facies_rmse = float(r["rmse_error"]) * 100
 
-        # Channel Connectivity Deviation (largest connected component fraction difference)
-        real_conn = channel_connectivity.get("Real", {}).get("largest_frac", 1.0)
-        var_conn = channel_connectivity.get(var, {}).get("largest_frac", 0.0)
-        conn_dev = abs(real_conn - var_conn) * 100
-
-        # Spatial Conditioning Fidelity (SSIM deviation from 1.0)
-        # For unconditional, avg_ssim is 0, giving a 100% ssim_dev penalty.
-        ssim_val = float(r.get("avg_ssim", 0.0))
-        ssim_dev = (1.0 - ssim_val) * 100
-
-        # Weighted score (lower is better, each of the 4 pillars has a 25% weight)
         active_rp_count = sum([use_ip, use_is, use_vpvs])
         if active_rp_count > 0:
             rp_dev = (
@@ -153,20 +147,41 @@ def generate_html_report(
         else:
             rp_dev = 0.0
 
+        # 3. Structural Diversity: Pairwise SSIM (Lower means more diverse structure, so we penalize high similarity)
+        # Assuming avg SSIM ranges 0-1, penalty is proportional to how similar they are.
+        # So a pairwise SSIM of 1.0 (identical) gives 100% penalty.
+        pairwise_ssim_penalty = float(r.get("pairwise_ssim_mean", 1.0)) * 100
+
+        # 4. Facies Variance Matching: Difference between generated proportion variance and real proportion variance
+        prop_std = float(r.get("proportion_std", 0.0))
+        # We penalize the absolute difference in standard deviation (scaled roughly)
+        variance_matching_penalty = abs(prop_std - real_prop_std) * 1000  # scaled for visibility
+
+        # 5. Uncertainty Spread (Ip): We want higher variance across realizations
+        ip_realization_std = float(r.get("ip_realization_std_mean", 0.0))
+        # We penalize low spread. We compare it to the global real_ip_std.
+        ip_spread_penalty = max(0.0, (1.0 - (ip_realization_std / (real_ip_std + 1e-8))) * 100)
+
+        # Weighted score (lower is better)
+        # New Diversity Focus:
+        # Facies Realism (20%)
+        # Physical Consistency (20%)
+        # Structural Diversity (30%)
+        # Uncertainty Spread (Variance Matching + Ip Spread) (30%)
         overall = (
-            (facies_rmse * 0.25)
-            + (rp_dev * 0.25)
-            + (conn_dev * 0.25)
-            + (ssim_dev * 0.25)
+            (facies_rmse * 0.20)
+            + (rp_dev * 0.20)
+            + (pairwise_ssim_penalty * 0.30)
+            + (variance_matching_penalty * 0.15)
+            + (ip_spread_penalty * 0.15)
         )
 
         scorecard[var] = {
             "facies_rmse": facies_rmse,
-            "ip_dev": ip_dev,
-            "is_dev": is_dev,
-            "vpvs_dev": vpvs_dev,
-            "conn_dev": conn_dev,
-            "ssim_dev": ssim_dev,
+            "rp_dev": rp_dev,
+            "pairwise_ssim_penalty": pairwise_ssim_penalty,
+            "variance_matching_penalty": variance_matching_penalty,
+            "ip_spread_penalty": ip_spread_penalty,
             "overall": overall,
         }
 
@@ -211,13 +226,17 @@ def generate_html_report(
             )
 
     # 3. Available training pyramids
-    available_pyramids: list[dict[str, str]] = []
+    available_pyramids: list[dict[str, Any]] = []
     gt_path = outputs_dir / "training_pyramid_samples.png"
     if gt_path.exists():
+        gt_light = gt_path.with_name(gt_path.stem + "_light" + gt_path.suffix)
         available_pyramids.append(
             {
                 "label": "Ground Truth (Real)",
                 "rel_path": md_relpath(gt_path, report_dir),
+                "rel_path_light": (
+                    md_relpath(gt_light, report_dir) if gt_light.exists() else None
+                ),
                 "description": "Dataset overview showing actual real samples at each scale.",
             }
         )
@@ -225,10 +244,18 @@ def generate_html_report(
         pyramid_path = outputs_dir / variant / "pyramid_overview.png"
         if pyramid_path.exists():
             label = VARIANT_LABELS[variant]
+            pyramid_light = pyramid_path.with_name(
+                pyramid_path.stem + "_light" + pyramid_path.suffix
+            )
             available_pyramids.append(
                 {
                     "label": label,
                     "rel_path": md_relpath(pyramid_path, report_dir),
+                    "rel_path_light": (
+                        md_relpath(pyramid_light, report_dir)
+                        if pyramid_light.exists()
+                        else None
+                    ),
                     "description": f"Composite visualization showing generated realizations at all scales for the {label.lower()} variant.",
                 }
             )
@@ -290,19 +317,25 @@ def generate_html_report(
         ("vp_vs", "Vp/Vs Ratio", "vp_vs_comparison_all_variants.png"),
         (
             "seismic",
-            "Synthetic Seismic Amplitude",
+            "Synthetic Seismic comp. from Ip",
             "seismic_comparison_all_variants.png",
         ),
     ]
-    comparison_grids: list[dict[str, str]] = []
+    comparison_grids: list[dict[str, Any]] = []
     for key, label, filename in grids:
         img_path = outputs_dir / filename
         if img_path.exists():
+            light_path = img_path.with_name(img_path.stem + "_light" + img_path.suffix)
             comparison_grids.append(
                 {
                     "key": key,
                     "label": label,
                     "rel_path": md_relpath(img_path, report_dir),
+                    "rel_path_light": (
+                        md_relpath(light_path, report_dir)
+                        if light_path.exists()
+                        else None
+                    ),
                 }
             )
 
@@ -406,11 +439,10 @@ def generate_html_report(
                     "medal": medal,
                     "label": VARIANT_LABELS[var],
                     "facies_rmse": f"{sc['facies_rmse']:.2f}",
-                    "ip_dev": f"{sc['ip_dev']:.2f}",
-                    "is_dev": f"{sc['is_dev']:.2f}",
-                    "vpvs_dev": f"{sc['vpvs_dev']:.2f}",
-                    "conn_dev": f"{sc['conn_dev']:.2f}",
-                    "ssim_dev": f"{sc['ssim_dev']:.2f}",
+                    "rp_dev": f"{sc['rp_dev']:.2f}",
+                    "pairwise_ssim_penalty": sc['pairwise_ssim_penalty'],
+                    "variance_matching_penalty": sc['variance_matching_penalty'],
+                    "ip_spread_penalty": sc['ip_spread_penalty'],
                     "overall": f"{sc['overall']:.2f}",
                     "bar_width": bar_width,
                     "is_first": rank == 1,
@@ -528,7 +560,7 @@ def generate_html_report(
         kinds.append(("is", "Shear Impedance (Is)"))
     if use_vpvs:
         kinds.append(("vp_vs", "Vp/Vs Ratio"))
-    kinds.append(("seismic", "Synthetic Seismic"))
+    kinds.append(("seismic", "Seismic (Comp. from Ip)"))
 
     variant_details: list[dict[str, Any]] = []
     for var in VARIANTS:
@@ -545,27 +577,45 @@ def generate_html_report(
             var_data["losses"] = {
                 "has_g": len(loss_paths_g) > 0,
                 "has_d": len(loss_paths_d) > 0,
-                "g": [
-                    {
-                        "label": path.stem.replace("loss_", "").replace("_", " "),
-                        "rel_path": md_relpath(path, report_dir),
-                    }
-                    for path in loss_paths_g
-                ],
-                "d": [
-                    {
-                        "label": path.stem.replace("loss_", "").replace("_", " "),
-                        "rel_path": md_relpath(path, report_dir),
-                    }
-                    for path in loss_paths_d
-                ],
+                "g": [],
+                "d": [],
             }
+            for path in loss_paths_g:
+                light = path.with_name(path.stem + "_light" + path.suffix)
+                var_data["losses"]["g"].append(
+                    {
+                        "label": path.stem.replace("loss_", "").replace("_", " "),
+                        "rel_path": md_relpath(path, report_dir),
+                        "rel_path_light": (
+                            md_relpath(light, report_dir) if light.exists() else None
+                        ),
+                    }
+                )
+            for path in loss_paths_d:
+                light = path.with_name(path.stem + "_light" + path.suffix)
+                var_data["losses"]["d"].append(
+                    {
+                        "label": path.stem.replace("loss_", "").replace("_", " "),
+                        "rel_path": md_relpath(path, report_dir),
+                        "rel_path_light": (
+                            md_relpath(light, report_dir) if light.exists() else None
+                        ),
+                    }
+                )
+
             # Multi-scale pyramid
             pyramid_path = variant_dir / "pyramid_overview.png"
             if pyramid_path.exists():
                 var_data["pyramid_overview"] = md_relpath(pyramid_path, report_dir)
+                light = pyramid_path.with_name(
+                    pyramid_path.stem + "_light" + pyramid_path.suffix
+                )
+                var_data["pyramid_overview_light"] = (
+                    md_relpath(light, report_dir) if light.exists() else None
+                )
             else:
                 var_data["pyramid_overview"] = None
+                var_data["pyramid_overview_light"] = None
 
             # Gallery evolution
             scale_dirs = [
@@ -655,14 +705,22 @@ def generate_html_report(
             if gen_dir.exists():
                 for key, label in kinds:
                     suffix = f"_{key}" if key != "facies" else ""
-                    available_methods: list[dict[str, str]] = []
+                    available_methods: list[dict[str, Any]] = []
                     for m in EMBEDDING_METHODS:
                         img_path = gen_dir / f"{m}{suffix}_comparison.png"
                         if img_path.exists():
+                            light = img_path.with_name(
+                                img_path.stem + "_light" + img_path.suffix
+                            )
                             available_methods.append(
                                 {
                                     "label": EMBEDDING_LABELS[m],
                                     "rel_path": md_relpath(img_path, report_dir),
+                                    "rel_path_light": (
+                                        md_relpath(light, report_dir)
+                                        if light.exists()
+                                        else None
+                                    ),
                                 }
                             )
                     if available_methods:
@@ -690,13 +748,20 @@ def generate_html_report(
                     except ValueError:
                         continue
             if epoch_map:
-                epochs_list: list[dict[str, str]] = []
+                epochs_list: list[dict[str, Any]] = []
                 for epoch in sorted(epoch_map.keys()):
                     display_epoch = epoch - 1 if epoch == 10000 else epoch
+                    img_path = epoch_map[epoch]
+                    light = img_path.with_name(
+                        img_path.stem + "_light" + img_path.suffix
+                    )
                     epochs_list.append(
                         {
                             "label": f"Epoch {display_epoch}",
-                            "rel_path": md_relpath(epoch_map[epoch], report_dir),
+                            "rel_path": md_relpath(img_path, report_dir),
+                            "rel_path_light": (
+                                md_relpath(light, report_dir) if light.exists() else None
+                            ),
                         }
                     )
                 method_data.append(
@@ -711,6 +776,9 @@ def generate_html_report(
                     outputs_dir / f"{method}_{key}_comparison_all_variants.png"
                 )
                 if fallback_path.exists():
+                    light = fallback_path.with_name(
+                        fallback_path.stem + "_light" + fallback_path.suffix
+                    )
                     method_data.append(
                         {
                             "method_label": EMBEDDING_LABELS[method],
@@ -719,6 +787,11 @@ def generate_html_report(
                                 {
                                     "label": "Final Grid",
                                     "rel_path": md_relpath(fallback_path, report_dir),
+                                    "rel_path_light": (
+                                        md_relpath(light, report_dir)
+                                        if light.exists()
+                                        else None
+                                    ),
                                 }
                             ],
                         }
@@ -737,14 +810,21 @@ def generate_html_report(
         dist_plots.append(("distribution_hist_is.png", "Shear Impedance (Is)"))
     if use_vpvs:
         dist_plots.append(("distribution_hist_vpvs.png", "Vp/Vs Ratio"))
-    dist_plots.append(("distribution_hist_seismic.png", "Synthetic Seismic Amplitude"))
+    dist_plots.append(("distribution_hist_seismic.png", "Synthetic Seismic comp. from Ip"))
 
-    distribution_analysis: list[dict[str, str]] = []
+    distribution_analysis: list[dict[str, Any]] = []
     for filename, label in dist_plots:
         img_path = outputs_dir / filename
         if img_path.exists():
+            light = img_path.with_name(img_path.stem + "_light" + img_path.suffix)
             distribution_analysis.append(
-                {"label": label, "rel_path": md_relpath(img_path, report_dir)}
+                {
+                    "label": label,
+                    "rel_path": md_relpath(img_path, report_dir),
+                    "rel_path_light": (
+                        md_relpath(light, report_dir) if light.exists() else None
+                    ),
+                }
             )
 
     # 11. Spatial Continuity variograms
@@ -756,14 +836,21 @@ def generate_html_report(
         var_plots.append(("variogram_is.png", "Shear Impedance (Is)"))
     if use_vpvs:
         var_plots.append(("variogram_vp_vs.png", "Vp/Vs Ratio"))
-    var_plots.append(("variogram_seismic.png", "Synthetic Seismic"))
+    var_plots.append(("variogram_seismic.png", "Synthetic Seismic comp. from Ip"))
 
-    spatial_continuity: list[dict[str, str]] = []
+    spatial_continuity: list[dict[str, Any]] = []
     for filename, label in var_plots:
         img_path = outputs_dir / filename
         if img_path.exists():
+            light = img_path.with_name(img_path.stem + "_light" + img_path.suffix)
             spatial_continuity.append(
-                {"label": label, "rel_path": md_relpath(img_path, report_dir)}
+                {
+                    "label": label,
+                    "rel_path": md_relpath(img_path, report_dir),
+                    "rel_path_light": (
+                        md_relpath(light, report_dir) if light.exists() else None
+                    ),
+                }
             )
 
     # 12. Performance Table

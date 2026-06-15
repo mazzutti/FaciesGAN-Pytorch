@@ -28,6 +28,10 @@ class VariantQuantResult(TypedDict):
     vpvs_std: float
     seismic_mean: float
     seismic_std: float
+    # New diversity metrics
+    pairwise_ssim_mean: float
+    proportion_std: float
+    ip_realization_std_mean: float
 
 
 class QuantitativeResults(TypedDict):
@@ -41,6 +45,8 @@ class QuantitativeResults(TypedDict):
     real_vpvs_std: float
     real_seismic_mean: float
     real_seismic_std: float
+    # Real baseline for variance matching
+    real_proportion_std: float
 
 
 ConnectivityMetrics = dict[str, dict[str, float]]
@@ -76,26 +82,19 @@ def _compute_ssim(img1: np.ndarray, img2: np.ndarray) -> float:
 def compute_quantitative_results(
     outputs_dir: Path, data_dir: Path
 ) -> QuantitativeResults:
-    """Compute facies proportions, rock physics stats, and RMSE for all variants."""
-    real_facies_proportions = [0.6782, 0.1197, 0.1447, 0.0574]  # default fallback
+    """Compute facies proportions, rock physics stats, RMSE, and diversity metrics for all variants from cached dataset."""
+    
+    # Default fallbacks in case dataset fails to load
+    real_facies_proportions = [0.6782, 0.1197, 0.1447, 0.0574]
+    real_proportion_std = 0.05
     real_indices_list: list[np.ndarray] = []
-    real_images_path = data_dir / "facies/facies_images.npz"
-    if real_images_path.exists():
-        try:
-            with np.load(real_images_path) as data:
-                if "images" in data:
-                    images = data["images"]
-                    indices = np.zeros(images.shape[:-1], dtype=np.int32)
-                    indices[images[..., 0] == 255] = 1
-                    indices[images[..., 2] == 255] = 2
-                    indices[images[..., 1] == 255] = 3
-                    counts = np.bincount(indices.flatten(), minlength=4)
-                    real_facies_proportions = (counts / counts.sum()).tolist()
-        except Exception:
-            pass
 
-    # Load real indices from the dataset at the finest scale (e.g., 256x256)
-    # to match the shape of the generated facies images.
+    real_ip_mean, real_ip_std = 7335.7, 1213.3
+    real_is_mean, real_is_std = 3863.8, 534.0
+    real_vpvs_mean, real_vpvs_std = 1.895, 0.151
+    real_seismic_mean, real_seismic_std = 0.0, 0.118
+
+    # Load everything exclusively from the cached PyramidsDataset
     try:
         import torch
         import utils
@@ -120,82 +119,114 @@ def compute_quantitative_results(
         dataset = PyramidsDataset(opt)
         num_scales = len(dataset.scales)
         num_facies_ch = opt.num_facies_channels
+        use_ip = getattr(opt, "use_ip", True)
+        use_is = getattr(opt, "use_is", True)
+        use_vpvs = getattr(opt, "use_vpvs", True)
 
-        facies_batch, _, _, _ = dataset.get_scale_data(num_scales - 1)
-        for i in range(min(10, facies_batch.shape[0])):
+        # Get all data at the finest scale
+        facies_batch, _, _, seismic_batch = dataset.get_scale_data(num_scales - 1)
+        
+        # --- 1. Compute Facies Proportions and Variance from Cache ---
+        real_proportions_list: list[list[float]] = []
+        all_indices = []
+        
+        for i in range(facies_batch.shape[0]):
             f_tensor = facies_batch[i].cpu()
             if num_facies_ch == 3:
                 field = utils.rgb_to_facies(f_tensor[:3]).astype(np.int32)
             else:
                 field = torch.argmax(f_tensor[:num_facies_ch], dim=0).numpy().astype(np.int32)
-            real_indices_list.append(field)
+            
+            if i < 50: # save some for SSIM
+                real_indices_list.append(field)
+                
+            all_indices.append(field)
+            counts = np.bincount(field.flatten(), minlength=4)
+            real_proportions_list.append((counts / counts.sum()).tolist())
+
+        if all_indices:
+            counts_all = np.bincount(np.concatenate([f.flatten() for f in all_indices]), minlength=4)
+            real_facies_proportions = (counts_all / counts_all.sum()).tolist()
+            
+        if real_proportions_list:
+            props_arr = np.array(real_proportions_list)
+            real_proportion_std = float(np.mean(np.std(props_arr, axis=0)))
+
+        # --- 2. Compute Rock Physics Stats from Cache ---
+        denormalize = get_denormalize_fn(data_dir)
+        
+        # Channel indices offset by the number of facies channels
+        ch_idx = num_facies_ch
+        
+        if use_ip and facies_batch.shape[1] > ch_idx:
+            ip_flat = facies_batch[:, ch_idx].cpu().numpy().flatten()
+            ip_denorm = np.asarray(denormalize(ip_flat, "ip", opt))
+            real_ip_mean = float(np.mean(ip_denorm))
+            real_ip_std = float(np.std(ip_denorm))
+            ch_idx += 1
+            
+        if use_is and facies_batch.shape[1] > ch_idx:
+            is_flat = facies_batch[:, ch_idx].cpu().numpy().flatten()
+            is_denorm = np.asarray(denormalize(is_flat, "is", opt))
+            real_is_mean = float(np.mean(is_denorm))
+            real_is_std = float(np.std(is_denorm))
+            ch_idx += 1
+            
+        if use_vpvs and facies_batch.shape[1] > ch_idx:
+            vpvs_flat = facies_batch[:, ch_idx].cpu().numpy().flatten()
+            vpvs_denorm = np.asarray(denormalize(vpvs_flat, "vpvs", opt))
+            real_vpvs_mean = float(np.mean(vpvs_denorm))
+            real_vpvs_std = float(np.std(vpvs_denorm))
+            ch_idx += 1
+            
+        if getattr(opt, "use_seismic", True) and seismic_batch is not None and seismic_batch.shape[0] > 0:
+            s_flat = seismic_batch.cpu().numpy().flatten()
+            s_denorm = np.asarray(denormalize(s_flat, "seismic", opt))
+            real_seismic_mean = float(np.mean(s_denorm))
+            real_seismic_std = float(np.std(s_denorm))
+            
     except Exception as e:
-        print(f"Warning: could not load real indices from dataset for SSIM: {e}")
-        # Fallback to un-cropped raw indices if dataset loading fails
-        if real_images_path.exists() and not real_indices_list:
-            try:
-                with np.load(real_images_path) as data:
-                    if "images" in data:
-                        images = data["images"]
-                        indices = np.zeros(images.shape[:-1], dtype=np.int32)
-                        indices[images[..., 0] == 255] = 1
-                        indices[images[..., 2] == 255] = 2
-                        indices[images[..., 1] == 255] = 3
-                        for i in range(min(10, indices.shape[0])):
-                            real_indices_list.append(indices[i])
-            except Exception:
-                pass
-
-    # Rock physics defaults (from global dataset stats)
-    real_ip_mean, real_ip_std = 7335.7, 1213.3
-    real_is_mean, real_is_std = 3863.8, 534.0
-    real_vpvs_mean, real_vpvs_std = 1.895, 0.151
-    real_seismic_mean, real_seismic_std = 0.0, 0.118
-
-    # Load from stats.json for dynamic data
-    try:
-        from datasets.utils import get_global_stats
-        from enums import DataFiles, StatKey
-
-        stats = get_global_stats(str(data_dir))
-
-        ip_stats = stats.get(DataFiles.Ip.name, {})
-        real_ip_mean = ip_stats.get(StatKey.MEAN, real_ip_mean)
-        real_ip_std = ip_stats.get(StatKey.STD, real_ip_std)
-
-        is_stats = stats.get(DataFiles.Is.name, {})
-        real_is_mean = is_stats.get(StatKey.MEAN, real_is_mean)
-        real_is_std = is_stats.get(StatKey.STD, real_is_std)
-
-        vpvs_stats = stats.get(DataFiles.VP_VS.name, {})
-        real_vpvs_mean = vpvs_stats.get(StatKey.MEAN, real_vpvs_mean)
-        real_vpvs_std = vpvs_stats.get(StatKey.STD, real_vpvs_std)
-
-        seismic_stats = stats.get(DataFiles.SEISMIC.name, {})
-        real_seismic_mean = seismic_stats.get(StatKey.MEAN, real_seismic_mean)
-        real_seismic_std = seismic_stats.get(StatKey.STD, real_seismic_std)
-    except Exception as e:
-        print(f"Warning: Could not load robust stats from stats.json: {e}")
+        print(f"Warning: could not load real data from PyramidsDataset cache: {e}")
 
     results: dict[str, VariantQuantResult] = {}
     for var in VARIANTS:
         facies_dir = outputs_dir / var / "generated" / "facies"
         proportions = [0.0, 0.0, 0.0, 0.0]
         ssim_scores: list[float] = []
+        pairwise_ssim_scores: list[float] = []
+        gen_proportions_list: list[list[float]] = []
+        proportion_std = 0.0
+        
         if facies_dir.exists():
             npy_files = sorted(list(facies_dir.glob("facies_*.npy")))
             if npy_files:
                 counts = np.zeros(4, dtype=np.int64)
+                loaded_arrays = []
                 for i, f in enumerate(npy_files[:200]):
                     arr = np.load(f)
-                    counts += np.bincount(arr.flatten(), minlength=4)[:4]
+                    loaded_arrays.append(arr)
+                    c = np.bincount(arr.flatten(), minlength=4)[:4]
+                    counts += c
+                    gen_proportions_list.append((c / c.sum()).tolist())
+                    
                     if (
                         var != "unconditional"
                         and i < len(real_indices_list)
                         and arr.shape == real_indices_list[i].shape
                     ):
                         ssim_scores.append(_compute_ssim(arr, real_indices_list[i]))
+                        
                 proportions = (counts / counts.sum()).tolist()
+                
+                # Calculate proportion variance (measure of realization diversity)
+                if gen_proportions_list:
+                    props_arr = np.array(gen_proportions_list)
+                    proportion_std = float(np.mean(np.std(props_arr, axis=0)))
+                    
+                # Calculate pairwise structural similarity (diversity among generated samples)
+                # Comparing realization n vs n+1 to estimate intra-ensemble diversity
+                for i in range(len(loaded_arrays) - 1):
+                    pairwise_ssim_scores.append(_compute_ssim(loaded_arrays[i], loaded_arrays[i+1]))
 
         rmse_error = float(
             np.sqrt(
@@ -214,6 +245,7 @@ def compute_quantitative_results(
         is_mean, is_std = 0.0, 0.0
         vpvs_mean, vpvs_std = 0.0, 0.0
         seismic_mean, seismic_std = 0.0, 0.0
+        ip_realization_std_mean = 0.0
 
         ip_dir = outputs_dir / var / "generated" / "ip"
         if ip_dir.exists():
@@ -221,6 +253,13 @@ def compute_quantitative_results(
             if npy_files:
                 vals = [np.load(f) for f in npy_files[:200]]
                 ip_mean, ip_std = float(np.mean(vals)), float(np.std(vals))
+                
+                # Calculate pixel-wise variance across realizations for IP (uncertainty spread)
+                if len(vals) > 1:
+                    # Use a subset of realizations to compute pixel-wise standard deviation
+                    stacked_ip = np.stack(vals[:20])
+                    pixel_std = np.std(stacked_ip, axis=0)
+                    ip_realization_std_mean = float(np.mean(pixel_std))
 
         is_dir = outputs_dir / var / "generated" / "is"
         if is_dir.exists():
@@ -263,6 +302,9 @@ def compute_quantitative_results(
             "vpvs_std": vpvs_std,
             "seismic_mean": seismic_mean,
             "seismic_std": seismic_std,
+            "pairwise_ssim_mean": float(np.mean(pairwise_ssim_scores)) if pairwise_ssim_scores else 1.0,
+            "proportion_std": proportion_std,
+            "ip_realization_std_mean": ip_realization_std_mean,
         }
 
     return {
@@ -276,7 +318,9 @@ def compute_quantitative_results(
         "real_vpvs_std": real_vpvs_std,
         "real_seismic_mean": real_seismic_mean,
         "real_seismic_std": real_seismic_std,
+        "real_proportion_std": real_proportion_std,
     }
+
 
 
 def compute_channel_connectivity(
@@ -619,25 +663,37 @@ def compute_scorecard_data(
     quant_results: dict[str, VariantQuantResult],
     dist_metrics: DistributionMetrics,
     connectivity: ConnectivityMetrics,
-) -> dict[str, dict[str, object]]:  # pyright: ignore[reportUnusedFunction]
-    """Calculate a consolidated score for each variant based on multiple metrics."""
+    quant_data: QuantitativeResults,
+) -> dict[str, dict[str, object]]:
+    """Calculate a consolidated score for each variant based on multiple metrics, with a focus on diversity."""
     scores: dict[str, dict[str, object]] = {}
 
     all_metrics: list[tuple[str, dict[str, float]]] = []
+    
+    real_prop_std = quant_data.get("real_proportion_std", 0.05)
+    
     for var in variants:
         if var not in quant_results or var not in dist_metrics:
             continue
 
         qr = quant_results[var]
 
+        # Calculate diversity-focused metrics
+        # We want pairwise SSIM to be LOW (high structural diversity)
+        # We want proportion STD to match real_prop_std
+        prop_std_err = abs(qr["proportion_std"] - real_prop_std)
+        
+        # We want high variance in IP across realizations (uncertainty spread)
+        # Note: We will invert this later during normalization so lower is better.
+        ip_spread = qr["ip_realization_std_mean"]
+
         m: dict[str, float] = {
             "facies_rmse": qr["rmse_error"],
-            "facies_kl": qr["facies_kl"],
-            "ip_kl": float(dist_metrics[var].get("ip", {}).get("kl", 1.0)),
             "ip_wd": float(dist_metrics[var].get("ip", {}).get("wasserstein", 1.0)),
-            "is_kl": float(dist_metrics[var].get("is", {}).get("kl", 1.0)),
-            "is_wd": float(dist_metrics[var].get("is", {}).get("wasserstein", 1.0)),
-            "ssim_loss": 1.0 - qr["avg_ssim"],
+            # Diversity Metrics
+            "pairwise_ssim": qr["pairwise_ssim_mean"],  # Lower is better (more diverse)
+            "prop_std_err": prop_std_err,               # Lower is better (matches real variance)
+            "ip_spread": ip_spread,                     # Higher is better (we invert this below)
         }
 
         if "Real" in connectivity and var in connectivity:
@@ -652,17 +708,17 @@ def compute_scorecard_data(
     if not all_metrics:
         return {}
 
+    # New Weighting Scheme emphasizing Diversity (Total 100%)
     weights = {
-        "facies_rmse": 0.20,
-        "facies_kl": 0.15,
-        "ssim_loss": 0.15,
-        "ip_kl": 0.10,
-        "ip_wd": 0.10,
-        "is_kl": 0.10,
-        "is_wd": 0.10,
-        "conn_err": 0.10,
+        "facies_rmse": 0.20,   # Accuracy: Mean proportions match
+        "ip_wd": 0.20,         # Accuracy: IP distribution match
+        "conn_err": 0.10,      # Accuracy: Spatial connectivity
+        "pairwise_ssim": 0.25, # Diversity: Structural variation between samples
+        "prop_std_err": 0.15,  # Diversity: Fluctuation of proportions
+        "ip_spread": 0.10,     # Diversity: Uncertainty spread in continuous properties
     }
 
+    # Normalize metrics to 0-1 scale where 0 is best
     for key in weights:
         vals = [m[key] for _, m in all_metrics]
         min_v = min(vals)
@@ -670,7 +726,13 @@ def compute_scorecard_data(
         range_v = max_v - min_v if max_v > min_v else 1.0
 
         for _, m in all_metrics:
-            norm = (m[key] - min_v) / range_v
+            if key == "ip_spread":
+                # For ip_spread, higher is better, so we invert the normalization
+                norm = (max_v - m[key]) / range_v
+            else:
+                # For others, lower is better
+                norm = (m[key] - min_v) / range_v
+                
             m[f"{key}_score"] = (1.0 - norm) * weights[key]
 
     for var, m in all_metrics:
@@ -681,6 +743,7 @@ def compute_scorecard_data(
             "details": m,
         }
 
+    # Sort descending (higher score is better)
     sorted_vars = sorted(
         scores.keys(), key=lambda v: cast(float, scores[v]["score"]), reverse=True
     )

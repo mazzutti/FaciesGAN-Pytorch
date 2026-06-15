@@ -265,7 +265,13 @@ def plot_sample_grid(
     )
     fig.tight_layout()
     out_path = Path(base_output) / f"{data_kind}_comparison_all_variants.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")  # type: ignore
+    
+    try:
+        from report.utils import save_dual_theme_plot
+        save_dual_theme_plot(fig, axes, out_path, dpi=150)
+    except ImportError:
+        plt.savefig(out_path, dpi=150, bbox_inches="tight")  # type: ignore
+        
     plt.close(fig)
     print(f"{kind_title} comparison grid -> {out_path}")
 
@@ -330,7 +336,13 @@ def plot_combined_embeddings(
         Path(base_output)
         / f"{method}_{data_kind}_comparison_all_variants{epoch_tag}.png"
     )
-    plt.savefig(combined_path, dpi=150, bbox_inches="tight")  # type: ignore
+    
+    try:
+        from report.utils import save_dual_theme_plot
+        save_dual_theme_plot(fig, axes, combined_path, dpi=150)
+    except ImportError:
+        plt.savefig(combined_path, dpi=150, bbox_inches="tight")  # type: ignore
+        
     plt.close(fig)
     print(
         f"Combined {get_method_label(method)} {kind_title} grid -> {combined_path}"
