@@ -286,9 +286,67 @@ def compute_channel_connectivity(
     print("Computing channel connectivity metrics...")
     results: ConnectivityMetrics = {}
     try:
-        real_images_path = data_dir / "facies" / "facies_images.npz"
-        if real_images_path.exists():
-            try:
+        # Try to load real indices from PyramidsDataset (finest scale, e.g., 256x256)
+        # to ensure that component sizes (in pixels) are calculated on matching resolutions.
+        try:
+            import torch
+            import utils
+            from datasets.dataset import PyramidsDataset
+            from options import TrainingOptions
+
+            base_options_path = outputs_dir / "wells_seismic" / "options.json"
+            latest_params: dict[str, Any] = {}
+            if base_options_path.exists():
+                with open(base_options_path, encoding="utf-8") as f_opts:
+                    latest_params = json.load(f_opts)
+
+            opt = TrainingOptions()
+            for key, val in latest_params.items():
+                if hasattr(opt, key):
+                    setattr(opt, key, val)
+            opt.input_path = str(data_dir)
+            opt.use_rock_physics = True
+            opt.use_seismic = True
+            opt.use_wells = True
+
+            dataset = PyramidsDataset(opt)
+            num_scales = len(dataset.scales)
+            num_facies_ch = opt.num_facies_channels
+
+            facies_batch, _, _, _ = dataset.get_scale_data(num_scales - 1)
+            n_components_list: list[int] = []
+            largest_frac_list: list[float] = []
+            mean_size_list: list[float] = []
+            for i in range(min(50, facies_batch.shape[0])):
+                f_tensor = facies_batch[i].cpu()
+                if num_facies_ch == 3:
+                    field = utils.rgb_to_facies(f_tensor[:3]).astype(np.int32)
+                else:
+                    field = torch.argmax(f_tensor[:num_facies_ch], dim=0).numpy().astype(np.int32)
+                
+                channel_mask = (field == 2).astype(np.int32)
+                if channel_mask.sum() == 0:
+                    continue
+                labeled, n_comp = label(channel_mask)
+                sizes = np.bincount(labeled.flatten())[1:]
+                n_components_list.append(int(n_comp))
+                largest_frac_list.append(
+                    float(sizes.max() / sizes.sum()) if sizes.sum() > 0 else 0.0
+                )
+                mean_size_list.append(
+                    float(sizes.mean()) if len(sizes) > 0 else 0.0
+                )
+            if n_components_list:
+                results["Real"] = {
+                    "n_components": float(np.mean(n_components_list)),
+                    "largest_frac": float(np.mean(largest_frac_list)),
+                    "mean_size": float(np.mean(mean_size_list)),
+                }
+        except Exception as dataset_err:
+            print(f"Warning: could not load real indices from PyramidsDataset for connectivity: {dataset_err}")
+            # Fallback to loading raw unscaled images
+            real_images_path = data_dir / "facies" / "facies_images.npz"
+            if real_images_path.exists() and "Real" not in results:
                 with np.load(real_images_path) as data:
                     if "images" in data:
                         images = data["images"]
@@ -296,9 +354,9 @@ def compute_channel_connectivity(
                         indices[images[..., 0] == 255] = 1
                         indices[images[..., 2] == 255] = 2
                         indices[images[..., 1] == 255] = 3
-                        n_components_list: list[int] = []
-                        largest_frac_list: list[float] = []
-                        mean_size_list: list[float] = []
+                        n_components_list = []
+                        largest_frac_list = []
+                        mean_size_list = []
                         for i in range(min(50, indices.shape[0])):
                             channel_mask = (indices[i] == 2).astype(np.int32)
                             if channel_mask.sum() == 0:
@@ -320,8 +378,6 @@ def compute_channel_connectivity(
                                 "largest_frac": float(np.mean(largest_frac_list)),
                                 "mean_size": float(np.mean(mean_size_list)),
                             }
-            except Exception:
-                pass
 
         for variant in VARIANTS:
             facies_dir = outputs_dir / variant / "generated" / "facies"
