@@ -1466,6 +1466,14 @@
                 </tbody>
               </table>
             </div>
+            <div class="discussion-box" style="margin-top: 15px;">
+              <strong>Scorecard Metrics Interpretation:</strong><br>
+              • <strong>Facies RMSE (%):</strong> Root Mean Squared Error of the generated facies proportions relative to the real validation dataset. Represents how accurately the model reproduces the volumetric proportions of different geological facies (lower is better).<br>
+              • <strong>Property Dev (%):</strong> Average percentage deviation of the generated continuous properties (e.g., Acoustic Impedance) from the validation dataset mean values. Measures physical value preservation (lower is better).<br>
+              • <strong>Connectivity Dev (%):</strong> The absolute difference in the largest channel component fraction between the variant and the real validation data (expressed in percentage points). Indicates how well the main flow-path size is matched (lower is better).<br>
+              • <strong>Spatial Dev (%):</strong> Measures deviation from the conditioning target based on Structural Similarity Index Measure (SSIM), computed as <code>(1.0 - SSIM) * 100</code>. A lower value means higher conditioning fidelity (unconditional variant defaults to a 100% penalty).<br>
+              • <strong>Overall Score:</strong> A composite score computed as the weighted average of the four pillars (25% weight each). A lower score indicates a more balanced and high-fidelity realization.
+            </div>
           </div>
         
 
@@ -1495,7 +1503,7 @@
                         
                         
                           <td style="text-align: center;"><span style="font-family: monospace; color: #fbbf24;">0.1160</span></td>
-                          <td style="text-align: center;"><span style="font-family: monospace; color: #f87171;">89.5511</span></td>
+                          <td style="text-align: center;"><span style="font-family: monospace; color: #f87171;">103.6039</span></td>
                         
                       
                       
@@ -1508,7 +1516,7 @@
                         
                         
                           <td style="text-align: center;"><span style="font-family: monospace; color: #f87171;">0.2788</span></td>
-                          <td style="text-align: center;"><span style="font-family: monospace; color: #f87171;">404.3994</span></td>
+                          <td style="text-align: center;"><span style="font-family: monospace; color: #f87171;">396.2936</span></td>
                         
                       
                       
@@ -1521,7 +1529,7 @@
                         
                         
                           <td style="text-align: center;"><span style="font-family: monospace; color: #fbbf24;">0.0633</span></td>
-                          <td style="text-align: center;"><span style="font-family: monospace; color: #f87171;">110.5153</span></td>
+                          <td style="text-align: center;"><span style="font-family: monospace; color: #f87171;">112.8605</span></td>
                         
                       
                       
@@ -1534,7 +1542,7 @@
                         
                         
                           <td style="text-align: center;"><span style="font-family: monospace; color: #f87171;">0.4802</span></td>
-                          <td style="text-align: center;"><span style="font-family: monospace; color: #f87171;">538.1114</span></td>
+                          <td style="text-align: center;"><span style="font-family: monospace; color: #f87171;">544.8402</span></td>
                         
                       
                       
@@ -1543,6 +1551,11 @@
                   
                 </tbody>
               </table>
+            </div>
+            <div class="discussion-box" style="margin-top: 15px;">
+              <strong>Distribution Distance Interpretation:</strong><br>
+              • <strong>KL-Divergence (Kullback-Leibler):</strong> Measures relative entropy (information loss). A value of 0 means perfect alignment of probability density function (PDF) shapes. Higher values indicate that the generated realizations fail to capture the correct proportion of extreme values (e.g., high/low impedance peaks).<br>
+              • <strong>Wasserstein Distance:</strong> Measures the physical work required to morph the generated property histogram to match the validation target. It is robust to minor value offsets and represents how well the overall range and scale of continuous properties match (lower is better).
             </div>
           </div>
         
@@ -1603,10 +1616,10 @@
               </table>
             </div>
             <div class="discussion-box" style="margin-top: 15px;">
-              <strong>Quantitative Metric Interpretation:</strong><br>
-              • <strong>KL-Divergence:</strong> Measures the information loss when approximating the real property distribution with the generated one. Lower is better, with 0 indicating a perfect distribution overlap.<br>
-              • <strong>Wasserstein Distance:</strong> Measures the minimum cost of shifting the generated distribution shape to match the real distribution. Robust to horizontal offsets and scaling.<br>
-              • <strong>Channel Connectivity:</strong> Sand channels should naturally form continuous paths. Real data shows fewer components with larger sizes. Fragmented channel blobs result in a high component count and low largest component %.
+              <strong>Connectivity Metric Interpretation:</strong><br>
+              • <strong>Avg # Components:</strong> The average count of disconnected geobodies representing the channel facies (class 2). A lower component count indicates a more consolidated, continuous channel network. A higher count suggests fragmentation into smaller, disconnected mud/sand pockets.<br>
+              • <strong>Largest Component (%):</strong> The percentage of the total channel area occupied by the single largest connected body. Higher values indicate stronger topological connectivity, representing that the model has successfully synthesized continuous flow paths rather than isolated pockets.<br>
+              • <strong>Mean Component Size (px):</strong> The average size of individual connected bodies in pixels. If the generated mean size is larger than the real one, the model might be generating excessively thick or merged channels (over-connectivity). If it is smaller, the channels are too thin or fragmented.
             </div>
           </div>
         
@@ -5702,7 +5715,63 @@
                   <div class="carousel-viewport" id="carousel-seismic_only">
                     
                       <div class="carousel-slide milestone-print" style="display: block;">
-                        <div style="margin-bottom: 10px; font-weight: 600; color: var(--accent-hover); font-size: 0.95rem;">📅 Milestone: <span class="epoch-number-label">Epoch 10600 (Final)</span></div>
+                        <div style="margin-bottom: 10px; font-weight: 600; color: var(--accent-hover); font-size: 0.95rem;">📅 Milestone: <span class="epoch-number-label">Epoch 11000 (Final)</span></div>
+                        <div class="image-grid-5">
+                          
+                            
+                              <div class="image-card">
+                                <div class="image-title">Facies</div>
+                                <img src="outputs/experiments/seismic_only/training_visualizations/Scale_4/Facies_epoch_11000.png" alt="Facies">
+                              </div>
+                            
+                          
+                            
+                              <div class="image-card">
+                                <div class="image-title">Ip (<i>I<sub>p</sub></i>)</div>
+                                <img src="outputs/experiments/seismic_only/training_visualizations/Scale_4/Ip_epoch_11000.png" alt="Ip (<i>I<sub>p</sub></i>)">
+                              </div>
+                            
+                          
+                            
+                              <div class="image-card">
+                                <div class="image-title">Seismic</div>
+                                <img src="outputs/experiments/seismic_only/training_visualizations/Scale_4/Seismic_epoch_11000.png" alt="Seismic">
+                              </div>
+                            
+                          
+                        </div>
+                      </div>
+                    
+                      <div class="carousel-slide" style="display: none;">
+                        <div style="margin-bottom: 10px; font-weight: 600; color: var(--accent-hover); font-size: 0.95rem;">📅 Milestone: <span class="epoch-number-label">Epoch 10800</span></div>
+                        <div class="image-grid-5">
+                          
+                            
+                              <div class="image-card">
+                                <div class="image-title">Facies</div>
+                                <img src="outputs/experiments/seismic_only/training_visualizations/Scale_4/Facies_epoch_10800.png" alt="Facies">
+                              </div>
+                            
+                          
+                            
+                              <div class="image-card">
+                                <div class="image-title">Ip (<i>I<sub>p</sub></i>)</div>
+                                <img src="outputs/experiments/seismic_only/training_visualizations/Scale_4/Ip_epoch_10800.png" alt="Ip (<i>I<sub>p</sub></i>)">
+                              </div>
+                            
+                          
+                            
+                              <div class="image-card">
+                                <div class="image-title">Seismic</div>
+                                <img src="outputs/experiments/seismic_only/training_visualizations/Scale_4/Seismic_epoch_10800.png" alt="Seismic">
+                              </div>
+                            
+                          
+                        </div>
+                      </div>
+                    
+                      <div class="carousel-slide" style="display: none;">
+                        <div style="margin-bottom: 10px; font-weight: 600; color: var(--accent-hover); font-size: 0.95rem;">📅 Milestone: <span class="epoch-number-label">Epoch 10600</span></div>
                         <div class="image-grid-5">
                           
                             
@@ -7247,8 +7316,8 @@
                   
                   
                     <div class="carousel-indicator-bar" style="align-items: center; gap: 10px; width: 100%; max-width: 400px; margin: 12px auto;">
-                      <input type="range" id="scrubber-seismic_only" min="0" max="54" value="54" oninput="jumpToSlide('seismic_only', 54 - parseInt(this.value))" style="flex-grow: 1; accent-color: var(--accent); cursor: pointer;">
-                      <span id="scrubber-label-seismic_only" style="font-size: 0.85rem; color: var(--text-muted); font-family: monospace;">Epoch 10600 (Final) (55/55)</span>
+                      <input type="range" id="scrubber-seismic_only" min="0" max="56" value="56" oninput="jumpToSlide('seismic_only', 56 - parseInt(this.value))" style="flex-grow: 1; accent-color: var(--accent); cursor: pointer;">
+                      <span id="scrubber-label-seismic_only" style="font-size: 0.85rem; color: var(--text-muted); font-family: monospace;">Epoch 11000 (Final) (57/57)</span>
                     </div>
                   
                 </div>
@@ -9562,7 +9631,7 @@
                   
                     <tr>
                       <td style="font-weight: 500;">Seismic Only</td>
-                      <td style="text-align: center; font-family: monospace;">6h 24m</td>
+                      <td style="text-align: center; font-family: monospace;">6h 34m</td>
                       <td style="text-align: center; font-family: monospace;">33.6 MB</td>
                     </tr>
                   

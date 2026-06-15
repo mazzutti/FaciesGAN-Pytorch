@@ -529,6 +529,14 @@
                 </tbody>
               </table>
             </div>
+            <div class="discussion-box" style="margin-top: 15px;">
+              <strong>Scorecard Metrics Interpretation:</strong><br>
+              • <strong>Facies RMSE (%):</strong> Root Mean Squared Error of the generated facies proportions relative to the real validation dataset. Represents how accurately the model reproduces the volumetric proportions of different geological facies (lower is better).<br>
+              • <strong>Property Dev (%):</strong> Average percentage deviation of the generated continuous properties (e.g., Acoustic Impedance) from the validation dataset mean values. Measures physical value preservation (lower is better).<br>
+              • <strong>Connectivity Dev (%):</strong> The absolute difference in the largest channel component fraction between the variant and the real validation data (expressed in percentage points). Indicates how well the main flow-path size is matched (lower is better).<br>
+              • <strong>Spatial Dev (%):</strong> Measures deviation from the conditioning target based on Structural Similarity Index Measure (SSIM), computed as <code>(1.0 - SSIM) * 100</code>. A lower value means higher conditioning fidelity (unconditional variant defaults to a 100% penalty).<br>
+              • <strong>Overall Score:</strong> A composite score computed as the weighted average of the four pillars (25% weight each). A lower score indicates a more balanced and high-fidelity realization.
+            </div>
           </div>
         {% endif %}
 
@@ -595,6 +603,11 @@
                 </tbody>
               </table>
             </div>
+            <div class="discussion-box" style="margin-top: 15px;">
+              <strong>Distribution Distance Interpretation:</strong><br>
+              • <strong>KL-Divergence (Kullback-Leibler):</strong> Measures relative entropy (information loss). A value of 0 means perfect alignment of probability density function (PDF) shapes. Higher values indicate that the generated realizations fail to capture the correct proportion of extreme values (e.g., high/low impedance peaks).<br>
+              • <strong>Wasserstein Distance:</strong> Measures the physical work required to morph the generated property histogram to match the validation target. It is robust to minor value offsets and represents how well the overall range and scale of continuous properties match (lower is better).
+            </div>
           </div>
         {% endif %}
 
@@ -626,10 +639,10 @@
               </table>
             </div>
             <div class="discussion-box" style="margin-top: 15px;">
-              <strong>Quantitative Metric Interpretation:</strong><br>
-              • <strong>KL-Divergence:</strong> Measures the information loss when approximating the real property distribution with the generated one. Lower is better, with 0 indicating a perfect distribution overlap.<br>
-              • <strong>Wasserstein Distance:</strong> Measures the minimum cost of shifting the generated distribution shape to match the real distribution. Robust to horizontal offsets and scaling.<br>
-              • <strong>Channel Connectivity:</strong> Sand channels should naturally form continuous paths. Real data shows fewer components with larger sizes. Fragmented channel blobs result in a high component count and low largest component %.
+              <strong>Connectivity Metric Interpretation:</strong><br>
+              • <strong>Avg # Components:</strong> The average count of disconnected geobodies representing the channel facies (class 2). A lower component count indicates a more consolidated, continuous channel network. A higher count suggests fragmentation into smaller, disconnected mud/sand pockets.<br>
+              • <strong>Largest Component (%):</strong> The percentage of the total channel area occupied by the single largest connected body. Higher values indicate stronger topological connectivity, representing that the model has successfully synthesized continuous flow paths rather than isolated pockets.<br>
+              • <strong>Mean Component Size (px):</strong> The average size of individual connected bodies in pixels. If the generated mean size is larger than the real one, the model might be generating excessively thick or merged channels (over-connectivity). If it is smaller, the channels are too thin or fragmented.
             </div>
           </div>
         {% endif %}
