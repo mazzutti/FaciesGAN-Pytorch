@@ -602,10 +602,11 @@ def generate_html_report(
 
                         slides: list[dict[str, Any]] = []
                         for epoch in all_epochs:
+                            display_epoch = epoch - 1 if epoch == 10000 else epoch
                             epoch_label = (
-                                f"Epoch {epoch} (Final)"
+                                f"Epoch {display_epoch} (Final)"
                                 if epoch == all_epochs[0]
-                                else f"Epoch {epoch}"
+                                else f"Epoch {display_epoch}"
                             )
                             is_milestone = epoch in milestones
 
@@ -639,7 +640,7 @@ def generate_html_report(
                             "has_gallery": True,
                             "slides": slides,
                             "use_scrubber": len(all_epochs) > 10,
-                            "default_epoch_label": f"Epoch {all_epochs[0]} (Final)",
+                            "default_epoch_label": f"Epoch {all_epochs[0] - 1 if all_epochs[0] == 10000 else all_epochs[0]} (Final)",
                         }
                     else:
                         var_data["gallery"] = {"has_gallery": False}
@@ -691,9 +692,10 @@ def generate_html_report(
             if epoch_map:
                 epochs_list: list[dict[str, str]] = []
                 for epoch in sorted(epoch_map.keys()):
+                    display_epoch = epoch - 1 if epoch == 10000 else epoch
                     epochs_list.append(
                         {
-                            "label": f"Epoch {epoch}",
+                            "label": f"Epoch {display_epoch}",
                             "rel_path": md_relpath(epoch_map[epoch], report_dir),
                         }
                     )
