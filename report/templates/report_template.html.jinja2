@@ -867,16 +867,28 @@
                     {% for method in cv.methods %}
                       <details style="margin-bottom: 10px;">
                         <summary style="font-size: 0.9rem; font-weight: 600; color: var(--accent); cursor: pointer;">🔍 {{ method.method_label }} Projection Progression</summary>
-                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 10px;">
+                        <div style="margin-top: 10px;">
                           {% if method.type == 'epochs' %}
-                            {% for img in method.images %}
-                              <div style="background-color: rgba(0,0,0,0.15); border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; text-align: center;">
-                                <div class="image-title">{{ img.label }}</div>
-                                <img src="{{ img.rel_path }}" alt="{{ img.label }}" style="max-width: 100%; border-radius: 4px;">
+                            {% set carouselId = 'proj-' ~ cv.key ~ '-' ~ loop.index %}
+                            <div class="carousel-wrapper" style="max-width: 600px; margin: 0 auto;">
+                              <div class="carousel-viewport" id="carousel-{{ carouselId }}">
+                                {% for img in method.images %}
+                                  <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
+                                    <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">{{ img.label }}</div>
+                                    <img src="{{ img.rel_path }}" alt="{{ img.label }}" style="width: 100%; max-width: 500px; display: inline-block; border-radius: 8px;">
+                                  </div>
+                                {% endfor %}
                               </div>
-                            {% endfor %}
+                              <button class="carousel-control-btn prev" onclick="moveCarousel('{{ carouselId }}', -1)">❮</button>
+                              <button class="carousel-control-btn next" onclick="moveCarousel('{{ carouselId }}', 1)">❯</button>
+                              <div class="carousel-indicator-bar">
+                                {% for img in method.images %}
+                                  <span class="carousel-indicator-dot{% if loop.first %} active{% endif %}" onclick="jumpToSlide('{{ carouselId }}', {{ loop.index0 }})"></span>
+                                {% endfor %}
+                              </div>
+                            </div>
                           {% else %}
-                            <div style="background-color: rgba(0,0,0,0.15); border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; text-align: center; grid-column: 1 / -1;">
+                            <div style="background-color: rgba(0,0,0,0.15); border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; text-align: center;">
                               <div class="image-title">Final Grid</div>
                               <img src="{{ method.images[0].rel_path }}" alt="Final Grid" style="max-width: 50%; min-width: 260px; border-radius: 4px;">
                             </div>
