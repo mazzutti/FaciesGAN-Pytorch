@@ -91,10 +91,60 @@ def compute_quantitative_results(
                     indices[images[..., 1] == 255] = 3
                     counts = np.bincount(indices.flatten(), minlength=4)
                     real_facies_proportions = (counts / counts.sum()).tolist()
-                    for i in range(min(10, indices.shape[0])):
-                        real_indices_list.append(indices[i])
         except Exception:
             pass
+
+    # Load real indices from the dataset at the finest scale (e.g., 256x256)
+    # to match the shape of the generated facies images.
+    try:
+        import torch
+        import utils
+        from datasets.dataset import PyramidsDataset
+        from options import TrainingOptions
+
+        base_options_path = outputs_dir / "wells_seismic" / "options.json"
+        latest_params: dict[str, Any] = {}
+        if base_options_path.exists():
+            with open(base_options_path, encoding="utf-8") as f_opts:
+                latest_params = json.load(f_opts)
+
+        opt = TrainingOptions()
+        for key, val in latest_params.items():
+            if hasattr(opt, key):
+                setattr(opt, key, val)
+        opt.input_path = str(data_dir)
+        opt.use_rock_physics = True
+        opt.use_seismic = True
+        opt.use_wells = True
+
+        dataset = PyramidsDataset(opt)
+        num_scales = len(dataset.scales)
+        num_facies_ch = opt.num_facies_channels
+
+        facies_batch, _, _, _ = dataset.get_scale_data(num_scales - 1)
+        for i in range(min(10, facies_batch.shape[0])):
+            f_tensor = facies_batch[i].cpu()
+            if num_facies_ch == 3:
+                field = utils.rgb_to_facies(f_tensor[:3]).astype(np.int32)
+            else:
+                field = torch.argmax(f_tensor[:num_facies_ch], dim=0).numpy().astype(np.int32)
+            real_indices_list.append(field)
+    except Exception as e:
+        print(f"Warning: could not load real indices from dataset for SSIM: {e}")
+        # Fallback to un-cropped raw indices if dataset loading fails
+        if real_images_path.exists() and not real_indices_list:
+            try:
+                with np.load(real_images_path) as data:
+                    if "images" in data:
+                        images = data["images"]
+                        indices = np.zeros(images.shape[:-1], dtype=np.int32)
+                        indices[images[..., 0] == 255] = 1
+                        indices[images[..., 2] == 255] = 2
+                        indices[images[..., 1] == 255] = 3
+                        for i in range(min(10, indices.shape[0])):
+                            real_indices_list.append(indices[i])
+            except Exception:
+                pass
 
     # Rock physics defaults (from global dataset stats)
     real_ip_mean, real_ip_std = 7335.7, 1213.3
