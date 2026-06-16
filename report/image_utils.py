@@ -1330,7 +1330,7 @@ def ensure_loss_plots(outputs_dir: Path) -> None:
                 ax.plot(steps, values, alpha=0.15, color=color)
                 ax.plot(steps, smoothed, color=color, linewidth=2.0)
 
-                title = clean_name.replace("_", " ")
+                title = clean_name.replace("_light", "").replace("light", "").replace("Light", "").replace("_", " ").strip()
                 ax.set_title(title, fontsize=11, fontweight="bold", color="#f0f4f9")
                 ax.grid(True, alpha=0.2, color="#8c9eb5")
 

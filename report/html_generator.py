@@ -572,8 +572,8 @@ def generate_html_report(
         }
         if variant_dir.exists():
             # Loss curves
-            loss_paths_g = sorted(list(variant_dir.glob("loss_G_*.png")))
-            loss_paths_d = sorted(list(variant_dir.glob("loss_D_*.png")))
+            loss_paths_g = sorted([p for p in variant_dir.glob("loss_G_*.png") if not p.stem.endswith("_light")])
+            loss_paths_d = sorted([p for p in variant_dir.glob("loss_D_*.png") if not p.stem.endswith("_light")])
             var_data["losses"] = {
                 "has_g": len(loss_paths_g) > 0,
                 "has_d": len(loss_paths_d) > 0,
@@ -582,9 +582,11 @@ def generate_html_report(
             }
             for path in loss_paths_g:
                 light = path.with_name(path.stem + "_light" + path.suffix)
+                label = re.sub(r'[_ -]?light', '', path.stem.replace("loss_", ""), flags=re.IGNORECASE)
+                label = label.replace("_", " ").strip()
                 var_data["losses"]["g"].append(
                     {
-                        "label": path.stem.replace("loss_", "").replace("_", " "),
+                        "label": label,
                         "rel_path": md_relpath(path, report_dir),
                         "rel_path_light": (
                             md_relpath(light, report_dir) if light.exists() else None
@@ -593,9 +595,11 @@ def generate_html_report(
                 )
             for path in loss_paths_d:
                 light = path.with_name(path.stem + "_light" + path.suffix)
+                label = re.sub(r'[_ -]?light', '', path.stem.replace("loss_", ""), flags=re.IGNORECASE)
+                label = label.replace("_", " ").strip()
                 var_data["losses"]["d"].append(
                     {
-                        "label": path.stem.replace("loss_", "").replace("_", " "),
+                        "label": label,
                         "rel_path": md_relpath(path, report_dir),
                         "rel_path_light": (
                             md_relpath(light, report_dir) if light.exists() else None

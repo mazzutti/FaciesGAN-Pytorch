@@ -89,10 +89,10 @@ def facies_to_rgb_img(img_arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
 def setup_scatter_plot(ax: Axes, method: str, data_kind: str, title: str) -> None:
     """Add standardized titles, labels, and legends to scatter plots."""
     label = get_method_label(method)
-    ax.set_title(title)  # type: ignore
-    ax.set_xlabel(f"{label} Dimension 1")  # type: ignore
-    ax.set_ylabel(f"{label} Dimension 2")  # type: ignore
-    ax.legend(loc="upper right", fontsize=8)  # type: ignore
+    ax.set_title(title, color="#f0f4f9")  # type: ignore
+    ax.set_xlabel(f"{label} Dimension 1", color="#8c9eb5")  # type: ignore
+    ax.set_ylabel(f"{label} Dimension 2", color="#8c9eb5")  # type: ignore
+    ax.legend(loc="upper right", fontsize=8, labelcolor="#f0f4f9")  # type: ignore
 
 
 def plot_sample_grid(
@@ -232,11 +232,12 @@ def plot_sample_grid(
         figsize=(4 * n_cols, 3.5 * n_rows),
         squeeze=False,
     )
+    fig.patch.set_facecolor("#151b26")
 
     # Column headers
-    axes[0][0].set_title("Real", fontsize=11, fontweight="bold")
+    axes[0][0].set_title("Real", fontsize=11, fontweight="bold", color="#f0f4f9")
     for c, v in enumerate(active_variants):
-        axes[0][c + 1].set_title(v.value.label, fontsize=11, fontweight="bold")
+        axes[0][c + 1].set_title(v.value.label, fontsize=11, fontweight="bold", color="#f0f4f9")
 
     for r, (label, real_img, variant_imgs) in enumerate(rows):
         # Column 0: real sample
@@ -244,9 +245,9 @@ def plot_sample_grid(
         if real_img is not None:
             setup_imshow_for_kind(ax, real_img, data_kind)
         else:
-            ax.set_facecolor("#111")
+            ax.set_facecolor("#111622")
         ax.axis("off")
-        ax.set_ylabel(label, fontsize=10, rotation=90, labelpad=10)
+        ax.set_ylabel(label, fontsize=10, rotation=90, labelpad=10, color="#8c9eb5")
 
     for r, (_, _, variant_imgs) in enumerate(rows):
         # Columns 1+: variant samples
@@ -256,12 +257,12 @@ def plot_sample_grid(
             if vi < len(variant_imgs):
                 setup_imshow_for_kind(ax, variant_imgs[vi], data_kind)
             else:
-                ax.set_facecolor("#111")
+                ax.set_facecolor("#111622")
             ax.axis("off")
 
     kind_title = data_kind.capitalize()
     fig.suptitle(  # type: ignore
-        f"Real vs Generated {kind_title} — All Variants", fontsize=14
+        f"Real vs Generated {kind_title} — All Variants", fontsize=14, color="#f0f4f9"
     )
     fig.tight_layout()
     out_path = Path(base_output) / f"{data_kind}_comparison_all_variants.png"

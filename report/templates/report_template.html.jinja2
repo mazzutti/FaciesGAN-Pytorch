@@ -92,7 +92,8 @@
     @media (max-width: 992px) { .layout-container { flex-direction: column; } aside { width: 100%; position: relative; top: 0; } }
     
     /* Theme-adaptive plots */
-    body:not([data-theme='light']) .light-plot { display: none !important; }
+    .light-plot { display: none !important; }
+    body[data-theme='light'] .light-plot { display: inline-block !important; }
     body[data-theme='light'] .dark-plot { display: none !important; }
 
     /* Light theme */
