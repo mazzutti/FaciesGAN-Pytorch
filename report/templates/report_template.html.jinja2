@@ -926,7 +926,7 @@
                     <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Manifold progression plots for {{ cv.label.lower() }}:</p>
                     
                     {% for method in cv.methods %}
-                      <details style="margin-bottom: 10px;">
+                      <details style="margin-bottom: 10px;" open>
                         <summary style="font-size: 0.9rem; font-weight: 600; color: var(--accent); cursor: pointer;">🔍 {{ method.method_label }} Projection Progression</summary>
                         <div style="margin-top: 10px;">
                           {% if method.type == 'epochs' %}
