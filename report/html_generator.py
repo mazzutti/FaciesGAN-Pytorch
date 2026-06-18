@@ -162,23 +162,36 @@ def generate_html_report(
         # We penalize low spread. We compare it to the global real_ip_std.
         ip_spread_penalty = max(0.0, (1.0 - (ip_realization_std / (real_ip_std + 1e-8))) * 100)
 
+        # 6. Connectivity Deviation (%): Deviation of largest component from Real largest component
+        conn_dev = 0.0
+        if channel_connectivity and "Real" in channel_connectivity and var in channel_connectivity:
+            real_conn = channel_connectivity["Real"]["largest_frac"]
+            var_conn = channel_connectivity[var]["largest_frac"]
+            conn_dev = abs(var_conn - real_conn) / (real_conn + 1e-8) * 100
+
+        # 7. Ip Wasserstein Distance Penalty (%): Wasserstein distance normalized by real standard deviation
+        ip_wd_penalty = 0.0
+        if distribution_metrics and var in distribution_metrics and "ip" in distribution_metrics[var]:
+            ip_wd = float(distribution_metrics[var]["ip"]["wasserstein"])
+            ip_wd_penalty = (ip_wd / (real_ip_std + 1e-8)) * 100
+
         # Weighted score (lower is better)
-        # New Diversity Focus:
-        # Facies Realism (20%)
-        # Physical Consistency (20%)
-        # Structural Diversity (30%)
-        # Uncertainty Spread (Variance Matching + Ip Spread) (30%)
+        # Equal weights (1/7 each ~ 14.29%)
         overall = (
-            (facies_rmse * 0.20)
-            + (rp_dev * 0.20)
-            + (pairwise_ssim_penalty * 0.30)
-            + (variance_matching_penalty * 0.15)
-            + (ip_spread_penalty * 0.15)
-        )
+            facies_rmse
+            + rp_dev
+            + ip_wd_penalty
+            + conn_dev
+            + pairwise_ssim_penalty
+            + variance_matching_penalty
+            + ip_spread_penalty
+        ) / 7.0
 
         scorecard[var] = {
             "facies_rmse": facies_rmse,
             "rp_dev": rp_dev,
+            "ip_wd_penalty": ip_wd_penalty,
+            "conn_dev": conn_dev,
             "pairwise_ssim_penalty": pairwise_ssim_penalty,
             "variance_matching_penalty": variance_matching_penalty,
             "ip_spread_penalty": ip_spread_penalty,
@@ -433,6 +446,35 @@ def generate_html_report(
             rank = rank_map[var]
             medal = medal_map.get(rank, f"#{rank}")
             bar_width = max(5, min(100, int(100 - sc["overall"])))
+            
+            # Add distribution metrics directly to the scorecard dict
+            dm = distribution_metrics.get(var, {}) if distribution_metrics else {}
+            dist_data = {}
+            prop_headers = [("ip", "Ip"), ("is", "Is"), ("vpvs", "Vp/Vs")]
+            for pk, _pl in prop_headers:
+                if pk in dm:
+                    kl_val = float(dm[pk]["kl"])
+                    wd_val = float(dm[pk]["wasserstein"])
+                    kl_color = (
+                        "#34d399"
+                        if kl_val < 0.05
+                        else ("#fbbf24" if kl_val < 0.15 else "#f87171")
+                    )
+                    wd_color = (
+                        "#34d399"
+                        if wd_val < 0.05
+                        else ("#fbbf24" if wd_val < 0.15 else "#f87171")
+                    )
+                    dist_data[pk] = {
+                        "kl": f"{kl_val:.4f}",
+                        "kl_color": kl_color,
+                        "wd": f"{wd_val:.4f}",
+                        "wd_color": wd_color,
+                        "exists": True,
+                    }
+                else:
+                    dist_data[pk] = {"exists": False}
+
             scorecard_table.append(
                 {
                     "rank": rank,
@@ -440,12 +482,15 @@ def generate_html_report(
                     "label": VARIANT_LABELS[var],
                     "facies_rmse": f"{sc['facies_rmse']:.2f}",
                     "rp_dev": f"{sc['rp_dev']:.2f}",
+                    "ip_wd_penalty": f"{sc['ip_wd_penalty']:.2f}",
+                    "conn_dev": f"{sc['conn_dev']:.2f}",
                     "pairwise_ssim_penalty": sc['pairwise_ssim_penalty'],
                     "variance_matching_penalty": sc['variance_matching_penalty'],
                     "ip_spread_penalty": sc['ip_spread_penalty'],
                     "overall": f"{sc['overall']:.2f}",
                     "bar_width": bar_width,
                     "is_first": rank == 1,
+                    "dist_metrics": dist_data,
                 }
             )
 
