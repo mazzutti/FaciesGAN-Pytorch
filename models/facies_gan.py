@@ -794,6 +794,40 @@ class FaciesGAN(nn.Module):
 
                     # Enable grad only on the current block input
                     z_in_gn = z_in_detached.detach().requires_grad_(False)
+                    _b = z_in_gn.shape[0]
+
+                    # Precompute cond_tensor for GradNorm if conditioning is used
+                    _cond_tensor = None
+                    if self.options.use_disc_conditioning:
+                        _cond_parts = []
+                        if self.options.use_wells:
+                            _w_local = wells_pyramid.get(scale)
+                            if _w_local is not None:
+                                _w_local = _w_local.to(device_manager.device, non_blocking=True)
+                                if _w_local.shape[0] != _b:
+                                    _w_local = _w_local[indexes]
+                                _cond_parts.append(_w_local)
+                            _m_local = masks_pyramid.get(scale)
+                            if _m_local is not None:
+                                _m_local = _m_local.to(device_manager.device, non_blocking=True)
+                                if _m_local.shape[0] != _b:
+                                    _m_local = _m_local[indexes]
+                                _cond_parts.append(_m_local)
+                        if self.options.use_seismic:
+                            _s_local = seismic_pyramid.get(scale)
+                            if _s_local is not None:
+                                _s_local = _s_local.to(device_manager.device, non_blocking=True)
+                                if _s_local.shape[0] != _b:
+                                    _s_local = _s_local[indexes]
+                                _cond_parts.append(_s_local)
+                        if _cond_parts:
+                            _cond_tensor = torch.cat(_cond_parts, dim=1)
+
+                    # Get discriminator for adversarial loss calculation
+                    _disc_mod = self.uncompiled_discs.get(scale)
+                    if _disc_mod is None:
+                        _disc_mod = self.discriminator.discs[scale]
+                    _adv_disc = unwrap_ddp(_disc_mod)
 
                     # Minimal task_losses_fn: only generator-local losses (no discriminator)
                     real_s = facies_pyramid[scale]
@@ -806,34 +840,270 @@ class FaciesGAN(nn.Module):
                     _scale = scale
                     _out_detached = out_facie_detached
 
-                    def _task_losses_fn(fake_local: torch.Tensor) -> torch.Tensor:
+                    # Check if reconstruction is active
+                    _rec_active = (
+                        getattr(opts, "rec_facies_loss_penalty", 0.0) > 0.0
+                        and self.current_epoch >= self.rec_skip_epochs
+                    )
+                    _rec_in = rec_in_pyramid.get(scale) if _rec_active else None
+                    _z_in_rec = None
+                    _rec_up = None
+                    if _rec_in is not None:
+                        with torch.no_grad():
+                            _rec_noise_pyramid = self.get_pyramid_noise(
+                                scale, indexes, wells_pyramid, seismic_pyramid, rec=True
+                            )
+                            _rec_noise_s = _rec_noise_pyramid[scale]
+                            _rec_up = utils.interpolate(
+                                _rec_in,
+                                (
+                                    _rec_noise_s.shape[2] - gen.full_zero_padding,
+                                    _rec_noise_s.shape[3] - gen.full_zero_padding,
+                                ),
+                            )
+                            _p = gen.zero_padding
+                            _n_in = gen.output_channels
+                            _base_rec = _rec_up[:, :_n_in, ...]
+                            if _p > 0:
+                                _padded_rec = torch.empty(
+                                    (
+                                        _base_rec.shape[0],
+                                        _base_rec.shape[1],
+                                        _base_rec.shape[2] + 2 * _p,
+                                        _base_rec.shape[3] + 2 * _p,
+                                    ),
+                                    dtype=_base_rec.dtype,
+                                    device=_base_rec.device,
+                                ).fill_(gen.padding_value)
+                                _padded_rec[..., _p:-_p, _p:-_p] = _base_rec
+                            else:
+                                _padded_rec = _base_rec
+
+                            _amp_s = amp[scale]
+                            _z_in_rec = _amp_s * _rec_noise_s[:, :_n_in, ...] + _padded_rec
+                            if gen.cond_channels > 0:
+                                _z_in_rec = torch.cat([_z_in_rec, _rec_noise_s[:, _n_in:, ...]], dim=1)
+
+                    # Check if diversity is active
+                    _n_div = (
+                        1
+                        if self.current_epoch < self.div_skip_epochs
+                        else getattr(opts, "num_diversity_samples", 1)
+                    )
+                    _div_active = (
+                        getattr(opts, "diversity_loss_penalty", 0.0) > 0.0
+                        and _n_div > 1
+                    )
+                    _z_in_div = None
+                    _div_prev_up = None
+                    if _div_active:
+                        with torch.no_grad():
+                            _div_noises_pyramid = self.build_batched_noise(
+                                _n_div, _b, scale, indexes, wells_pyramid, seismic_pyramid
+                            )
+                            _div_noise_s = _div_noises_pyramid[scale]
+                            
+                            if scale == 0:
+                                _div_prev = torch.zeros(
+                                    (_n_div * _b, gen.output_channels, z_s.shape[2] - gen.full_zero_padding, z_s.shape[3] - gen.full_zero_padding),
+                                    device=device_manager.device,
+                                    dtype=torch.float32,
+                                )
+                            else:
+                                _div_prev = gen(
+                                    _div_noises_pyramid,
+                                    amp,
+                                    in_noise=None,
+                                    start_scale=0,
+                                    stop_scale=scale - 1,
+                                )
+                            
+                            _div_prev_up = utils.interpolate(
+                                _div_prev,
+                                (
+                                    _div_noise_s.shape[2] - gen.full_zero_padding,
+                                    _div_noise_s.shape[3] - gen.full_zero_padding,
+                                ),
+                            )
+                            _p = gen.zero_padding
+                            _n_in = gen.output_channels
+                            _base_div = _div_prev_up[:, :_n_in, ...]
+                            if _p > 0:
+                                _padded_div = torch.empty(
+                                    (
+                                        _base_div.shape[0],
+                                        _base_div.shape[1],
+                                        _base_div.shape[2] + 2 * _p,
+                                        _base_div.shape[3] + 2 * _p,
+                                    ),
+                                    dtype=_base_div.dtype,
+                                    device=_base_div.device,
+                                ).fill_(gen.padding_value)
+                                _padded_div[..., _p:-_p, _p:-_p] = _base_div
+                            else:
+                                _padded_div = _base_div
+
+                            _amp_s = amp[scale]
+                            _z_in_div = _amp_s * _div_noise_s[:, :_n_in, ...] + _padded_div
+                            if gen.cond_channels > 0:
+                                _z_in_div = torch.cat([_z_in_div, _div_noise_s[:, _n_in:, ...]], dim=1)
+
+                    def _task_losses_fn(fake_local: torch.Tensor, task_idx: int | None = None) -> torch.Tensor:
                         # Residual clamp (same as Generator._residual_clamp_method)
                         from models.generator import Generator as _Gen
 
-                        fake_full = _Gen.residual_clamp_fn(
-                            fake_local,
-                            _out_detached,
-                            gen.num_facies,
-                            gen.normalization_range,
-                        )
-                        # 1. well loss
-                        wl = compute_masked_loss(
-                            fake_full, real_s, wells_s, masks_s, opts
-                        )
-                        # 2. TV + elastic + seismic
-                        tv_l, el_l, seis_l, _ = compute_rock_physics_loss(
-                            fake_full, seismic_s_dict, _scale, opts, phys
-                        )
-                        # 3. integrated rpm loss
-                        int_rpm_l = compute_integrated_rpm_loss(
-                            fake_full, phys.facies_rp_means, opts, zero
-                        )
-                        # 4. diversity (single sample → zero)
-                        div_l = zero
-                        # 5. adv + rec approximated as zero (cannot compute efficiently here)
+                        # Initialize all losses as zero
                         adv_l = zero
                         rec_fa_l = zero
+                        wl = zero
+                        div_l = zero
                         rec_rp_l = zero
+                        tv_l = zero
+                        el_l = zero
+                        seis_l = zero
+                        int_rpm_l = zero
+
+                        # Calculate only the needed losses to avoid redundant computations
+                        if task_idx is None or task_idx == 0:
+                            fake_full = _Gen.residual_clamp_fn(
+                                fake_local,
+                                _out_detached,
+                                gen.num_facies,
+                                gen.normalization_range,
+                            )
+                            adv_l = compute_adversarial_loss(
+                                _adv_disc, fake_full, opts.adversarial_loss_penalty, conditioning=_cond_tensor
+                            )
+
+                        if (task_idx is None or task_idx in (1, 4)) and _z_in_rec is not None:
+                            rec_local = scale_block(_z_in_rec)
+                            rec_full = _Gen.residual_clamp_fn(
+                                rec_local,
+                                _rec_up,
+                                gen.num_facies,
+                                gen.normalization_range,
+                            )
+                            # Quantizer
+                            if gen.num_facies < rec_full.shape[1]:
+                                _facies = rec_full[:, : gen.num_facies, ...]
+                                _imp = rec_full[:, gen.num_facies :, ...]
+                                _quant = gen.color_quantizer
+                                while hasattr(_quant, "_orig_mod") or hasattr(_quant, "module"):
+                                    if hasattr(_quant, "_orig_mod"):
+                                        _quant = getattr(_quant, "_orig_mod")
+                                    elif hasattr(_quant, "module"):
+                                        _quant = getattr(_quant, "module")
+                                _facies_q = _quant(_facies)
+                                rec_full = torch.cat([_facies_q, _imp], dim=1)
+                            else:
+                                _quant = gen.color_quantizer
+                                while hasattr(_quant, "_orig_mod") or hasattr(_quant, "module"):
+                                    if hasattr(_quant, "_orig_mod"):
+                                        _quant = getattr(_quant, "_orig_mod")
+                                    elif hasattr(_quant, "module"):
+                                        _quant = getattr(_quant, "module")
+                                rec_full = _quant(rec_full)
+
+                            _seismic_residual = None
+                            if (
+                                getattr(opts, "use_residual_coupling", False)
+                                and seismic_s_dict is not None
+                                and seismic_s_dict.get(_scale) is not None
+                                and phys is not None
+                                and getattr(opts, "use_ip", True)
+                            ):
+                                from training.metrics import compute_seismic_loss
+                                _fc = opts.num_facies_channels
+                                _rec_ip_norm = rec_full[:, _fc : _fc + 1, ...]
+                                _phys_rec = phys.denormalize_rock_physics(rec_full[:, _fc:, ...])
+                                _vp_phys = _phys_rec["Ip"] / phys.rho_mean
+                                _vp_mean = torch.mean(_vp_phys).clamp(phys.vp_min, phys.vp_max)
+                                _, _seismic_residual = compute_seismic_loss(
+                                    _rec_ip_norm,
+                                    seismic_s_dict[_scale],
+                                    _vp_mean,
+                                    phys,
+                                    dz_pixel=(
+                                        phys.dz_pyramid[_scale]
+                                        if _scale in range(len(phys.dz_pyramid))
+                                        else 0.5
+                                    ),
+                                )
+                            
+                            _rf_l, _rrp_l = calculate_reconstruction_loss_from_output(
+                                rec_full, real_s, opts, zero, _seismic_residual
+                            )
+                            if task_idx is None or task_idx == 1:
+                                rec_fa_l = _rf_l
+                            if task_idx is None or task_idx == 4:
+                                rec_rp_l = _rrp_l
+
+                        if task_idx is None or task_idx == 2:
+                            fake_full = _Gen.residual_clamp_fn(
+                                fake_local,
+                                _out_detached,
+                                gen.num_facies,
+                                gen.normalization_range,
+                            )
+                            wl = compute_masked_loss(
+                                fake_full, real_s, wells_s, masks_s, opts
+                            )
+
+                        if (task_idx is None or task_idx == 3) and _z_in_div is not None:
+                            div_local = scale_block(_z_in_div)
+                            div_full = _Gen.residual_clamp_fn(
+                                div_local,
+                                _div_prev_up,
+                                gen.num_facies,
+                                gen.normalization_range,
+                            )
+                            if gen.num_facies < div_full.shape[1]:
+                                _facies = div_full[:, : gen.num_facies, ...]
+                                _imp = div_full[:, gen.num_facies :, ...]
+                                _quant = gen.color_quantizer
+                                while hasattr(_quant, "_orig_mod") or hasattr(_quant, "module"):
+                                    if hasattr(_quant, "_orig_mod"):
+                                        _quant = getattr(_quant, "_orig_mod")
+                                    elif hasattr(_quant, "module"):
+                                        _quant = getattr(_quant, "module")
+                                _facies_q = _quant(_facies)
+                                div_full = torch.cat([_facies_q, _imp], dim=1)
+                            else:
+                                _quant = gen.color_quantizer
+                                while hasattr(_quant, "_orig_mod") or hasattr(_quant, "module"):
+                                    if hasattr(_quant, "_orig_mod"):
+                                        _quant = getattr(_quant, "_orig_mod")
+                                    elif hasattr(_quant, "module"):
+                                        _quant = getattr(_quant, "module")
+                                div_full = _quant(div_full)
+
+                            div_samples = list(torch.chunk(div_full, _n_div, dim=0))
+                            div_l = compute_diversity_loss(
+                                div_samples, opts.diversity_loss_penalty, zero
+                            )
+
+                        if task_idx is None or task_idx in (5, 6, 7):
+                            fake_full = _Gen.residual_clamp_fn(
+                                fake_local,
+                                _out_detached,
+                                gen.num_facies,
+                                gen.normalization_range,
+                            )
+                            tv_l, el_l, seis_l, _ = compute_rock_physics_loss(
+                                fake_full, seismic_s_dict, _scale, opts, phys
+                            )
+
+                        if task_idx is None or task_idx == 8:
+                            fake_full = _Gen.residual_clamp_fn(
+                                fake_local,
+                                _out_detached,
+                                gen.num_facies,
+                                gen.normalization_range,
+                            )
+                            int_rpm_l = compute_integrated_rpm_loss(
+                                fake_full, phys.facies_rp_means, opts, zero
+                            )
+
                         target_dtype = torch.float32
                         return torch.stack(
                             [
@@ -854,6 +1124,7 @@ class FaciesGAN(nn.Module):
                         z_in=z_in_gn,
                         task_losses_fn=_task_losses_fn,
                         scale_idx=scale,
+                        adv_penalty=opts.adversarial_loss_penalty,
                     )
 
                 if self.use_grad_scaler:
