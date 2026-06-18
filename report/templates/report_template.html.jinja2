@@ -53,7 +53,9 @@
     .nav-link:hover, .nav-link.active { background-color: rgba(59, 130, 246, 0.1); color: var(--accent-hover); }
     section { margin-bottom: 40px; scroll-margin-top: 30px; }
     .section-title { font-family: 'Outfit', sans-serif; font-size: 1.6rem; margin-top: 0; margin-bottom: 16px; border-bottom: 2px solid var(--card-border); padding-bottom: 8px; }
-    .card { background-color: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.15); }
+    .card { background-color: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.15); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+    .card:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,0.25); }
+    [data-theme='light'] .card:hover { box-shadow: 0 8px 25px rgba(0,0,0,0.08); }
     .card-title { font-family: 'Outfit', sans-serif; font-size: 1.2rem; margin-top: 0; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
     table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 0.9rem; border-radius: 8px; overflow: hidden; border: 1px solid var(--card-border); }
     th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--card-border); }
@@ -80,13 +82,15 @@
     .carousel-indicator-dot.active { background-color: var(--accent); width: 18px; border-radius: 3px; }
     .image-grid-5 { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
     .image-grid-losses { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
-    .image-card { text-align: center; background-color: rgba(0,0,0,0.12); border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; }
+    .image-card { text-align: center; background-color: rgba(0,0,0,0.12); border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s ease, box-shadow 0.2s ease; }
+    .image-card:hover { transform: translateY(-3px) scale(1.02); border-color: var(--accent); box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15); }
     .image-card img { max-width: 100%; border-radius: 4px; border: 1px solid var(--card-border); }
     .image-title { font-size: 0.7rem; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; }
     .badge { background-color: var(--success-bg); color: var(--success); font-size: 0.7rem; padding: 2px 6px; border-radius: 10px; font-weight: 600; }
     .discussion-box { background-color: rgba(255,255,255,0.01); border-left: 3px solid var(--accent); padding: 12px 16px; border-radius: 0 6px 6px 0; margin-top: 15px; font-size: 0.9rem; }
     .projections-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
-    .projection-card { border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; text-align: center; background-color: rgba(0,0,0,0.1); }
+    .projection-card { border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; text-align: center; background-color: rgba(0,0,0,0.1); transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s ease, box-shadow 0.2s ease; }
+    .projection-card:hover { transform: translateY(-3px) scale(1.02); border-color: var(--accent); box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15); }
     .projection-card img { max-width: 100%; border-radius: 4px; border: 1px solid var(--card-border); }
     @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     @media (max-width: 992px) { .layout-container { flex-direction: column; } aside { width: 100%; position: relative; top: 0; } }
@@ -122,8 +126,27 @@
     .toolbar-btn:hover { background-color: rgba(59,130,246,0.15); color: var(--accent-hover); border-color: var(--accent); }
     
     /* Scorecard */
-    .scorecard-rank { font-size: 1.2rem; font-weight: 700; }
-    .score-bar { display: inline-block; height: 6px; border-radius: 3px; background: linear-gradient(90deg, #10b981, #3b82f6); }
+    .scorecard-rank {
+      font-size: 1.2rem;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    tr:hover .scorecard-rank {
+      transform: scale(1.22) rotate(4deg);
+    }
+    .score-bar {
+      display: inline-block;
+      height: 8px;
+      border-radius: 4px;
+      background: linear-gradient(90deg, #10b981, #3b82f6);
+      transition: filter 0.2s ease;
+    }
+    tr:hover .score-bar {
+      filter: brightness(1.2) saturate(1.2);
+    }
     
     /* Animation player */
     .anim-player { display: flex; flex-direction: column; align-items: center; gap: 10px; }
@@ -495,33 +518,91 @@
         <!-- Variant Scorecard Table -->
         {% if scorecard_table %}
           <div class="card">
-            <h3 class="card-title">🏆 Variant Ranking Scorecard</h3>
-            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Composite score evaluating the quality and diversity of generated realizations. Weights: Facies Accuracy (20%), Rock Physics Match (20%), Pairwise Structural Diversity (30%), and Uncertainty Spread (Proportions + Ip) (30%). Lower is better.</p>
+            <h3 class="card-title">🏆 Variant Performance & Distribution Scorecard</h3>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Composite ranking evaluating the quality, physical consistency, and spatial/statistical diversity of generated realizations. Penalties are weighted equally (14.29% each). Lower is better for all metrics.</p>
             <div style="overflow-x: auto;">
               <table>
                 <thead>
                   <tr>
-                    <th style="text-align: center; width: 60px;">Rank</th>
-                    <th style="text-align: left;">Variant</th>
-                    <th style="text-align: center;">Facies RMSE (%)</th>
-                    <th style="text-align: center;">Physics Dev (%)</th>
-                    <th style="text-align: center;">Struct. Div. Penalty</th>
-                    <th style="text-align: center;">Prop. Var. Penalty</th>
-                    <th style="text-align: center;">Ip Spread Penalty</th>
-                    <th style="text-align: center;">Overall Score</th>
+                    <th rowspan="2" style="text-align: center; width: 60px; vertical-align: middle;">Rank</th>
+                    <th rowspan="2" style="text-align: left; vertical-align: middle;">Variant</th>
+                    <th colspan="7" style="text-align: center; border-bottom: 1px solid rgba(255, 255, 255, 0.08);">Evaluation Penalties (Lower is Better)</th>
+                    {% if use_ip or use_is or use_vpvs %}
+                    <th colspan="{{ (use_ip|int + use_is|int + use_vpvs|int) * 2 }}" style="text-align: center; border-bottom: 1px solid rgba(255, 255, 255, 0.08);">Distribution Distance (KL-Div / Wasserstein)</th>
+                    {% endif %}
+                    <th rowspan="2" style="text-align: center; vertical-align: middle;">Overall Score</th>
+                  </tr>
+                  <tr>
+                    <!-- Evaluation Penalties -->
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Facies RMSE (%)</th>
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Physics Dev (%)</th>
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Ip WD Pen (%)</th>
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Conn. Dev (%)</th>
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Struct. Div. Pen</th>
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Prop. Var. Pen</th>
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Ip Spread Pen</th>
+                    
+                    <!-- Distribution Distance -->
+                    {% if use_ip %}
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Ip KL</th>
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Ip WD</th>
+                    {% endif %}
+                    {% if use_is %}
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Is KL</th>
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Is WD</th>
+                    {% endif %}
+                    {% if use_vpvs %}
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Vp/Vs KL</th>
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Vp/Vs WD</th>
+                    {% endif %}
                   </tr>
                 </thead>
                 <tbody>
                   {% for row in scorecard_table %}
                     <tr{% if row.is_first %} style="background-color: rgba(16, 185, 129, 0.06);"{% endif %}>
-                      <td style="text-align: center;"><span class="scorecard-rank">{{ row.medal }}</span></td>
-                      <td style="font-weight: 600;">{{ row.label }}</td>
-                      <td style="text-align: center; font-family: monospace;">{{ row.facies_rmse }}</td>
-                      <td style="text-align: center; font-family: monospace;">{{ row.rp_dev }}</td>
-                      <td style="text-align: center; font-family: monospace;">{{ row.pairwise_ssim_penalty|round(2) }}</td>
-                      <td style="text-align: center; font-family: monospace;">{{ row.variance_matching_penalty|round(2) }}</td>
-                      <td style="text-align: center; font-family: monospace;">{{ row.ip_spread_penalty|round(2) }}</td>
-                      <td style="text-align: center;">
+                      <td style="text-align: center; vertical-align: middle;"><span class="scorecard-rank">{{ row.medal }}</span></td>
+                      <td style="font-weight: 600; vertical-align: middle;">{{ row.label }}</td>
+                      <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.facies_rmse }}</td>
+                      <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.rp_dev }}</td>
+                      <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.ip_wd_penalty }}</td>
+                      <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.conn_dev }}</td>
+                      <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.pairwise_ssim_penalty|round(2) }}</td>
+                      <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.variance_matching_penalty|round(2) }}</td>
+                      <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.ip_spread_penalty|round(2) }}</td>
+                      
+                      <!-- Distribution Distance Metrics -->
+                      {% if use_ip %}
+                        {% set metric = row.dist_metrics.ip %}
+                        {% if metric.exists %}
+                          <td style="text-align: center; vertical-align: middle;"><span style="font-family: monospace; color: {{ metric.kl_color }};">{{ metric.kl }}</span></td>
+                          <td style="text-align: center; vertical-align: middle;"><span style="font-family: monospace; color: {{ metric.wd_color }};">{{ metric.wd }}</span></td>
+                        {% else %}
+                          <td style="text-align: center; color: var(--text-muted); vertical-align: middle;">—</td>
+                          <td style="text-align: center; color: var(--text-muted); vertical-align: middle;">—</td>
+                        {% endif %}
+                      {% endif %}
+                      {% if use_is %}
+                        {% set metric = row.dist_metrics.is %}
+                        {% if metric.exists %}
+                          <td style="text-align: center; vertical-align: middle;"><span style="font-family: monospace; color: {{ metric.kl_color }};">{{ metric.kl }}</span></td>
+                          <td style="text-align: center; vertical-align: middle;"><span style="font-family: monospace; color: {{ metric.wd_color }};">{{ metric.wd }}</span></td>
+                        {% else %}
+                          <td style="text-align: center; color: var(--text-muted); vertical-align: middle;">—</td>
+                          <td style="text-align: center; color: var(--text-muted); vertical-align: middle;">—</td>
+                        {% endif %}
+                      {% endif %}
+                      {% if use_vpvs %}
+                        {% set metric = row.dist_metrics.vpvs %}
+                        {% if metric.exists %}
+                          <td style="text-align: center; vertical-align: middle;"><span style="font-family: monospace; color: {{ metric.kl_color }};">{{ metric.kl }}</span></td>
+                          <td style="text-align: center; vertical-align: middle;"><span style="font-family: monospace; color: {{ metric.wd_color }};">{{ metric.wd }}</span></td>
+                        {% else %}
+                          <td style="text-align: center; color: var(--text-muted); vertical-align: middle;">—</td>
+                          <td style="text-align: center; color: var(--text-muted); vertical-align: middle;">—</td>
+                        {% endif %}
+                      {% endif %}
+
+                      <td style="text-align: center; vertical-align: middle;">
                         <span style="font-family: monospace; font-weight: 600;">{{ row.overall }}</span>
                         <span class="score-bar" style="width: {{ row.bar_width }}px;"></span>
                       </td>
@@ -531,83 +612,24 @@
               </table>
             </div>
             <div class="discussion-box" style="margin-top: 15px;">
-              <strong>Diversity-Focused Scorecard Metrics Interpretation:</strong><br>
-              • <strong>Facies RMSE & Physics Dev:</strong> Measures how well the mean generated properties match the global real validation statistics. Lower is better.<br>
-              • <strong>Struct. Div. Penalty:</strong> Derived from pairwise SSIM. A high penalty means generated samples look too identical (mode collapse). Lower is better.<br>
-              • <strong>Prop. Var. Penalty:</strong> Checks if the standard deviation of facies proportions across realizations matches the natural geological variation seen in real data. Lower is better.<br>
-              • <strong>Ip Spread Penalty:</strong> Ensures that Ip (and other continuous properties) fluctuate reasonably across realizations, representing realistic geological uncertainty rather than deterministic output. Lower is better.<br>
-              • <strong>Overall Score:</strong> A composite score computed as the weighted average of the penalties. A lower score indicates a more balanced, high-fidelity, and sufficiently diverse realization set.
-            </div>
-          </div>
-        {% endif %}
-
-        <!-- KL-Divergence & Wasserstein Distance Table -->
-        {% if distribution_table %}
-          <div class="card">
-            <h3 class="card-title">📐 Distribution Distance Metrics</h3>
-            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">KL-Divergence and Wasserstein (Earth Mover's) distance between real and generated property distributions. Lower values indicate better distributional match.</p>
-            <div style="overflow-x: auto;">
-              <table>
-                <thead>
-                  <tr>
-                    <th style="text-align: left;">Variant</th>
-                    {% if use_ip %}
-                    <th style="text-align: center;">Ip KL-Div</th>
-                    <th style="text-align: center;">Ip Wasserstein</th>
-                    {% endif %}
-                    {% if use_is %}
-                    <th style="text-align: center;">Is KL-Div</th>
-                    <th style="text-align: center;">Is Wasserstein</th>
-                    {% endif %}
-                    {% if use_vpvs %}
-                    <th style="text-align: center;">Vp/Vs KL-Div</th>
-                    <th style="text-align: center;">Vp/Vs Wasserstein</th>
-                    {% endif %}
-                  </tr>
-                </thead>
-                <tbody>
-                  {% for row in distribution_table %}
-                    <tr>
-                      <td style="font-weight: 500;">{{ row.label }}</td>
-                      {% if use_ip %}
-                        {% set metric = row.metrics[0] %}
-                        {% if metric.exists %}
-                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.kl_color }};">{{ metric.kl }}</span></td>
-                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.wd_color }};">{{ metric.wd }}</span></td>
-                        {% else %}
-                          <td style="text-align: center; color: var(--text-muted);">—</td>
-                          <td style="text-align: center; color: var(--text-muted);">—</td>
-                        {% endif %}
-                      {% endif %}
-                      {% if use_is %}
-                        {% set metric = row.metrics[1] %}
-                        {% if metric.exists %}
-                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.kl_color }};">{{ metric.kl }}</span></td>
-                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.wd_color }};">{{ metric.wd }}</span></td>
-                        {% else %}
-                          <td style="text-align: center; color: var(--text-muted);">—</td>
-                          <td style="text-align: center; color: var(--text-muted);">—</td>
-                        {% endif %}
-                      {% endif %}
-                      {% if use_vpvs %}
-                        {% set metric = row.metrics[2] %}
-                        {% if metric.exists %}
-                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.kl_color }};">{{ metric.kl }}</span></td>
-                          <td style="text-align: center;"><span style="font-family: monospace; color: {{ metric.wd_color }};">{{ metric.wd }}</span></td>
-                        {% else %}
-                          <td style="text-align: center; color: var(--text-muted);">—</td>
-                          <td style="text-align: center; color: var(--text-muted);">—</td>
-                        {% endif %}
-                      {% endif %}
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-            <div class="discussion-box" style="margin-top: 15px;">
-              <strong>Distribution Distance Interpretation:</strong><br>
-              • <strong>KL-Divergence (Kullback-Leibler):</strong> Measures relative entropy (information loss). A value of 0 means perfect alignment of probability density function (PDF) shapes. Higher values indicate that the generated realizations fail to capture the correct proportion of extreme values (e.g., high/low impedance peaks).<br>
-              • <strong>Wasserstein Distance:</strong> Measures the physical work required to morph the generated property histogram to match the validation target. It is robust to minor value offsets and represents how well the overall range and scale of continuous properties match (lower is better).
+              <strong>Unified Scorecard & Distribution Metrics Interpretation:</strong><br>
+              <div style="margin-top: 6px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                <div>
+                  <strong>Evaluation Penalties:</strong><br>
+                  • <strong>Facies RMSE & Phys Dev:</strong> Deviation of mean facies proportions and rock physics properties from real data.<br>
+                  • <strong>Ip WD Pen:</strong> Normalized Wasserstein distance penalty for acoustic impedance (I<sub>p</sub>).<br>
+                  • <strong>Conn Dev:</strong> Absolute deviation of spatial connectivity (largest component fraction).<br>
+                  • <strong>Struct Div:</strong> Pairwise SSIM penalty (higher penalty = structural replication/mode collapse).<br>
+                  • <strong>Prop Var:</strong> Penalty for mismatch in facies proportion variance across realizations.<br>
+                  • <strong>Ip Spread:</strong> Penalty for insufficient variance in I<sub>p</sub> across realizations (using 100% target std).
+                </div>
+                <div>
+                  <strong>Distribution Distance Metrics:</strong><br>
+                  • <strong>KL-Divergence (Kullback-Leibler):</strong> Information entropy mismatch (0 = identical distributions). High values indicate poor extreme-value sampling.<br>
+                  • <strong>Wasserstein Distance (WD):</strong> Work needed to morph generated property distribution to target. Lower is better.<br>
+                  • <strong>Color Indicators:</strong> <span style="color: #34d399; font-weight: bold;">Green</span> represents excellent alignment (distance &lt; 0.05), <span style="color: #fbbf24; font-weight: bold;">Yellow</span> is acceptable (0.05 - 0.15), and <span style="color: #f87171; font-weight: bold;">Red</span> indicates significant deviation (&gt; 0.15).
+                </div>
+              </div>
             </div>
           </div>
         {% endif %}
