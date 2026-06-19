@@ -700,12 +700,18 @@ def generate_html_report(
                             milestones = set(get_milestones(epoch_indices))
 
                         slides: list[dict[str, Any]] = []
+                        final_epoch = all_epochs[0]
+                        display_final_step = final_epoch + 1 if (final_epoch == 4999 or final_epoch == 9999 or final_epoch == 10000) else final_epoch
+                        display_final_epoch = display_final_step // 10
+                        default_epoch_label = f"Step {display_final_step} (Epoch {display_final_epoch}) (Final)"
+
                         for epoch in all_epochs:
-                            display_epoch = epoch - 1 if epoch == 10000 else epoch
+                            display_step = epoch + 1 if (epoch == 4999 or epoch == 9999 or epoch == 10000) else epoch
+                            display_epoch = display_step // 10
                             epoch_label = (
-                                f"Epoch {display_epoch} (Final)"
+                                f"Step {display_step} (Epoch {display_epoch}) (Final)"
                                 if epoch == all_epochs[0]
-                                else f"Epoch {display_epoch}"
+                                else f"Step {display_step} (Epoch {display_epoch})"
                             )
                             is_milestone = epoch in milestones
 
@@ -739,7 +745,7 @@ def generate_html_report(
                             "has_gallery": True,
                             "slides": slides,
                             "use_scrubber": len(all_epochs) > 10,
-                            "default_epoch_label": f"Epoch {all_epochs[0] - 1 if all_epochs[0] == 10000 else all_epochs[0]} (Final)",
+                            "default_epoch_label": default_epoch_label,
                         }
                     else:
                         var_data["gallery"] = {"has_gallery": False}
@@ -799,14 +805,15 @@ def generate_html_report(
             if epoch_map:
                 epochs_list: list[dict[str, Any]] = []
                 for epoch in sorted(epoch_map.keys()):
-                    display_epoch = epoch - 1 if epoch == 10000 else epoch
+                    display_step = epoch + 1 if (epoch == 4999 or epoch == 9999 or epoch == 10000) else epoch
+                    display_epoch = display_step // 10
                     img_path = epoch_map[epoch]
                     light = img_path.with_name(
                         img_path.stem + "_light" + img_path.suffix
                     )
                     epochs_list.append(
                         {
-                            "label": f"Epoch {display_epoch}",
+                            "label": f"Step {display_step} (Epoch {display_epoch})",
                             "rel_path": md_relpath(img_path, report_dir),
                             "rel_path_light": (
                                 md_relpath(light, report_dir) if light.exists() else None

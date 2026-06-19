@@ -679,7 +679,7 @@
           <p>This section displays the detailed training history and outputs for each of the four conditioning scenarios. For each variant, you can inspect:</p>
           <ul>
             <li><strong>Loss Curves:</strong> The individual loss components for the Generator and Discriminator. Successful GAN training shows stabilized adversarial losses and decreasing reconstruction/physics losses.</li>
-            <li><strong>Training Evolution Gallery:</strong> Use the interactive player to watch how the GAN progressively improves its generations. At early epochs, the structures are blurry. As epochs increase, the adversarial feedback sharpens the channels.</li>
+            <li><strong>Training Evolution Gallery:</strong> Use the interactive player to watch how the GAN progressively improves its generations. At early steps, the structures are blurry. As training steps (and epochs) increase, the adversarial feedback sharpens the channels.</li>
             <li><strong>Latent Space Projections:</strong> Compares the high-dimensional latent space representation of the generated realizations with the training data.</li>
           </ul>
         </div>
@@ -996,10 +996,10 @@
                   <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
                     <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">Property: {{ dist.label }}</div>
                     {% if dist.rel_path_light %}
-                      <img src="{{ dist.rel_path }}" alt="{{ dist.label }}" class="dark-plot" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
-                      <img src="{{ dist.rel_path_light }}" alt="{{ dist.label }}" class="light-plot" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+                      <img src="{{ dist.rel_path }}" alt="{{ dist.label }}" class="dark-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
+                      <img src="{{ dist.rel_path_light }}" alt="{{ dist.label }}" class="light-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
                     {% else %}
-                      <img src="{{ dist.rel_path }}" alt="{{ dist.label }}" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+                      <img src="{{ dist.rel_path }}" alt="{{ dist.label }}" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
                     {% endif %}
                   </div>
                 {% endfor %}
@@ -1015,10 +1015,10 @@
           {% elif distribution_analysis|length == 1 %}
             <div style="text-align: center; margin-top: 15px;">
               {% if distribution_analysis[0].rel_path_light %}
-                <img src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" class="dark-plot" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
-                <img src="{{ distribution_analysis[0].rel_path_light }}" alt="{{ distribution_analysis[0].label }}" class="light-plot" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+                <img src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" class="dark-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
+                <img src="{{ distribution_analysis[0].rel_path_light }}" alt="{{ distribution_analysis[0].label }}" class="light-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
               {% else %}
-                <img src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" style="width: 100%; max-width: 650px; display: inline-block; border-radius: 8px;">
+                <img src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
               {% endif %}
             </div>
           {% else %}
@@ -1092,7 +1092,7 @@
           <div class="discussion-box" style="margin-bottom: 15px;">
             <strong>Performance Discussion:</strong><br>
             • <strong>Model Size:</strong> Reflects the cumulative storage footprint of the generated generator and discriminator weights at all pyramid scales. Variants with seismic conditioning require additional convolutional layers, increasing size.<br>
-            • <strong>Training Time:</strong> Captured directly from active TensorBoard logging intervals. Variants with more complex loss components (e.g. seismic and well physics penalties) require slightly longer backpropagation times per epoch.
+            • <strong>Training Time:</strong> Captured directly from active TensorBoard logging intervals. Variants with more complex loss components (e.g. seismic and well physics penalties) require slightly longer backpropagation times per step.
           </div>
           {% if performance_table %}
             <div style="overflow-x: auto;">
