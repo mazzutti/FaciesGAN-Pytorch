@@ -882,11 +882,29 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
 
         facies_labels = ["Floodplain", "Point Bar", "Channel", "Boundary"]
 
-        for prop_key, prop_label, real_data in properties:
-            fig, ax = plt.subplots(figsize=(8, 4.5))
-            fig.patch.set_facecolor("#151b26")
-            ax.set_facecolor("#111622")
+        # Pre-load variant proportions for facies to avoid doing it inside the subplot loop
+        facies_variant_props = {}
+        for variant in VARIANTS:
+            gen_dir = outputs_dir / variant / "generated" / "facies"
+            props = np.zeros(4)
+            if gen_dir.exists():
+                npy_files = sorted(list(gen_dir.glob("*.npy")))[:200]
+                if npy_files:
+                    try:
+                        all_gen_vals = []
+                        for f in npy_files:
+                            v = np.load(f).flatten()
+                            all_gen_vals.append(v)
+                        gen_vals = np.concatenate(all_gen_vals)
+                        u_gen, c_gen = np.unique(gen_vals, return_counts=True)
+                        for u, c in zip(u_gen, c_gen):
+                            if 0 <= int(u) < 4:
+                                props[int(u)] = c / len(gen_vals)
+                    except Exception as e:
+                        print(f"Warning: Failed to compute proportions for {variant}: {e}")
+            facies_variant_props[variant] = props
 
+        for prop_key, prop_label, real_data in properties:
             is_facies = prop_key == "facies"
             is_seismic = prop_key == "seismic"
 
@@ -896,98 +914,143 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
                 )
                 prop_label = f"{prop_label} (Standardized)"
 
-            bins: int | list[float]
+            # 1 row, 4 columns for the subplots
+            fig, axes = plt.subplots(1, 4, figsize=(15, 4.2), sharex=True, sharey=True)
+            fig.patch.set_facecolor("#151b26")
+
             if is_facies:
-                bins = (np.arange(5, dtype=float) - 0.5).tolist()
+                real_proportions = np.zeros(4)
+                unique, counts = np.unique(real_data, return_counts=True)
+                for u, c in zip(unique, counts):
+                    if 0 <= int(u) < 4:
+                        real_proportions[int(u)] = c / len(real_data)
+
+                # Facies: Subplots show each Facies Category, comparing all variants
+                datasets_short = ["Real", "W+S", "Wells", "Seismic", "Uncond"]
+                colors = ["#f0f4f9", "#00e5ff", "#ff2d9b", "#ffb300", "#76ff03"]
+
+                for cat_idx in range(4):
+                    ax = axes[cat_idx]
+                    ax.set_facecolor("#111622")
+                    ax.set_title(facies_labels[cat_idx], fontsize=11, fontweight="bold", color="#f0f4f9")
+
+                    heights = [
+                        real_proportions[cat_idx],
+                        facies_variant_props["wells_seismic"][cat_idx],
+                        facies_variant_props["wells_only"][cat_idx],
+                        facies_variant_props["seismic_only"][cat_idx],
+                        facies_variant_props["unconditional"][cat_idx],
+                    ]
+
+                    ax.bar(
+                        np.arange(5),
+                        heights,
+                        color=colors,
+                        alpha=0.85,
+                        edgecolor=colors,
+                        linewidth=1.0,
+                        zorder=3,
+                    )
+
+                    ax.tick_params(axis="both", which="major", labelsize=8, colors="#8c9eb5")
+                    ax.grid(True, axis="y", alpha=0.1, color="#8c9eb5")
+                    for spine in ax.spines.values():
+                        spine.set_color("#222d41")
+
+                    if cat_idx == 0:
+                        ax.set_ylabel("Proportion", fontsize=9, color="#8c9eb5")
+
+                    ax.set_xticks(np.arange(5))
+                    ax.set_xticklabels(datasets_short, rotation=0, fontsize=8)
+
             else:
+                # Continuous properties: Subplots show each Variant, comparing to Real
                 bins = 80
+                for idx, variant in enumerate(VARIANTS):
+                    ax = axes[idx]
+                    ax.set_facecolor("#111622")
+                    ax.set_title(VARIANT_LABELS[variant], fontsize=10, fontweight="bold", color="#f0f4f9")
 
-            ax.hist(
-                real_data,
-                bins=bins,
-                density=True,
-                alpha=0.22,
-                color="#f0f4f9",
-                edgecolor="none",
-                label="Real Data",
-                zorder=2,
-                rwidth=0.85 if is_facies else 1.0,
-            )
+                    # Plot Real Data reference in background
+                    ax.hist(
+                        real_data,
+                        bins=bins,
+                        density=True,
+                        alpha=0.15,
+                        color="#f0f4f9",
+                        edgecolor="none",
+                        label="Real Data",
+                        zorder=2,
+                    )
 
-            for variant in VARIANTS:
-                gen_dir = outputs_dir / variant / "generated" / prop_key
-                if prop_key == "vpvs":
-                    gen_dir = outputs_dir / variant / "generated" / "vp_vs"
-                if not gen_dir.exists():
-                    continue
-                npy_files = sorted(list(gen_dir.glob("*.npy")))[:200]
-                if not npy_files:
-                    continue
+                    # Plot Variant Data
+                    gen_dir = outputs_dir / variant / "generated" / prop_key
+                    if prop_key == "vpvs":
+                        gen_dir = outputs_dir / variant / "generated" / "vp_vs"
 
-                all_gen_vals: list[NDArray[Any]] = []
-                for f in npy_files:
-                    v: NDArray[Any] = np.load(f).flatten()
-                    if is_seismic:
-                        v = (v - np.mean(v)) / (np.std(v) + 1e-8)
-                    all_gen_vals.append(v)
+                    if gen_dir.exists():
+                        npy_files = sorted(list(gen_dir.glob("*.npy")))[:200]
+                        if npy_files:
+                            all_gen_vals = []
+                            for f in npy_files:
+                                v = np.load(f).flatten()
+                                if is_seismic:
+                                    v = (v - np.mean(v)) / (np.std(v) + 1e-8)
+                                all_gen_vals.append(v)
+                            gen_vals = np.concatenate(all_gen_vals)
 
-                gen_vals = np.concatenate(all_gen_vals)
+                            ax.hist(
+                                gen_vals,
+                                bins=bins,
+                                density=True,
+                                alpha=0.15,
+                                color=variant_colors[variant],
+                                histtype="stepfilled",
+                                linewidth=0,
+                                zorder=3,
+                            )
+                            ax.hist(
+                                gen_vals,
+                                bins=bins,
+                                density=True,
+                                alpha=1.0,
+                                color=variant_colors[variant],
+                                label=VARIANT_LABELS[variant],
+                                histtype="step",
+                                linewidth=2.2,
+                                zorder=10,
+                            )
 
-                ax.hist(
-                    gen_vals,
-                    bins=bins,
-                    density=True,
-                    alpha=0.07 if not is_facies else 0.12,
-                    color=variant_colors[variant],
-                    histtype="stepfilled" if not is_facies else "bar",
-                    linewidth=0,
-                    rwidth=0.65 if is_facies else 1.0,
-                    zorder=3,
-                )
-                ax.hist(
-                    gen_vals,
-                    bins=bins,
-                    density=True,
-                    alpha=1.0,
-                    color=variant_colors[variant],
-                    label=VARIANT_LABELS[variant],
-                    histtype="step",
-                    linewidth=2.2,
-                    rwidth=0.65 if is_facies else 1.0,
-                    zorder=10,
-                )
+                    ax.tick_params(axis="both", which="major", labelsize=8, colors="#8c9eb5")
+                    ax.grid(True, alpha=0.1, color="#8c9eb5")
+                    for spine in ax.spines.values():
+                        spine.set_color("#222d41")
 
-            ax.set_title(
+                    if idx == 0:
+                        ax.set_ylabel("Density", fontsize=9, color="#8c9eb5")
+
+                    ax.legend(
+                        loc="upper right",
+                        fontsize=7,
+                        frameon=True,
+                        facecolor="#151b26",
+                        edgecolor="#222d41",
+                        labelcolor="#f0f4f9",
+                    )
+
+            fig.suptitle(
                 f"Distribution: {prop_label}",
                 fontsize=13,
                 fontweight="bold",
                 color="#f0f4f9",
-            )
-            ax.set_xlabel(prop_label, fontsize=10, color="#8c9eb5")
-            ax.set_ylabel("Density", fontsize=10, color="#8c9eb5")
-
-            if is_facies:
-                ax.set_xticks(range(4))
-                ax.set_xticklabels(facies_labels)
-
-            ax.tick_params(axis="both", which="major", labelsize=9, colors="#8c9eb5")
-            ax.grid(True, alpha=0.15, color="#8c9eb5")
-            for spine in ax.spines.values():
-                spine.set_color("#222d41")
-            ax.legend(
-                loc="upper right",
-                fontsize=8,
-                frameon=True,
-                facecolor="#151b26",
-                edgecolor="#222d41",
-                labelcolor="#f0f4f9",
+                y=0.98,
             )
 
             out_path = outputs_dir / f"distribution_hist_{prop_key}.png"
-            plt.tight_layout()
-            save_dual_theme_plot(fig, ax, out_path, dpi=120)
+            plt.tight_layout(rect=[0, 0, 1, 0.94])
+            save_dual_theme_plot(fig, axes, out_path, dpi=120)
             plt.close()
-            print(f"Generated distribution histogram: {out_path}")
+            print(f"Generated distribution histogram grid: {out_path}")
 
     except Exception as e:
         print(f"Error generating distribution histograms: {e}")
