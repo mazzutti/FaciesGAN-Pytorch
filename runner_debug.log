@@ -1,0 +1,72 @@
+=== RUNNER RETURN CODE ===
+1
+
+=== RUNNER STDOUT ===
+Skipping training, using provided model paths.
+
+[INFO] Loaded 200 seen indices from checkpoint.
+DEBUG SHAPES:
+  _base_opts.num_train_pyramids: 200
+  _dataset size: 200
+  wells_pyramid[0]: torch.Size([200, 3, 12, 12])
+  wells_pyramid[1]: torch.Size([200, 3, 20, 20])
+  wells_pyramid[2]: torch.Size([200, 3, 34, 34])
+  wells_pyramid[3]: torch.Size([200, 3, 56, 56])
+  wells_pyramid[4]: torch.Size([200, 3, 92, 92])
+  wells_pyramid[5]: torch.Size([200, 3, 154, 154])
+  wells_pyramid[6]: torch.Size([200, 3, 256, 256])
+  seismic_pyramid[0]: torch.Size([200, 1, 12, 12])
+  seismic_pyramid[1]: torch.Size([200, 1, 20, 20])
+  seismic_pyramid[2]: torch.Size([200, 1, 34, 34])
+  seismic_pyramid[3]: torch.Size([200, 1, 56, 56])
+  seismic_pyramid[4]: torch.Size([200, 1, 92, 92])
+  seismic_pyramid[5]: torch.Size([200, 1, 154, 154])
+  seismic_pyramid[6]: torch.Size([200, 1, 256, 256])
+
+======================================================================
+GENERATING FACIES FROM TRAINED MODELS
+======================================================================
+
+Generating from variant: wells_seismic
+  model: outputs_old/experiments/wells_seismic
+    [cuda:1] Generating 1000 samples for outputs_old/experiments/wells_seismic (max_scale=4)
+    [cuda:1] Target spatial shape: (256, 256)
+    [cuda:1] Using 200 seen indices provided to generator.
+    [cuda:0] Generating 1000 samples for outputs_old/experiments/wells_seismic (max_scale=4)
+    [cuda:0] Target spatial shape: (256, 256)
+    [cuda:0] Using 200 seen indices provided to generator.
+
+
+=== RUNNER STDERR ===
+/home/mazzutti/POSDOC/FaciesGAN/experiments/generation.py:120: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.detach().clone() or sourceTensor.detach().clone().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  noise_amps = [torch.tensor(a, device=device) for a in model.noise_amps]
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/mazzutti/POSDOC/FaciesGAN/experiments/runner.py", line 783, in <module>
+    main()
+  File "/home/mazzutti/POSDOC/FaciesGAN/experiments/runner.py", line 362, in main
+    ) = generate_variant(
+        ^^^^^^^^^^^^^^^^^
+  File "/home/mazzutti/POSDOC/FaciesGAN/experiments/generation.py", line 317, in generate_variant
+    ) = fut.result()
+        ^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mazzutti/POSDOC/FaciesGAN/experiments/generation.py", line 136, in _generate_samples
+    noises = model.get_pyramid_noise(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mazzutti/POSDOC/FaciesGAN/models/facies_gan.py", line 1633, in get_pyramid_noise
+    self.generate_noise(
+  File "/home/mazzutti/POSDOC/FaciesGAN/models/facies_gan.py", line 1695, in generate_noise
+    z = torch.cat(parts, dim=1) if len(parts) > 1 else parts[0]
+        ^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: Sizes of tensors must match except in dimension 1. Expected size 20 but got size 12 for tensor number 1 in the list.
+
+

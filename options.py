@@ -118,7 +118,6 @@ class TrainingOptions(argparse.Namespace):
         gradnorm_lr: float = 0.0005,
         integrated_rpm_penalty: float | None = None,
         drift_loss_penalty: float | None = None,
-        use_extra_rp_loss: bool = False,
         well_loss_penalty: float | None = None,
         rec_rock_physics_loss_penalty: float | None = None,
         tv_loss_penalty: float | None = None,
@@ -276,8 +275,6 @@ class TrainingOptions(argparse.Namespace):
         seismic_stretch_percentile : int, optional
             Percentile for TensorBoard seismic contrast stretch (display-only).
             Allowed: 95, 98, 99 (default: 98).
-        use_extra_rp_loss : bool, optional
-            Enable integrated RPM and drift losses with recommended defaults. Default is False.
         use_residual_coupling : bool, optional
             Enable physics-informed residual coupling where seismic error weights Ip loss. Default is False.
         coupling_strength : float, optional
@@ -390,7 +387,6 @@ class TrainingOptions(argparse.Namespace):
         self.gradnorm_interval = gradnorm_interval
         self.gradnorm_alpha = gradnorm_alpha
         self.gradnorm_lr = gradnorm_lr
-        self.use_extra_rp_loss = use_extra_rp_loss
 
         # Store raw penalty inputs for deferred resolution in post_process()
         self._well_loss_penalty = well_loss_penalty
@@ -451,12 +447,12 @@ class TrainingOptions(argparse.Namespace):
 
         # 4. Extra losses
         if self._integrated_rpm_penalty is None:
-            self.integrated_rpm_penalty = 5.0 if getattr(self, "use_extra_rp_loss", False) else 0.0
+            self.integrated_rpm_penalty = 0.0
         else:
             self.integrated_rpm_penalty = self._integrated_rpm_penalty
 
         if self._drift_loss_penalty is None:
-            self.drift_loss_penalty = 0.001 if getattr(self, "use_extra_rp_loss", False) else 0.0
+            self.drift_loss_penalty = 0.0
         else:
             self.drift_loss_penalty = self._drift_loss_penalty
 
@@ -499,6 +495,8 @@ class ExperimentOptions(TrainingOptions):
             "seismic_only",
             "unconditional",
         ],
+        uncertainty_index: int = 100,
+        uncertainty_samples: int = 1000,
         **kwargs: Any,
     ) -> None:
         """Initialize ExperimentOptions, forwarding training args to parent.
@@ -538,6 +536,10 @@ class ExperimentOptions(TrainingOptions):
             Strength of the residual coupling modulation. Default is 1.0.
         variants : list of str, optional
             List of variant IDs to train/evaluate. Default is None (all variants).
+        uncertainty_index : int, optional
+            Index of the training sample to use for uncertainty analysis. Default is 100.
+        uncertainty_samples : int, optional
+            Number of realizations to generate for uncertainty analysis. Default is 1000.
         **kwargs : Any
             Additional training arguments passed to the :class:`TrainingOptions`
             constructor.
@@ -555,6 +557,8 @@ class ExperimentOptions(TrainingOptions):
         self.use_residual_coupling = use_residual_coupling
         self.coupling_strength = coupling_strength
         self.variants = variants
+        self.uncertainty_index = uncertainty_index
+        self.uncertainty_samples = uncertainty_samples
 
 
 # noinspection PyMissingConstructor

@@ -809,6 +809,10 @@ def compute_integrated_rpm_loss(
     W0 = torch.clamp(1.0 - R - G - B, 0.0, 1.0)
     probs = torch.cat([W0, R, B, G], dim=1) # (B, 4, H, W)
 
+    # Normalize probabilities to sum to 1.0 across channels to prevent scaling bias
+    probs_sum = torch.clamp(probs.sum(dim=1, keepdim=True), min=1e-10)
+    probs = probs / probs_sum
+
     # Slice facies_rp_means along dim=2
     rp_means = facies_rp_means[:, :, enabled_indices, ...]
     rp_expected = torch.sum(probs.unsqueeze(2) * rp_means.to(device=fake.device), dim=1)

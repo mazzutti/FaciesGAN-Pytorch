@@ -81,7 +81,21 @@ def get_arguments() -> ArgumentParser:
     # 4. Latent space / Metrics options
     _add_latent_space_args(parser)
 
-    # 5. UI/Logging overrides
+    # 5. Uncertainty options
+    parser.add_argument(
+        "--uncertainty-index",
+        type=int,
+        default=100,
+        help="Index of the training sample to use for uncertainty analysis (default: 100).",
+    )
+    parser.add_argument(
+        "--uncertainty-samples",
+        type=int,
+        default=1000,
+        help="Number of realizations to generate for uncertainty analysis (default: 1000).",
+    )
+
+    # 6. UI/Logging overrides
     cli_shared.add_runtime_args(parser)
 
     return parser
@@ -270,8 +284,6 @@ def build_training_args(
         cmd.extend(["--dz-pixel", str(args.dz_pixel)])
         cmd.extend(["--wavelet-f-peak", str(args.wavelet_f_peak)])
         cmd.extend(["--wavelet-dt", str(args.wavelet_dt)])
-        if getattr(args, "use_extra_rp_loss", False):
-            cmd.append("--use-extra-rp-loss")
         if getattr(args, "integrated_rpm_penalty", 0.0) > 0:
             cmd.extend(["--integrated-rpm-penalty", str(args.integrated_rpm_penalty)])
         if getattr(args, "drift_loss_penalty", 0.0) > 0:

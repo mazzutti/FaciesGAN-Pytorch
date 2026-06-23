@@ -265,6 +265,7 @@ def ensure_pyramid_images(outputs_dir: Path, data_dir: Path) -> None:
             import torch
             from datasets.dataset import PyramidsDataset
             from options import TrainingOptions
+
             opt = TrainingOptions()
             opt.input_path = str(data_dir)
             opt.use_rock_physics = True
@@ -301,7 +302,7 @@ def ensure_pyramid_images(outputs_dir: Path, data_dir: Path) -> None:
                     if img_path.exists():
                         img = Image.open(img_path)
                         ax.imshow(img)
-                
+
                 ax.set_xticks([])
                 ax.set_yticks([])
                 ax.set_facecolor("#111622")
@@ -497,7 +498,9 @@ def ensure_training_pyramid_image(outputs_dir: Path, data_dir: Path) -> None:
                             else (w < opt.normalization_range[0] + 0.1).all(dim=0)
                         )
                         w_idx[mask] = np.nan
-                        ax.imshow(w_idx, cmap=well_cmap, vmin=0, vmax=len(PALETTE_RGB) - 1)
+                        ax.imshow(
+                            w_idx, cmap=well_cmap, vmin=0, vmax=len(PALETTE_RGB) - 1
+                        )
 
                 elif prop == "Seismic":
                     if s is not None:
@@ -876,9 +879,7 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
         if getattr(opt, "use_vpvs", True) and real_vpvs_arr is not None:
             properties.append(("vpvs", "Vp/Vs Ratio", real_vpvs_arr))
         if getattr(opt, "use_ip", True) and real_seismic_arr is not None:
-            properties.append(
-                ("seismic", "Seismic (Comp. from Ip)", real_seismic_arr)
-            )
+            properties.append(("seismic", "Seismic (Comp. from Ip)", real_seismic_arr))
 
         facies_labels = ["Floodplain", "Point Bar", "Channel", "Boundary"]
 
@@ -901,7 +902,9 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
                             if 0 <= int(u) < 4:
                                 props[int(u)] = c / len(gen_vals)
                     except Exception as e:
-                        print(f"Warning: Failed to compute proportions for {variant}: {e}")
+                        print(
+                            f"Warning: Failed to compute proportions for {variant}: {e}"
+                        )
             facies_variant_props[variant] = props
 
         for prop_key, prop_label, real_data in properties:
@@ -932,7 +935,12 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
                 for cat_idx in range(4):
                     ax = axes[cat_idx]
                     ax.set_facecolor("#111622")
-                    ax.set_title(facies_labels[cat_idx], fontsize=11, fontweight="bold", color="#f0f4f9")
+                    ax.set_title(
+                        facies_labels[cat_idx],
+                        fontsize=11,
+                        fontweight="bold",
+                        color="#f0f4f9",
+                    )
 
                     heights = [
                         real_proportions[cat_idx],
@@ -952,7 +960,9 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
                         zorder=3,
                     )
 
-                    ax.tick_params(axis="both", which="major", labelsize=8, colors="#8c9eb5")
+                    ax.tick_params(
+                        axis="both", which="major", labelsize=8, colors="#8c9eb5"
+                    )
                     ax.grid(True, axis="y", alpha=0.1, color="#8c9eb5")
                     for spine in ax.spines.values():
                         spine.set_color("#222d41")
@@ -969,7 +979,12 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
                 for idx, variant in enumerate(VARIANTS):
                     ax = axes[idx]
                     ax.set_facecolor("#111622")
-                    ax.set_title(VARIANT_LABELS[variant], fontsize=10, fontweight="bold", color="#f0f4f9")
+                    ax.set_title(
+                        VARIANT_LABELS[variant],
+                        fontsize=10,
+                        fontweight="bold",
+                        color="#f0f4f9",
+                    )
 
                     # Plot Real Data reference in background
                     ax.hist(
@@ -1021,7 +1036,9 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
                                 zorder=10,
                             )
 
-                    ax.tick_params(axis="both", which="major", labelsize=8, colors="#8c9eb5")
+                    ax.tick_params(
+                        axis="both", which="major", labelsize=8, colors="#8c9eb5"
+                    )
                     ax.grid(True, alpha=0.1, color="#8c9eb5")
                     for spine in ax.spines.values():
                         spine.set_color("#222d41")
@@ -1173,8 +1190,7 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
                         if getattr(opt, "use_vpvs", True):
                             active_properties.append("VP_VS")
                         prop_indices = {
-                            name: idx
-                            for idx, name in enumerate(active_properties)
+                            name: idx for idx, name in enumerate(active_properties)
                         }
 
                         if prop_key == "ip" and "Ip" in prop_indices:
@@ -1393,7 +1409,13 @@ def ensure_loss_plots(outputs_dir: Path) -> None:
                 ax.plot(steps, values, alpha=0.15, color=color)
                 ax.plot(steps, smoothed, color=color, linewidth=2.0)
 
-                title = clean_name.replace("_light", "").replace("light", "").replace("Light", "").replace("_", " ").strip()
+                title = (
+                    clean_name.replace("_light", "")
+                    .replace("light", "")
+                    .replace("Light", "")
+                    .replace("_", " ")
+                    .strip()
+                )
                 ax.set_title(title, fontsize=11, fontweight="bold", color="#f0f4f9")
                 ax.grid(True, alpha=0.2, color="#8c9eb5")
 

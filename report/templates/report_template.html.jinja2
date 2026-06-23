@@ -208,12 +208,13 @@
         <li><a href="#training-pyramids" class="nav-link">3. Training Pyramids (GT)</a></li>
         <li><a href="#hyperparameters" class="nav-link">4. Hyperparameters</a></li>
         <li><a href="#comparison-grids" class="nav-link">5. Comparison Grids</a></li>
-        <li><a href="#quantitative-analysis" class="nav-link">6. Quantitative Analysis</a></li>
-        <li><a href="#experiment-variants" class="nav-link">7. Experiment Variants</a></li>
-        <li><a href="#cross-variant-synthesis" class="nav-link">8. Cross-Variant Manifolds</a></li>
-        <li><a href="#distribution-analysis" class="nav-link">9. Distribution Analysis</a></li>
-        <li><a href="#spatial-continuity" class="nav-link">10. Spatial Continuity</a></li>
-        <li><a href="#timing-performance" class="nav-link">11. Timing & Performance</a></li>
+        <li><a href="#uncertainty-analysis" class="nav-link">6. Uncertainty Analysis</a></li>
+        <li><a href="#quantitative-analysis" class="nav-link">7. Quantitative Analysis</a></li>
+        <li><a href="#experiment-variants" class="nav-link">8. Experiment Variants</a></li>
+        <li><a href="#cross-variant-synthesis" class="nav-link">9. Cross-Variant Manifolds</a></li>
+        <li><a href="#distribution-analysis" class="nav-link">10. Distribution Analysis</a></li>
+        <li><a href="#spatial-continuity" class="nav-link">11. Spatial Continuity</a></li>
+        <li><a href="#timing-performance" class="nav-link">12. Timing & Performance</a></li>
       </ul>
     </aside>
 
@@ -242,7 +243,7 @@
               {% for img in seismic_images %}
                 <div class="projection-card">
                   <div class="image-title">{{ img.name }}</div>
-                  <img src="{{ img.rel_path }}" alt="{{ img.name }}">
+                  <img loading="lazy" src="{{ img.rel_path }}" alt="{{ img.name }}">
                 </div>
               {% endfor %}
             </div>
@@ -260,7 +261,7 @@
               {% for img in well_images %}
                 <div class="projection-card">
                   <div class="image-title">{{ img.name }}</div>
-                  <img src="{{ img.rel_path }}" alt="{{ img.name }}">
+                  <img loading="lazy" src="{{ img.rel_path }}" alt="{{ img.name }}">
                 </div>
               {% endfor %}
             </div>
@@ -290,10 +291,10 @@
                   <div class="tab-pane{% if loop.first %} active{% endif %}">
                     <div class="tab-print-title">{{ pyr.label }}</div>
                     {% if pyr.rel_path_light %}
-                      <img src="{{ pyr.rel_path }}" alt="{{ pyr.label }}" class="dark-plot" style="width: 100%; border-radius: 8px;">
-                      <img src="{{ pyr.rel_path_light }}" alt="{{ pyr.label }}" class="light-plot" style="width: 100%; border-radius: 8px;">
+                      <img loading="lazy" src="{{ pyr.rel_path }}" alt="{{ pyr.label }}" class="dark-plot" style="width: 100%; border-radius: 8px;">
+                      <img loading="lazy" src="{{ pyr.rel_path_light }}" alt="{{ pyr.label }}" class="light-plot" style="width: 100%; border-radius: 8px;">
                     {% else %}
-                      <img src="{{ pyr.rel_path }}" alt="{{ pyr.label }}" style="width: 100%; border-radius: 8px;">
+                      <img loading="lazy" src="{{ pyr.rel_path }}" alt="{{ pyr.label }}" style="width: 100%; border-radius: 8px;">
                     {% endif %}
                     <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 8px;">{{ pyr.description }}</p>
                   </div>
@@ -379,10 +380,10 @@
                   <div class="tab-pane{% if loop.first %} active{% endif %}">
                     <div class="tab-print-title">{{ grid.label }}</div>
                     {% if grid.rel_path_light %}
-                      <img src="{{ grid.rel_path }}" alt="{{ grid.label }}" class="dark-plot" style="width: 100%; border-radius: 8px;">
-                      <img src="{{ grid.rel_path_light }}" alt="{{ grid.label }}" class="light-plot" style="width: 100%; border-radius: 8px;">
+                      <img loading="lazy" src="{{ grid.rel_path }}" alt="{{ grid.label }}" class="dark-plot" style="width: 100%; border-radius: 8px;">
+                      <img loading="lazy" src="{{ grid.rel_path_light }}" alt="{{ grid.label }}" class="light-plot" style="width: 100%; border-radius: 8px;">
                     {% else %}
-                      <img src="{{ grid.rel_path }}" alt="{{ grid.label }}" style="width: 100%; border-radius: 8px;">
+                      <img loading="lazy" src="{{ grid.rel_path }}" alt="{{ grid.label }}" style="width: 100%; border-radius: 8px;">
                     {% endif %}
                     <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 8px;">Realization grid for {{ grid.label.lower() }}. Columns show: Real ground-truth, Wells+Seismic, Wells Only, Seismic Only, and Unconditional respectively.</p>
                   </div>
@@ -395,9 +396,50 @@
         </div>
       </section>
 
-      <!-- Section 6: Quantitative Analysis -->
+      <!-- Section 6: Uncertainty Analysis -->
+      <section id="uncertainty-analysis">
+        <h2 class="section-title">6. Subsurface Uncertainty Analysis (1000 Realizations)</h2>
+        <div class="card">
+          <p>This section evaluates the local spatial uncertainty for each variant by generating <strong>1000 realizations</strong> conformed to the same conditioning data profile (at training index {{ uncertainty_index }}). We compute the mismatch probability for categorical facies, and the Mean Absolute Error (MAE) for acoustic impedance (Ip) and synthetic seismic relative to the ground truth:</p>
+          <div class="discussion-box" style="margin-bottom: 20px;">
+            <strong>Understanding Uncertainty Maps:</strong><br>
+            • <strong>Facies Mismatch Probability:</strong> Indicates how often the generated facies class at a pixel differs from the ground truth. Red indicators show well locations where conditional variants should have 0% uncertainty.<br>
+            • <strong>Ip / Seismic Mean Absolute Error:</strong> Measures the average physical deviation from the ground truth. Lower values represent higher confidence in the prediction.
+          </div>
+          {% if uncertainty_results %}
+            <div class="tab-container">
+              <div class="tab-headers">
+                {% for res in uncertainty_results %}
+                  <button class="tab-btn{% if loop.first %} active{% endif %}">{{ res.label }}</button>
+                {% endfor %}
+              </div>
+              <div class="tab-panes">
+                {% for res in uncertainty_results %}
+                  <div class="tab-pane{% if loop.first %} active{% endif %}">
+                    <div class="tab-print-title">{{ res.label }} - Uncertainty Overview</div>
+                    {% if res.rel_path_light %}
+                      <img loading="lazy" src="{{ res.rel_path }}" alt="{{ res.label }} Uncertainty" class="dark-plot" style="width: 100%; border-radius: 8px;">
+                      <img loading="lazy" src="{{ res.rel_path_light }}" alt="{{ res.label }} Uncertainty" class="light-plot" style="width: 100%; border-radius: 8px;">
+                    {% else %}
+                      <img loading="lazy" src="{{ res.rel_path }}" alt="{{ res.label }} Uncertainty" style="width: 100%; border-radius: 8px;">
+                    {% endif %}
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 8px;">
+                      Uncertainty profile for the <strong>{{ res.label }}</strong> variant based on 1000 realizations. 
+                      Row 1 shows Ground Truth (Real) data, and Row 2 shows the computed spatial uncertainty (Facies mismatch probability, Ip MAE, and Seismic MAE).
+                    </p>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          {% else %}
+            <p style="color: var(--text-muted);">No uncertainty maps found. Please run the uncertainty generation step first.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <!-- Section 7: Quantitative Analysis -->
       <section id="quantitative-analysis">
-        <h2 class="section-title">6. Quantitative Statistical Analysis</h2>
+        <h2 class="section-title">7. Quantitative Statistical Analysis</h2>
         
         <!-- Facies table -->
         <div class="card">
@@ -674,7 +716,7 @@
 
       <!-- Section 8: Experiment Variants -->
       <section id="experiment-variants">
-        <h2 class="section-title">7. Experiment Variants</h2>
+        <h2 class="section-title">8. Experiment Variants</h2>
         <div class="card">
           <p>This section displays the detailed training history and outputs for each of the four conditioning scenarios. For each variant, you can inspect:</p>
           <ul>
@@ -705,10 +747,10 @@
                                 <div class="image-card">
                                   <div class="image-title">{{ path.label }}</div>
                                   {% if path.rel_path_light %}
-                                    <img src="{{ path.rel_path }}" alt="{{ path.label }}" class="dark-plot">
-                                    <img src="{{ path.rel_path_light }}" alt="{{ path.label }}" class="light-plot">
+                                    <img loading="lazy" src="{{ path.rel_path }}" alt="{{ path.label }}" class="dark-plot">
+                                    <img loading="lazy" src="{{ path.rel_path_light }}" alt="{{ path.label }}" class="light-plot">
                                   {% else %}
-                                    <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                                    <img loading="lazy" src="{{ path.rel_path }}" alt="{{ path.label }}">
                                   {% endif %}
                                 </div>
                               {% endfor %}
@@ -722,10 +764,10 @@
                                 <div class="image-card">
                                   <div class="image-title">{{ path.label }}</div>
                                   {% if path.rel_path_light %}
-                                    <img src="{{ path.rel_path }}" alt="{{ path.label }}" class="dark-plot">
-                                    <img src="{{ path.rel_path_light }}" alt="{{ path.label }}" class="light-plot">
+                                    <img loading="lazy" src="{{ path.rel_path }}" alt="{{ path.label }}" class="dark-plot">
+                                    <img loading="lazy" src="{{ path.rel_path_light }}" alt="{{ path.label }}" class="light-plot">
                                   {% else %}
-                                    <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                                    <img loading="lazy" src="{{ path.rel_path }}" alt="{{ path.label }}">
                                   {% endif %}
                                 </div>
                               {% endfor %}
@@ -748,10 +790,10 @@
                           <div class="image-card">
                             <div class="image-title">{{ path.label }}</div>
                             {% if path.rel_path_light %}
-                              <img src="{{ path.rel_path }}" alt="{{ path.label }}" class="dark-plot">
-                              <img src="{{ path.rel_path_light }}" alt="{{ path.label }}" class="light-plot">
+                              <img loading="lazy" src="{{ path.rel_path }}" alt="{{ path.label }}" class="dark-plot">
+                              <img loading="lazy" src="{{ path.rel_path_light }}" alt="{{ path.label }}" class="light-plot">
                             {% else %}
-                              <img src="{{ path.rel_path }}" alt="{{ path.label }}">
+                              <img loading="lazy" src="{{ path.rel_path }}" alt="{{ path.label }}">
                             {% endif %}
                           </div>
                         {% endfor %}
@@ -767,10 +809,10 @@
                   <summary style="font-size: 0.95rem; font-weight: 600; color: var(--accent); cursor: pointer;">🏢 View Multi-Scale Generated Realizations</summary>
                   <div style="margin-top: 15px;">
                     {% if var.pyramid_overview_light %}
-                      <img src="{{ var.pyramid_overview }}" alt="Pyramid Overview" class="dark-plot" style="width: 100%; border-radius: 8px;">
-                      <img src="{{ var.pyramid_overview_light }}" alt="Pyramid Overview" class="light-plot" style="width: 100%; border-radius: 8px;">
+                      <img loading="lazy" src="{{ var.pyramid_overview }}" alt="Pyramid Overview" class="dark-plot" style="width: 100%; border-radius: 8px;">
+                      <img loading="lazy" src="{{ var.pyramid_overview_light }}" alt="Pyramid Overview" class="light-plot" style="width: 100%; border-radius: 8px;">
                     {% else %}
-                      <img src="{{ var.pyramid_overview }}" alt="Pyramid Overview" style="width: 100%; border-radius: 8px;">
+                      <img loading="lazy" src="{{ var.pyramid_overview }}" alt="Pyramid Overview" style="width: 100%; border-radius: 8px;">
                     {% endif %}
                   </div>
                 </details>
@@ -798,7 +840,7 @@
                             {% if prop.rel_path %}
                               <div class="image-card">
                                 <div class="image-title">{{ prop.label }}</div>
-                                <img src="{{ prop.rel_path }}" alt="{{ prop.label }}">
+                                <img loading="lazy" src="{{ prop.rel_path }}" alt="{{ prop.label }}">
                               </div>
                             {% else %}
                               <div class="image-card" style="display: flex; align-items: center; justify-content: center; height: 80px; border: 1px dashed var(--card-border);">
@@ -847,10 +889,10 @@
                               <div class="projection-card">
                                 <div class="image-title">{{ method.label }}</div>
                                 {% if method.rel_path_light %}
-                                  <img src="{{ method.rel_path }}" alt="{{ method.label }}" class="dark-plot">
-                                  <img src="{{ method.rel_path_light }}" alt="{{ method.label }}" class="light-plot">
+                                  <img loading="lazy" src="{{ method.rel_path }}" alt="{{ method.label }}" class="dark-plot">
+                                  <img loading="lazy" src="{{ method.rel_path_light }}" alt="{{ method.label }}" class="light-plot">
                                 {% else %}
-                                  <img src="{{ method.rel_path }}" alt="{{ method.label }}">
+                                  <img loading="lazy" src="{{ method.rel_path }}" alt="{{ method.label }}">
                                 {% endif %}
                               </div>
                             {% endfor %}
@@ -869,7 +911,7 @@
 
       <!-- Section 9: Cross-Variant Projections -->
       <section id="cross-variant-synthesis">
-        <h2 class="section-title">8. Cross-Variant Embedding Synthesis</h2>
+        <h2 class="section-title">9. Cross-Variant Embedding Synthesis</h2>
         <div class="card">
           <p>Manifold learning methods (MDS, UMAP, Isomap, and t-SNE) project high-dimensional geological models into a 2D space. This allows us to visualize the latent structure learned by the networks and evaluate model generalization:</p>
           <div class="discussion-box" style="margin-bottom: 15px;">
@@ -937,10 +979,10 @@
                                   <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
                                     <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">{{ img.label }}</div>
                                     {% if img.rel_path_light %}
-                                      <img src="{{ img.rel_path }}" alt="{{ img.label }}" class="dark-plot" style="width: 100%; max-width: 500px; display: inline-block; border-radius: 8px;">
-                                      <img src="{{ img.rel_path_light }}" alt="{{ img.label }}" class="light-plot" style="width: 100%; max-width: 500px; display: inline-block; border-radius: 8px;">
+                                      <img loading="lazy" src="{{ img.rel_path }}" alt="{{ img.label }}" class="dark-plot" style="width: 100%; max-width: 500px; display: inline-block; border-radius: 8px;">
+                                      <img loading="lazy" src="{{ img.rel_path_light }}" alt="{{ img.label }}" class="light-plot" style="width: 100%; max-width: 500px; display: inline-block; border-radius: 8px;">
                                     {% else %}
-                                      <img src="{{ img.rel_path }}" alt="{{ img.label }}" style="width: 100%; max-width: 500px; display: inline-block; border-radius: 8px;">
+                                      <img loading="lazy" src="{{ img.rel_path }}" alt="{{ img.label }}" style="width: 100%; max-width: 500px; display: inline-block; border-radius: 8px;">
                                     {% endif %}
                                   </div>
                                 {% endfor %}
@@ -957,10 +999,10 @@
                             <div style="background-color: rgba(0,0,0,0.15); border: 1px solid var(--card-border); border-radius: 6px; padding: 6px; text-align: center;">
                               <div class="image-title">Final Grid</div>
                               {% if method.images[0].rel_path_light %}
-                                <img src="{{ method.images[0].rel_path }}" alt="Final Grid" class="dark-plot" style="max-width: 50%; min-width: 260px; border-radius: 4px; display: inline-block;">
-                                <img src="{{ method.images[0].rel_path_light }}" alt="Final Grid" class="light-plot" style="max-width: 50%; min-width: 260px; border-radius: 4px; display: inline-block;">
+                                <img loading="lazy" src="{{ method.images[0].rel_path }}" alt="Final Grid" class="dark-plot" style="max-width: 50%; min-width: 260px; border-radius: 4px; display: inline-block;">
+                                <img loading="lazy" src="{{ method.images[0].rel_path_light }}" alt="Final Grid" class="light-plot" style="max-width: 50%; min-width: 260px; border-radius: 4px; display: inline-block;">
                               {% else %}
-                                <img src="{{ method.images[0].rel_path }}" alt="Final Grid" style="max-width: 50%; min-width: 260px; border-radius: 4px;">
+                                <img loading="lazy" src="{{ method.images[0].rel_path }}" alt="Final Grid" style="max-width: 50%; min-width: 260px; border-radius: 4px;">
                               {% endif %}
                             </div>
                           {% endif %}
@@ -979,7 +1021,7 @@
 
       <!-- Section 10: Distribution Analysis -->
       <section id="distribution-analysis">
-        <h2 class="section-title">9. Distribution Analysis</h2>
+        <h2 class="section-title">10. Distribution Analysis</h2>
         <div class="card">
           <p>Overlaid histograms comparing the categorical and continuous property distributions of the real validation data vs. all generated variants. This visualization helps identify potential bias or mode collapse in the latent representations and physical parameter space:</p>
           <div class="discussion-box" style="margin-bottom: 15px;">
@@ -996,10 +1038,10 @@
                   <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
                     <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">Property: {{ dist.label }}</div>
                     {% if dist.rel_path_light %}
-                      <img src="{{ dist.rel_path }}" alt="{{ dist.label }}" class="dark-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
-                      <img src="{{ dist.rel_path_light }}" alt="{{ dist.label }}" class="light-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
+                      <img loading="lazy" src="{{ dist.rel_path }}" alt="{{ dist.label }}" class="dark-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
+                      <img loading="lazy" src="{{ dist.rel_path_light }}" alt="{{ dist.label }}" class="light-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
                     {% else %}
-                      <img src="{{ dist.rel_path }}" alt="{{ dist.label }}" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
+                      <img loading="lazy" src="{{ dist.rel_path }}" alt="{{ dist.label }}" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
                     {% endif %}
                   </div>
                 {% endfor %}
@@ -1015,10 +1057,10 @@
           {% elif distribution_analysis|length == 1 %}
             <div style="text-align: center; margin-top: 15px;">
               {% if distribution_analysis[0].rel_path_light %}
-                <img src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" class="dark-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
-                <img src="{{ distribution_analysis[0].rel_path_light }}" alt="{{ distribution_analysis[0].label }}" class="light-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
+                <img loading="lazy" src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" class="dark-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
+                <img loading="lazy" src="{{ distribution_analysis[0].rel_path_light }}" alt="{{ distribution_analysis[0].label }}" class="light-plot" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
               {% else %}
-                <img src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
+                <img loading="lazy" src="{{ distribution_analysis[0].rel_path }}" alt="{{ distribution_analysis[0].label }}" style="width: 100%; max-width: 950px; display: inline-block; border-radius: 8px;">
               {% endif %}
             </div>
           {% else %}
@@ -1029,7 +1071,7 @@
 
       <!-- Section 11: Spatial Continuity -->
       <section id="spatial-continuity">
-        <h2 class="section-title">10. Spatial Continuity Analysis</h2>
+        <h2 class="section-title">11. Spatial Continuity Analysis</h2>
         <div class="card">
           <p>Variograms quantify the spatial correlation and continuity of geological properties by measuring how the variance between data points increases with distance (lag). This analysis evaluates whether the GAN-generated realizations (Facies, Ip{% if use_is %}, Is{% endif %}{% if use_vpvs %}, Vp/Vs{% endif %}, and Seismic) correctly capture the characteristic spatial structures of the original reservoir data.</p>
           <p>Key variogram parameters used for evaluation include:</p>
@@ -1053,10 +1095,10 @@
                   <div class="carousel-slide" style="{% if loop.first %}display: block;{% else %}display: none;{% endif %} text-align: center;">
                     <div style="font-size: 0.95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px;">Property: {{ var_plot.label }}</div>
                     {% if var_plot.rel_path_light %}
-                      <img src="{{ var_plot.rel_path }}" alt="{{ var_plot.label }}" class="dark-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
-                      <img src="{{ var_plot.rel_path_light }}" alt="{{ var_plot.label }}" class="light-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                      <img loading="lazy" src="{{ var_plot.rel_path }}" alt="{{ var_plot.label }}" class="dark-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                      <img loading="lazy" src="{{ var_plot.rel_path_light }}" alt="{{ var_plot.label }}" class="light-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
                     {% else %}
-                      <img src="{{ var_plot.rel_path }}" alt="{{ var_plot.label }}" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                      <img loading="lazy" src="{{ var_plot.rel_path }}" alt="{{ var_plot.label }}" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
                     {% endif %}
                   </div>
                 {% endfor %}
@@ -1072,10 +1114,10 @@
           {% elif spatial_continuity|length == 1 %}
             <div style="text-align: center; margin-top: 15px;">
               {% if spatial_continuity[0].rel_path_light %}
-                <img src="{{ spatial_continuity[0].rel_path }}" alt="{{ spatial_continuity[0].label }}" class="dark-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
-                <img src="{{ spatial_continuity[0].rel_path_light }}" alt="{{ spatial_continuity[0].label }}" class="light-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                <img loading="lazy" src="{{ spatial_continuity[0].rel_path }}" alt="{{ spatial_continuity[0].label }}" class="dark-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                <img loading="lazy" src="{{ spatial_continuity[0].rel_path_light }}" alt="{{ spatial_continuity[0].label }}" class="light-plot" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
               {% else %}
-                <img src="{{ spatial_continuity[0].rel_path }}" alt="{{ spatial_continuity[0].label }}" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
+                <img loading="lazy" src="{{ spatial_continuity[0].rel_path }}" alt="{{ spatial_continuity[0].label }}" style="width: 100%; max-width: 800px; display: inline-block; border-radius: 8px;">
               {% endif %}
             </div>
           {% else %}
@@ -1086,7 +1128,7 @@
 
       <!-- Section 12: Timing & Performance -->
       <section id="timing-performance">
-        <h2 class="section-title">11. Timing & Performance</h2>
+        <h2 class="section-title">12. Timing & Performance</h2>
         <div class="card">
           <p>Computational metrics including training duration and total model size (checkpoints) for each variant:</p>
           <div class="discussion-box" style="margin-bottom: 15px;">

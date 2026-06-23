@@ -336,3 +336,114 @@ def generate_variant(
             0,
             seen_indices=seen_indices,
         )
+
+
+def generate_uncertainty_samples(
+    gpu_id: int | None,
+    model_path: str,
+    opts: TrainingOptions,
+    how_many: int,
+    wells_pyramid: tuple[torch.Tensor, ...],
+    seismic_pyramid: tuple[torch.Tensor, ...],
+    channels: dict[ChannelKey, int],
+    selected_idx: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Generate facies, Ip, and synthetic seismic samples for uncertainty analysis.
+
+    Does NOT save individual samples to disk. Returns numpy arrays.
+    """
+    device = device_manager.get_or_initialize(gpu_id)
+
+    import copy
+    opts_eval = copy.deepcopy(opts)
+    opts_eval.compile_backend = False
+
+    model = FaciesGAN(options=opts_eval, channels=channels)
+    model.load(model_path, load_discriminator=False, load_wells=False)
+
+    has_rock_physics = opts.use_rock_physics
+    facies_ch = model.num_facies_channels
+
+    max_scale = len(model.noise_amps) - 1
+
+    all_facies: list[np.ndarray] = []
+    all_ip: list[np.ndarray] = []
+    all_seismic: list[np.ndarray] = []
+
+    # Batch size for generation to avoid OOM
+    batch_size = 20
+
+    wells_dict = (
+        {i: wells_pyramid[i] for i in range(len(wells_pyramid))}
+        if (wells_pyramid and opts.use_wells)
+        else {}
+    )
+    seismic_dict = (
+        {i: seismic_pyramid[i] for i in range(len(seismic_pyramid))}
+        if (seismic_pyramid and opts.use_seismic)
+        else {}
+    )
+
+    noise_amps = [torch.tensor(a, device=device) for a in model.noise_amps]
+
+    for off in range(0, how_many, batch_size):
+        count = min(batch_size, how_many - off)
+        mi_idx = [selected_idx] * count
+        mi = torch.tensor(mi_idx, dtype=torch.long, device=device)
+
+        with torch.no_grad():
+            noises = model.get_pyramid_noise(
+                max_scale, mi, wells_dict, seismic_dict, rec=opts.rec
+            )
+            for j, g in enumerate(model.generator(noises, noise_amps)):
+                split = split_facies_rp(
+                    g.unsqueeze(0), num_facies=facies_ch, has_rp=has_rock_physics
+                )
+                facies_t = split[SplitKey.FACIES]
+                rp_t = split[SplitKey.ROCK_PHYSICS]
+
+                if facies_t is None:
+                    continue
+                facies_np = device_manager.to_numpy(facies_t.squeeze(0))
+                all_facies.append(facies_np)
+
+                if has_rock_physics and rp_t is not None:
+                    phys_dict = model.physics_state.denormalize_rock_physics(rp_t)
+                    if "Ip" in phys_dict:
+                        ip_phys = device_manager.to_numpy(
+                            phys_dict[DataFiles.Ip.name].squeeze(0)
+                        )
+                        all_ip.append(ip_phys)
+
+                    seismic: torch.Tensor = model.get_synthetic_seismic(
+                        g.unsqueeze(0)
+                    )
+                    all_seismic.append(device_manager.to_numpy(seismic.squeeze(0)))
+
+    facies_arr = np.stack(all_facies, axis=0) if all_facies else np.array([])
+    ip_arr = np.stack(all_ip, axis=0) if all_ip else np.array([])
+    seismic_arr = np.stack(all_seismic, axis=0) if all_seismic else np.array([])
+
+    return facies_arr, ip_arr, seismic_arr
+
+
+def generate_uncertainty(
+    model_path: str,
+    opts: TrainingOptions,
+    how_many: int,
+    wells_pyramid: tuple[torch.Tensor, ...],
+    seismic_pyramid: tuple[torch.Tensor, ...],
+    channels: dict[ChannelKey, int],
+    selected_idx: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load a trained model and generate realizations for uncertainty computation."""
+    return generate_uncertainty_samples(
+        None,
+        model_path,
+        opts,
+        how_many,
+        wells_pyramid,
+        seismic_pyramid,
+        channels,
+        selected_idx,
+    )

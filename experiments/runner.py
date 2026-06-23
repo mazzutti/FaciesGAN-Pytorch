@@ -28,7 +28,7 @@ from .embeddings import (
     load_shared_embeddings,
     save_shared_embeddings,
 )
-from .generation import generate_variant
+from .generation import generate_variant, generate_uncertainty
 from .plotting import plot_method_all_variants, plot_sample_grid
 from .training import find_last_completed_scale, read_completed_epochs, train_variant
 
@@ -54,10 +54,39 @@ def _has_loadable_scale(model_path: str, max_scan: int = 64) -> bool:
     return False
 
 
+def load_variant_options(model_path: str, args: ExperimentOptions, ev_value: Any) -> TrainingOptions:
+    opts_path = Path(model_path) / "options.json"
+    if opts_path.exists():
+        import json
+        try:
+            with open(opts_path, encoding="utf-8") as f:
+                opt_dict = json.load(f)
+            v_opts = TrainingOptions()
+            for k, v in opt_dict.items():
+                if isinstance(v, list):
+                    v = tuple(v)
+                setattr(v_opts, k, v)
+            v_opts.gpu_device = args.gpu_device
+            v_opts.use_cpu = args.use_cpu
+            v_opts.num_train_pyramids = args.num_train_pyramids
+            return v_opts
+        except Exception as e:
+            print(f"Error loading options.json from {opts_path}: {e}. Falling back to default CLI args.")
+    
+    v_args = build_training_args(args, ev_value, model_path)
+    return get_main_arguments().parse_args(
+        v_args, namespace=TrainingOptions()
+    )
+
+
 def main() -> None:
     parser = get_arguments()
     args = parser.parse_args(namespace=ExperimentOptions())
     args.post_process()
+
+    # Ensure num_train_pyramids is large enough to cover the selected uncertainty index
+    if args.skip_training:
+        args.num_train_pyramids = max(args.num_train_pyramids, args.uncertainty_index + 1)
 
     if not getattr(args, "enable_logging", False):
         logging.disable(logging.CRITICAL)
@@ -219,6 +248,22 @@ def main() -> None:
     _base_opts.use_seismic = True
     _base_opts.use_rock_physics = True
 
+    # Override scale configurations from the first variant's options.json if it exists
+    opts_path = Path(first_model) / "options.json"
+    if opts_path.exists():
+        import json
+        try:
+            with open(opts_path, encoding="utf-8") as f:
+                opt_dict = json.load(f)
+            print(f"DEBUG OVERRIDE: loaded from {opts_path.resolve()}", flush=True)
+            # Override scale parameters of _base_opts with those from options.json
+            for param in ["stop_scale", "start_scale", "min_size", "max_size", "crop_size"]:
+                if param in opt_dict:
+                    print(f"  overriding {param}: {getattr(_base_opts, param)} -> {opt_dict[param]}", flush=True)
+                    setattr(_base_opts, param, opt_dict[param])
+        except Exception as e:
+            logger.warning("Could not override base scale options from %s: %s", opts_path, e)
+
     _dataset = PyramidsDataset(_base_opts)
     # NOTE: We no longer subset the dataset here. By keeping the full dataset,
     # we can use absolute indices (from seen_indices) to retrieve the correct
@@ -264,6 +309,14 @@ def main() -> None:
     # Move pyramids to device
     wells_pyramid = device_manager.to_device(wells_pyramid)
     seismic_pyramid = device_manager.to_device(seismic_pyramid)
+
+    print("DEBUG SHAPES:", flush=True)
+    print(f"  _base_opts.num_train_pyramids: {_base_opts.num_train_pyramids}", flush=True)
+    print(f"  _dataset size: {len(_dataset)}", flush=True)
+    for k, v in wells_pyramid.items():
+        print(f"  wells_pyramid[{k}]: {v.shape}", flush=True)
+    for k, v in seismic_pyramid.items():
+        print(f"  seismic_pyramid[{k}]: {v.shape}", flush=True)
 
     # ── Initialize data containers ──
     all_facies: dict[str, list[np.ndarray]] = {}
@@ -312,10 +365,7 @@ def main() -> None:
             print(f"  model: {model_path}")
 
             # Calculate noise channels for this specific variant configuration
-            v_args = build_training_args(args, ev.value, model_path)
-            variant_opts = get_main_arguments().parse_args(
-                v_args, namespace=TrainingOptions()
-            )
+            variant_opts = load_variant_options(model_path, args, ev.value)
             channels = calculate_channels(variant_opts)
 
             (
@@ -585,6 +635,209 @@ def main() -> None:
                     args.embedding_per_facies,
                 )
 
+    # ── 3. Uncertainty Analysis ───────────────────────────────────────────
+    print("\n" + "=" * 70)
+    print("RUNNING SUBSURFACE UNCERTAINTY ANALYSIS (1000 REALIZATIONS)")
+    print("=" * 70)
+
+    import matplotlib.pyplot as plt
+    from models.utils import calculate_channels
+
+    sel_idx = args.uncertainty_index
+    num_samples = args.uncertainty_samples
+
+    print(f"Selected conditioning index: {sel_idx}", flush=True)
+    print(f"Number of realizations per variant: {num_samples}", flush=True)
+
+    if sel_idx < len(real_full_np):
+        # Extract ground truth maps
+        real_facies_gt = real_full_np[sel_idx, ..., :facies_ch]  # shape (H, W, 3)
+        real_ip_gt = real_full_np[sel_idx, ..., facies_ch]       # shape (H, W)
+
+        # real_seismic_tensor is (200, 1, H, W). Convert to numpy.
+        real_seis_np = device_manager.to_numpy(real_seismic_tensor)
+        real_seis_gt = real_seis_np[sel_idx, 0, ...] if real_seis_np.size > 0 else np.zeros_like(real_ip_gt)
+
+        # Also get well mask for indicators
+        _, _, real_masks_all, _ = _dataset.get_scale_data(-1)
+        real_masks_np = device_manager.to_numpy(real_masks_all)
+        real_masks_gt = real_masks_np[sel_idx, 0, ...] if real_masks_np.size > 0 else np.zeros_like(real_ip_gt)
+        well_cols = np.where(np.sum(real_masks_gt, axis=0) > 0)[0]
+
+        # Number of facies classes
+        from config import DomainConfig
+        num_classes = DomainConfig.NUM_FACIES
+
+        # Generate and plot uncertainty for each active variant
+        for ev in active_variants:
+            name = ev.id
+            model_path = model_paths[name]
+
+            # Load variant options and channels
+            v_opts = load_variant_options(model_path, args, ev.value)
+            v_channels = calculate_channels(v_opts)
+
+            # Build variant-specific pyramids matching the model's scale configuration
+            print(f"\nBuilding variant-specific pyramids for: {name} ...", flush=True)
+            v_wells_pyramid, v_seismic_pyramid = build_conditioning_pyramids(v_opts)
+            v_wells_pyramid = device_manager.to_device(v_wells_pyramid)
+            v_seismic_pyramid = device_manager.to_device(v_seismic_pyramid)
+
+            print(f"Generating {num_samples} uncertainty realizations for variant: {name} ...", flush=True)
+            gen_facies, gen_ip, gen_seis = generate_uncertainty(
+                model_path=model_path,
+                opts=v_opts,
+                how_many=num_samples,
+                wells_pyramid=tuple(v_wells_pyramid.values()),
+                seismic_pyramid=tuple(v_seismic_pyramid.values()),
+                channels=v_channels,
+                selected_idx=sel_idx,
+            )
+
+            if len(gen_facies) > 0:
+                print(f"Computing uncertainty maps for {name} ...", flush=True)
+
+                # ── Convert all generated facies to class indices ──
+                real_facies_idx = utils.rgb_to_facies(real_facies_gt)  # (H, W)
+
+                gen_facies_idxs = np.stack(
+                    [utils.rgb_to_facies(gen_facies[i]) for i in range(len(gen_facies))],
+                    axis=0,
+                )  # (N, H, W)
+
+                # ── 1. Facies: Mode (most frequent class) ──
+                from scipy import stats as sp_stats
+                facies_mode_result = sp_stats.mode(gen_facies_idxs, axis=0, keepdims=False)
+                facies_mode = facies_mode_result.mode.astype(np.int32)  # (H, W)
+                facies_mode_rgb = utils.facies_to_rgb(facies_mode).transpose(1, 2, 0)  # (H, W, 3)
+
+                # ── 2. Facies: Shannon Entropy ──
+                # Per-pixel class probability: p_k(i,j) = count_k / N
+                H, W = real_facies_idx.shape
+                class_counts = np.zeros((num_classes, H, W), dtype=np.float32)
+                for k in range(num_classes):
+                    class_counts[k] = np.mean(gen_facies_idxs == k, axis=0)
+                # H = -Σ p_k log(p_k), with 0*log(0) = 0
+                eps = 1e-12
+                log_probs = np.log(class_counts + eps)
+                facies_entropy = -np.sum(class_counts * log_probs, axis=0)  # (H, W)
+                # Normalize to [0, 1] by dividing by max possible entropy log(num_classes)
+                max_entropy = np.log(num_classes)
+                facies_entropy_norm = facies_entropy / max_entropy
+
+                # ── 3. Ip: Mean and Std Dev ──
+                gen_ip_arr = np.squeeze(gen_ip)  # (N, H, W)
+                ip_mean = np.mean(gen_ip_arr, axis=0)   # (H, W)
+                ip_std = np.std(gen_ip_arr, axis=0)      # (H, W)
+
+                # ── 4. Seismic: Mean and Std Dev ──
+                gen_seis_arr = np.squeeze(gen_seis)  # (N, H, W)
+                seis_mean = np.mean(gen_seis_arr, axis=0)   # (H, W)
+                seis_std = np.std(gen_seis_arr, axis=0)      # (H, W)
+
+                # ── Plot 3×3 figure ──
+                fig, axes = plt.subplots(3, 3, figsize=(16, 13), squeeze=False)
+                fig.patch.set_facecolor("#151b26")
+
+                row_labels = ["Ground Truth", "Mean Realization", "Uncertainty"]
+                col_labels = ["Facies", "Acoustic Impedance (Ip)", "Synthetic Seismic"]
+
+                for c, label in enumerate(col_labels):
+                    axes[0][c].set_title(label, fontsize=13, fontweight="bold", color="#f0f4f9", pad=10)
+                for r, label in enumerate(row_labels):
+                    axes[r][0].set_ylabel(label, fontsize=12, fontweight="bold", color="#8c9eb5", rotation=90, labelpad=15)
+
+                # ── Row 0: Ground Truth ──
+                gt_facies_rgb = utils.facies_to_rgb(real_facies_idx).transpose(1, 2, 0)
+                axes[0][0].imshow(gt_facies_rgb, aspect="auto", interpolation="nearest")
+
+                axes[0][1].imshow(real_ip_gt, aspect="auto", cmap="magma", interpolation="nearest")
+
+                seis_plot = real_seis_gt - np.mean(real_seis_gt)
+                p_lo = float(np.percentile(seis_plot, 2))
+                p_hi = float(np.percentile(seis_plot, 98))
+                max_abs = max(abs(p_lo), abs(p_hi), 1e-6)
+                axes[0][2].imshow(seis_plot, aspect="auto", cmap="RdBu", vmin=-max_abs, vmax=max_abs, interpolation="nearest")
+
+                # ── Row 1: Mean Realization ──
+                axes[1][0].imshow(facies_mode_rgb, aspect="auto", interpolation="nearest")
+
+                axes[1][1].imshow(ip_mean, aspect="auto", cmap="magma", interpolation="nearest")
+
+                seis_mean_plot = seis_mean - np.mean(seis_mean)
+                seis_mean_lo = float(np.percentile(seis_mean_plot, 2))
+                seis_mean_hi = float(np.percentile(seis_mean_plot, 98))
+                seis_mean_abs = max(abs(seis_mean_lo), abs(seis_mean_hi), 1e-6)
+                axes[1][2].imshow(seis_mean_plot, aspect="auto", cmap="RdBu", vmin=-seis_mean_abs, vmax=seis_mean_abs, interpolation="nearest")
+
+                # ── Row 2: Uncertainty ──
+                im_ent = axes[2][0].imshow(facies_entropy_norm, aspect="auto", cmap="viridis", vmin=0.0, vmax=1.0, interpolation="nearest")
+                cb_ent = fig.colorbar(im_ent, ax=axes[2][0], fraction=0.046, pad=0.04)
+                cb_ent.set_label("Normalized Entropy", color="#f0f4f9", fontsize=9)
+                cb_ent.ax.yaxis.set_tick_params(color="#f0f4f9")
+                plt.setp(cb_ent.ax.yaxis.get_ticklabels(), color="#f0f4f9")
+
+                im_ip = axes[2][1].imshow(ip_std, aspect="auto", cmap="inferno", interpolation="nearest")
+                cb_ip = fig.colorbar(im_ip, ax=axes[2][1], fraction=0.046, pad=0.04)
+                cb_ip.set_label("Std Dev", color="#f0f4f9", fontsize=9)
+                cb_ip.ax.yaxis.set_tick_params(color="#f0f4f9")
+                plt.setp(cb_ip.ax.yaxis.get_ticklabels(), color="#f0f4f9")
+
+                im_seis = axes[2][2].imshow(seis_std, aspect="auto", cmap="cividis", interpolation="nearest")
+                cb_seis = fig.colorbar(im_seis, ax=axes[2][2], fraction=0.046, pad=0.04)
+                cb_seis.set_label("Std Dev", color="#f0f4f9", fontsize=9)
+                cb_seis.ax.yaxis.set_tick_params(color="#f0f4f9")
+                plt.setp(cb_seis.ax.yaxis.get_ticklabels(), color="#f0f4f9")
+
+                # ── Subtitle labels for Row 2 ──
+                axes[2][0].set_title("Shannon Entropy", fontsize=10, color="#c0c8d4", style="italic", pad=4)
+                axes[2][1].set_title("Ip Std Deviation", fontsize=10, color="#c0c8d4", style="italic", pad=4)
+                axes[2][2].set_title("Seismic Std Deviation", fontsize=10, color="#c0c8d4", style="italic", pad=4)
+
+                # Draw well indicator markers if applicable
+                if ev.value.use_wells and len(well_cols) > 0:
+                    for col in well_cols:
+                        for r in range(3):
+                            axes[r][0].plot(col, 5, marker='v', color='red', markersize=5)
+
+                # Clean axis ticks and spines
+                for r in range(3):
+                    for c in range(3):
+                        axes[r][c].set_xticks([])
+                        axes[r][c].set_yticks([])
+                        for spine in axes[r][c].spines.values():
+                            spine.set_visible(False)
+
+                fig.suptitle(
+                    f"Uncertainty Overview — {ev.value.label}  (Index {sel_idx}, {num_samples} Realizations)",
+                    fontsize=15, color="#f0f4f9",
+                )
+                fig.tight_layout()
+
+                out_path = Path(base_output) / name / "uncertainty_overview.png"
+
+                try:
+                    from report.utils import save_dual_theme_plot
+                    save_dual_theme_plot(fig, axes, out_path, dpi=150)
+                except Exception as e:
+                    logger.warning(f"Failed to save dual theme plot: {e}")
+                    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+
+                plt.close(fig)
+                print(f"Saved uncertainty map to: {out_path}", flush=True)
+
+        # Save config specifying the uncertainty parameters used
+        try:
+            import json
+            cfg_path = Path(base_output) / "uncertainty_config.json"
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump({"uncertainty_index": sel_idx, "uncertainty_samples": num_samples}, f, indent=4)
+            print(f"Saved uncertainty config to: {cfg_path}", flush=True)
+        except Exception as e:
+            logger.warning(f"Failed to save uncertainty config: {e}")
+    else:
+        print(f"Warning: Selected index {sel_idx} is out of bounds for the dataset of size {len(real_full_np)}.")
+
     total_elapsed = format_time(int(time.time() - total_start))
     print("\n" + "=" * 70)
     print(f"ALL EXPERIMENTS COMPLETE  ({total_elapsed})")
@@ -592,3 +845,7 @@ def main() -> None:
     print(f"\nOutputs in: {base_output}")
     for ev in active_variants:
         print(f"  {ev.id}: {model_paths.get(ev.id, 'N/A')}")
+
+
+if __name__ == "__main__":
+    main()

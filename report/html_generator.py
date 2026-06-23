@@ -352,6 +352,46 @@ def generate_html_report(
                 }
             )
 
+    # 5.5 Uncertainty Analysis Setup
+    uncertainty_index = 100
+    # Check if uncertainty config exists first
+    cfg_path = outputs_dir / "uncertainty_config.json"
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg_dict = json.load(f)
+                uncertainty_index = cfg_dict.get("uncertainty_index", 100)
+        except Exception:
+            pass
+    else:
+        # Extract uncertainty_index from base options if it exists
+        base_options_path = outputs_dir / "wells_seismic" / "options.json"
+        if base_options_path.exists():
+            try:
+                with open(base_options_path, encoding="utf-8") as f:
+                    opt_dict = json.load(f)
+                    uncertainty_index = opt_dict.get("uncertainty_index", 100)
+            except Exception:
+                pass
+
+    uncertainty_results: list[dict[str, Any]] = []
+    for var in VARIANTS:
+        img_path = outputs_dir / var / "uncertainty_overview.png"
+        if img_path.exists():
+            light_path = img_path.with_name(img_path.stem + "_light" + img_path.suffix)
+            uncertainty_results.append(
+                {
+                    "id": var,
+                    "label": VARIANT_LABELS[var],
+                    "rel_path": md_relpath(img_path, report_dir),
+                    "rel_path_light": (
+                        md_relpath(light_path, report_dir)
+                        if light_path.exists()
+                        else None
+                    ),
+                }
+            )
+
     # 6. Quantitative Analysis Formatting
 
     # Facies Proportions
@@ -805,8 +845,8 @@ def generate_html_report(
             if epoch_map:
                 epochs_list: list[dict[str, Any]] = []
                 for epoch in sorted(epoch_map.keys()):
-                    display_step = epoch + 1 if (epoch == 4999 or epoch == 9999 or epoch == 10000) else epoch
-                    display_epoch = display_step // 10
+                    display_epoch = epoch
+                    display_step = epoch * 10
                     img_path = epoch_map[epoch]
                     light = img_path.with_name(
                         img_path.stem + "_light" + img_path.suffix
@@ -942,6 +982,8 @@ def generate_html_report(
         "variant_labels_cols": variant_labels_cols,
         "num_variant_cols": num_variant_cols,
         "comparison_grids": comparison_grids,
+        "uncertainty_results": uncertainty_results,
+        "uncertainty_index": uncertainty_index,
         "facies_proportions": facies_proportions,
         "rock_physics_stats": rock_physics_stats,
         "scorecard_table": scorecard_table,

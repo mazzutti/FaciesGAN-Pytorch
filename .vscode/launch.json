@@ -172,7 +172,7 @@
         "--input-path", "data",
         "--output-path", "outputs/experiments",
         "--how-many", "1000",
-        "--num-iter", "1000",
+        "--num-iter", "600",
         "--num-train-pyramids", "200",
         "--batch-size", "20",
         "--num-workers", "4",
@@ -180,15 +180,15 @@
         "--num-parallel-scales", "5",
         "--nproc-per-node", "2",
         
-        "--lr-d", "2e-4",
-        "--lr-g", "2e-4",
+        "--lr-d", "5e-4",
+        "--lr-g", "5e-4",
         "--scheduler-g", "step",
         "--scheduler-d", "step",
         "--lr-min", "5e-5",
-        "--lr-decay", "99999",
+        "--lr-decay", "1000",
         // "--lr-patience", "2000",
-        "--lr-g-factor", "0.7",
-        "--lr-d-factor", "0.8",
+        "--lr-g-factor", "0.5",
+        "--lr-d-factor", "0.6",
 
         "--scale0-disc-lr-factor", "1.0",
         "--scale0-disc-grad-clip", "5.0",
@@ -214,8 +214,7 @@
 
 
         // "--elastic-loss-penalty", "2.0",
-        // "--use-extra-rp-loss",
-        // "--integrated-rpm-penalty",  "5.0",
+        // "--integrated-rpm-penalty",  "5.0", 
         // "--drift-loss-penalty",  "0.01",
 
         "--dz-pixel", "0.5",
@@ -230,7 +229,7 @@
 
         "--time-unit", "step",
         "--log-metrics-interval", "50",
-        "--gradnorm-interval", "55",
+        "--gradnorm-interval", "25",
         "--checkpoint-interval", "1000",
         "--save-interval", "200",
 

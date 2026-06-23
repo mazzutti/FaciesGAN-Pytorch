@@ -477,12 +477,6 @@ def add_physics_args(parser: ArgumentParser) -> None:
         help="Weight multiplier for integrated rock physics coupling loss (default: 0.0).",
     )
     parser.add_argument(
-        "--use-extra-rp-loss",
-        action="store_true",
-        dest="use_extra_rp_loss",
-        help="Enable integrated RPM and drift losses with default penalties (5.0 and 0.001).",
-    )
-    parser.add_argument(
         "--use-residual-coupling",
         action="store_true",
         help="Enable physics-informed residual coupling where seismic error weights Ip loss.",
