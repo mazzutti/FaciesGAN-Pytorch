@@ -120,6 +120,13 @@ def save_dual_theme_plot(fig: Any, axes: Any, out_path: Path, dpi: int = 120) ->
     else:
         ax_list = [axes]
 
+    # Include colorbar axes (and any other axes not in the grid)
+    all_fig_axes = fig.get_axes()
+    ax_set = set(id(a) for a in ax_list)
+    for a in all_fig_axes:
+        if id(a) not in ax_set:
+            ax_list.append(a)
+
     # Helper to check if a color matches #f0f4f9
     def is_white_ish(color: AnyType) -> bool:
         if color is None:
