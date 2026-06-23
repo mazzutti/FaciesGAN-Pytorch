@@ -303,6 +303,17 @@ def main() -> None:
                     "Could not load seen indices from %s", ckpt_path, exc_info=True
                 )
 
+    # Compute test indices as the complement of seen indices
+    test_indices = sorted(list(set(range(len(_dataset))) - set(seen_indices)))
+    if not test_indices:
+        test_indices = sorted(list(range(len(_dataset))))
+    print(f"\n[INFO] Computed test indices (complement of seen training indices): {test_indices}\n", flush=True)
+
+    # Subset _dataset in place so all downstream embedding/grid code uses test data only
+    _dataset.batches = [_dataset.batches[i] for i in test_indices]
+    _dataset.indices = _dataset.indices[torch.as_tensor(test_indices, dtype=torch.long)]
+    _dataset._scale_data_cache.clear()
+
     # Pre-build pyramids for generation once
     wells_pyramid, seismic_pyramid = build_conditioning_pyramids(_base_opts)
 
@@ -383,7 +394,7 @@ def main() -> None:
                 seismic_pyramid=tuple(seismic_pyramid.values()),
                 channels=channels,
                 gen_output=gen_output,
-                seen_indices=seen_indices,
+                seen_indices=test_indices,
             )
             all_facies[name] = variant_facies
             if variant_ip:
@@ -524,6 +535,7 @@ def main() -> None:
             all_mask_indexes,
             num_samples=args.num_real_facies,
             seed=args.manual_seed,
+            test_indices=test_indices,
         )
 
     # ── 2. Embedding Plots ────────────────────────────────────────────────
@@ -649,19 +661,29 @@ def main() -> None:
     print(f"Selected conditioning index: {sel_idx}", flush=True)
     print(f"Number of realizations per variant: {num_samples}", flush=True)
 
-    if sel_idx < len(real_full_np):
+    # Validate that uncertainty_index exists in the test set. If not, pick the first test index.
+    if sel_idx in test_indices:
+        absolute_sel_idx = sel_idx
+        print(f"Uncertainty index {sel_idx} is in the test set.", flush=True)
+    else:
+        absolute_sel_idx = test_indices[0]
+        print(f"Uncertainty index {sel_idx} is NOT in the test set. Using first test index {absolute_sel_idx}.", flush=True)
+
+    relative_sel_idx = test_indices.index(absolute_sel_idx)
+
+    if relative_sel_idx < len(real_full_np):
         # Extract ground truth maps
-        real_facies_gt = real_full_np[sel_idx, ..., :facies_ch]  # shape (H, W, 3)
-        real_ip_gt = real_full_np[sel_idx, ..., facies_ch]       # shape (H, W)
+        real_facies_gt = real_full_np[relative_sel_idx, ..., :facies_ch]  # shape (H, W, 3)
+        real_ip_gt = real_full_np[relative_sel_idx, ..., facies_ch]       # shape (H, W)
 
         # real_seismic_tensor is (200, 1, H, W). Convert to numpy.
         real_seis_np = device_manager.to_numpy(real_seismic_tensor)
-        real_seis_gt = real_seis_np[sel_idx, 0, ...] if real_seis_np.size > 0 else np.zeros_like(real_ip_gt)
+        real_seis_gt = real_seis_np[relative_sel_idx, 0, ...] if real_seis_np.size > 0 else np.zeros_like(real_ip_gt)
 
         # Also get well mask for indicators
         _, _, real_masks_all, _ = _dataset.get_scale_data(-1)
         real_masks_np = device_manager.to_numpy(real_masks_all)
-        real_masks_gt = real_masks_np[sel_idx, 0, ...] if real_masks_np.size > 0 else np.zeros_like(real_ip_gt)
+        real_masks_gt = real_masks_np[relative_sel_idx, 0, ...] if real_masks_np.size > 0 else np.zeros_like(real_ip_gt)
         well_cols = np.where(np.sum(real_masks_gt, axis=0) > 0)[0]
 
         # Number of facies classes
@@ -691,7 +713,7 @@ def main() -> None:
                 wells_pyramid=tuple(v_wells_pyramid.values()),
                 seismic_pyramid=tuple(v_seismic_pyramid.values()),
                 channels=v_channels,
-                selected_idx=sel_idx,
+                selected_idx=absolute_sel_idx,
             )
 
             if len(gen_facies) > 0:
@@ -809,7 +831,7 @@ def main() -> None:
                             spine.set_visible(False)
 
                 fig.suptitle(
-                    f"Uncertainty Overview — {ev.value.label}  (Index {sel_idx}, {num_samples} Realizations)",
+                    f"Uncertainty Overview — {ev.value.label}  (Index {absolute_sel_idx}, {num_samples} Realizations)",
                     fontsize=15, color="#f0f4f9",
                 )
                 fig.tight_layout()
@@ -831,12 +853,12 @@ def main() -> None:
             import json
             cfg_path = Path(base_output) / "uncertainty_config.json"
             with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump({"uncertainty_index": sel_idx, "uncertainty_samples": num_samples}, f, indent=4)
+                json.dump({"uncertainty_index": absolute_sel_idx, "uncertainty_samples": num_samples}, f, indent=4)
             print(f"Saved uncertainty config to: {cfg_path}", flush=True)
         except Exception as e:
             logger.warning(f"Failed to save uncertainty config: {e}")
     else:
-        print(f"Warning: Selected index {sel_idx} is out of bounds for the dataset of size {len(real_full_np)}.")
+        print(f"Warning: Selected index {absolute_sel_idx} is out of bounds for the dataset of size {len(real_full_np)}.")
 
     total_elapsed = format_time(int(time.time() - total_start))
     print("\n" + "=" * 70)

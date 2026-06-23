@@ -301,6 +301,61 @@ class PyramidsDataset(Dataset[RawBatch]):
         # Invalidate the scale data cache since order has changed
         self._scale_data_cache.clear()
 
+    def select_equally_spaced(self, n: int) -> list[int]:
+        """Select n equally spaced indices, subset/shuffle in-place, and return absolute indices.
+
+        Parameters
+        ----------
+        n : int
+            Number of training pyramids to select.
+
+        Returns
+        -------
+        list[int]
+            Sorted list of the selected absolute/original sample indices.
+        """
+        import numpy as np
+        total = len(self)
+        if n >= total:
+            return sorted(self.indices.tolist())
+
+        # Generate n equally spaced float indices between 0 and total - 1
+        indices = np.round(np.linspace(0, total - 1, n)).astype(int)
+
+        # Ensure they are unique and exactly n elements
+        unique_indices = []
+        seen = set()
+        for idx in indices:
+            val = int(idx)
+            if val not in seen:
+                unique_indices.append(val)
+                seen.add(val)
+
+        if len(unique_indices) < n:
+            # Pad with remaining indices to reach n
+            all_set = set(range(total))
+            remaining = sorted(list(all_set - seen))
+            while len(unique_indices) < n and remaining:
+                val = remaining.pop(0)
+                unique_indices.append(val)
+                seen.add(val)
+
+        selected = sorted(unique_indices)
+
+        # Subset the dataset batches and indices
+        selected_batches = [self.batches[i] for i in selected]
+        selected_indices = self.indices[torch.as_tensor(selected, dtype=torch.long)]
+
+        # Shuffle the selected subset via torch.randperm
+        g = torch.randperm(len(selected_batches))
+        self.batches = [selected_batches[i] for i in g]
+        self.indices = selected_indices[g]
+
+        # Invalidate cache
+        self._scale_data_cache.clear()
+
+        return sorted(selected_indices.tolist())
+
     def clean_cache(self) -> None:
         """Clear the joblib pyramid cache and internal scale-data cache.
 

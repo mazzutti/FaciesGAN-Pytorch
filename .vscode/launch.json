@@ -173,7 +173,7 @@
         "--output-path", "outputs/experiments",
         "--how-many", "1000",
         "--num-iter", "800",
-        "--num-train-pyramids", "200",
+        "--num-train-pyramids", "180",
         "--batch-size", "20",
         "--num-workers", "4",
         "--prefetch-factor", "4",

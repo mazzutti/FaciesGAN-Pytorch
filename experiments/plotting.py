@@ -103,6 +103,7 @@ def plot_sample_grid(
     all_mask_indexes: Optional[Dict[str, torch.Tensor]] = None,
     num_samples: int = 5,
     seed: Optional[int] = 42,
+    test_indices: Optional[List[int]] = None,
 ) -> None:
     """Create a comparison grid where each row is a different variant and columns are samples.
 
@@ -194,8 +195,14 @@ def plot_sample_grid(
             and s_idx < len(all_mask_indexes[ref_name])
         ):
             real_idx = int(all_mask_indexes[ref_name][s_idx])
-            if real_samples is not None and real_idx < len(real_samples):
-                real_img = real_samples[real_idx]
+            if test_indices is not None:
+                if real_idx in test_indices:
+                    mapped_idx = test_indices.index(real_idx)
+                    if real_samples is not None and mapped_idx < len(real_samples):
+                        real_img = real_samples[mapped_idx]
+            else:
+                if real_samples is not None and real_idx < len(real_samples):
+                    real_img = real_samples[real_idx]
         elif real_samples is not None and s_idx < len(real_samples):
             # Fallback to direct indexing if mask info is missing
             real_img = real_samples[s_idx]

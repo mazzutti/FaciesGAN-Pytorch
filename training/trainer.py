@@ -670,9 +670,8 @@ class Trainer:
             dataset.batches = [dataset.batches[i] for i in sel]
             dataset.indices = dataset.indices[torch.as_tensor(sel, dtype=torch.long)]
         elif self.options.num_train_pyramids < len(dataset):
-            indexes = torch.randperm(len(dataset))[: self.options.num_train_pyramids]
-            dataset.batches = [dataset.batches[i] for i in indexes]
-            dataset.indices = dataset.indices[indexes]
+            selected = dataset.select_equally_spaced(self.options.num_train_pyramids)
+            print(f"\n[INFO] Selected {len(selected)} equally spaced training pyramids: {selected}\n", flush=True)
 
         return dataset, dataset.scales
 
