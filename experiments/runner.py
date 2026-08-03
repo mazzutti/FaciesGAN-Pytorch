@@ -255,8 +255,10 @@ def main() -> None:
             with open(opts_path, encoding="utf-8") as f:
                 opt_dict = json.load(f)
             print(f"DEBUG OVERRIDE: loaded from {opts_path.resolve()}", flush=True)
-            # Override scale parameters of _base_opts with those from options.json
-            for param in ["stop_scale", "start_scale", "min_size", "max_size", "crop_size", "num_train_pyramids"]:
+            # Override scale parameters of _base_opts with those from options.json.
+            # Keep num_train_pyramids driven by the active CLI/config so the
+            # train/test split remains consistent with the launch profile.
+            for param in ["stop_scale", "start_scale", "min_size", "max_size", "crop_size"]:
                 if param in opt_dict:
                     print(f"  overriding {param}: {getattr(_base_opts, param)} -> {opt_dict[param]}", flush=True)
                     setattr(_base_opts, param, opt_dict[param])

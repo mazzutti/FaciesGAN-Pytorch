@@ -1,9 +1,11 @@
 import logging
+from collections.abc import Mapping
+from typing import Any, cast
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
-from typing import Any
 from training.metrics import GeneratorMetrics
 from enums import MetricKey
 from device import device_manager
@@ -13,12 +15,13 @@ logger = logging.getLogger(__name__)
 
 class GradNormAdam(optim.Adam):
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        all_params = []
+        all_params: list[torch.Tensor] = []
         for group in self.param_groups:
-            all_params.extend(group['params'])
+            group_params = cast(list[torch.Tensor], group["params"])
+            all_params.extend(group_params)
 
-        if 'state' in state_dict:
-            for k, state in list(state_dict['state'].items()):
+        if "state" in state_dict:
+            for k, state in list(state_dict["state"].items()):
                 try:
                     param_idx = int(k)
                 except ValueError:
@@ -26,21 +29,21 @@ class GradNormAdam(optim.Adam):
 
                 if 0 <= param_idx < len(all_params):
                     param = all_params[param_idx]
-                    for key in ['exp_avg', 'exp_avg_sq']:
+                    for key in ["exp_avg", "exp_avg_sq"]:
                         if key in state:
                             old_t = state[key]
                             if old_t.shape != param.shape:
                                 new_t = torch.zeros(
-                                    param.shape,
-                                    dtype=old_t.dtype,
-                                    device=old_t.device
+                                    param.shape, dtype=old_t.dtype, device=old_t.device
                                 )
                                 if old_t.dim() == 2 and param.dim() == 2:
                                     old_num_scales, old_num_keys = old_t.shape
                                     new_num_scales, new_num_keys = param.shape
                                     common_scales = min(old_num_scales, new_num_scales)
                                     common_keys = min(old_num_keys, new_num_keys)
-                                    new_t[:common_scales, :common_keys] = old_t[:common_scales, :common_keys]
+                                    new_t[:common_scales, :common_keys] = old_t[
+                                        :common_scales, :common_keys
+                                    ]
                                 elif old_t.dim() == 1 and param.dim() == 1:
                                     common_len = min(len(old_t), len(param))
                                     new_t[:common_len] = old_t[:common_len]
@@ -95,10 +98,16 @@ class GradNorm(nn.Module):
             torch.tensor(False, dtype=torch.bool, device=device_manager.device),
         )
 
-    def load_state_dict(self, state_dict: dict[str, Any], strict: bool = True) -> Any:
+    def load_state_dict(
+        self,
+        state_dict: Mapping[str, Any],
+        strict: bool = True,
+        assign: bool = False,
+    ) -> Any:
         # Adapt 'w' and 'l0' shapes if they mismatch from checkpoint
-        old_w = state_dict.get("w")
-        old_l0 = state_dict.get("l0")
+        adapted_state_dict = dict(state_dict)
+        old_w = adapted_state_dict.get("w")
+        old_l0 = adapted_state_dict.get("l0")
 
         if old_w is not None and old_w.shape != self.w.shape:
             new_w = torch.ones_like(self.w)
@@ -107,8 +116,10 @@ class GradNorm(nn.Module):
                 new_num_scales, new_num_keys = self.w.shape
                 common_scales = min(old_num_scales, new_num_scales)
                 common_keys = min(old_num_keys, new_num_keys)
-                new_w[:common_scales, :common_keys] = old_w[:common_scales, :common_keys]
-                state_dict["w"] = new_w
+                new_w[:common_scales, :common_keys] = old_w[
+                    :common_scales, :common_keys
+                ]
+                adapted_state_dict["w"] = new_w
 
                 if old_l0 is not None:
                     try:
@@ -116,19 +127,25 @@ class GradNorm(nn.Module):
                         new_l0_reshaped = torch.zeros(
                             (new_num_scales, new_num_keys),
                             dtype=self.l0.dtype,
-                            device=self.l0.device
+                            device=self.l0.device,
                         )
-                        new_l0_reshaped[:common_scales, :common_keys] = old_l0_reshaped[:common_scales, :common_keys]
-                        state_dict["l0"] = new_l0_reshaped.view(-1)
+                        new_l0_reshaped[:common_scales, :common_keys] = old_l0_reshaped[
+                            :common_scales, :common_keys
+                        ]
+                        adapted_state_dict["l0"] = new_l0_reshaped.view(-1)
                     except Exception:
-                        state_dict["l0"] = torch.zeros_like(self.l0)
+                        adapted_state_dict["l0"] = torch.zeros_like(self.l0)
             else:
-                state_dict["w"] = self.w.clone()
+                adapted_state_dict["w"] = self.w.clone()
 
         elif old_l0 is not None and old_l0.shape != self.l0.shape:
-            state_dict["l0"] = torch.zeros_like(self.l0)
+            adapted_state_dict["l0"] = torch.zeros_like(self.l0)
 
-        return super().load_state_dict(state_dict, strict=strict)
+        return super().load_state_dict(
+            adapted_state_dict,
+            strict=strict,
+            assign=assign,
+        )
 
     def get_weighted_loss(self, loss_matrix: torch.Tensor) -> torch.Tensor:
         """Calcula a soma ponderada de todas as losses de todas as escalas: sum(W * L)."""
@@ -206,7 +223,7 @@ class GradNorm(nn.Module):
                 _func = _func.__call__
             if hasattr(_func, "__code__"):
                 _code = _func.__code__
-                has_task_idx = "task_idx" in _code.co_varnames[:_code.co_argcount]
+                has_task_idx = "task_idx" in _code.co_varnames[: _code.co_argcount]
             self._has_task_idx = has_task_idx
         else:
             has_task_idx = self._has_task_idx
@@ -220,7 +237,6 @@ class GradNorm(nn.Module):
                 curr_l_tensor = task_losses_fn(fake_local, task_idx=None).float()
             else:
                 curr_l_tensor = task_losses_fn(fake_local).float()
-
 
         # Sincronizar as losses entre as instâncias DDP para balanceamento global
         if device_manager.is_distributed:
@@ -264,12 +280,15 @@ class GradNorm(nn.Module):
                     curr_l_i = task_losses_fn(fake_i, task_idx=i).float()
                 else:
                     curr_l_i = task_losses_fn(fake_i).float()
-                grads = torch.autograd.grad(
-                    curr_l_i[i],
-                    params,
-                    retain_graph=False,
-                    create_graph=False,
-                    allow_unused=True,
+                grads = cast(
+                    tuple[torch.Tensor | None, ...],
+                    torch.autograd.grad(
+                        curr_l_i[i],
+                        params,
+                        retain_graph=False,
+                        create_graph=False,
+                        allow_unused=True,
+                    ),
                 )
                 sq_norms = [g.detach().pow(2).sum() for g in grads if g is not None]
                 if sq_norms:
@@ -306,7 +325,9 @@ class GradNorm(nn.Module):
             self.optimizer.step()  # pyright: ignore[reportUnknownMemberType]
         except Exception as e:
             # Fallback em caso de erro no autograd do GradNorm (ex: grafo quebrado)
-            logger.warning(f"GradNorm weight update failed (scale {scale_idx}): {e}", exc_info=True)
+            logger.warning(
+                f"GradNorm weight update failed (scale {scale_idx}): {e}", exc_info=True
+            )
 
         # Renormalização dos pesos (Soma = N_tasks total)
         with torch.no_grad():
