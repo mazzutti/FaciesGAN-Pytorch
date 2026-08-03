@@ -1,6 +1,7 @@
 .venv
 .env
 .gemini/
+.serena/
 .idea
 **/.DS_Store
 .cache/

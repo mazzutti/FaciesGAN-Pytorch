@@ -1085,7 +1085,8 @@
             <strong>Variogram Interpretation Guide:</strong><br>
             • <strong>Curvature Match:</strong> A variant curve that follows the real curve indicates correct spatial autocorrelation. If the curve rises too fast, the generated features are too noisy or disconnected at small scales.<br>
             • <strong>Sill Level (Total Variance):</strong> If the variant's sill is lower than the real sill, it means the generated realizations lack variance (i.e. they are too homogeneous/blurry).<br>
-            • <strong>Range (Correlation Length):</strong> A mismatch in the range means the generated channels are either too long/continuous or too short/fragmented compared to reality.
+            • <strong>Range (Correlation Length):</strong> A mismatch in the range means the generated channels are either too long/continuous or too short/fragmented compared to reality.<br>
+            • <strong>Indicator Variogram (Variograma de Indicadores):</strong> Used for categorical properties (such as Facies). Instead of calculating the variogram on nominal category values directly, each category (Floodplain, Point Bar, Channel, Boundary) is converted into a binary indicator field (1 if present, 0 otherwise). This measures the spatial continuity, correlation length (range), and geometry of each specific facies class independently.
           </div>
 
           {% if spatial_continuity|length > 1 %}

@@ -347,7 +347,10 @@ class PyramidsDataset(Dataset[RawBatch]):
         selected_indices = self.indices[torch.as_tensor(selected, dtype=torch.long)]
 
         # Shuffle the selected subset via torch.randperm
-        g = torch.randperm(len(selected_batches))
+        # Use a seed (falling back to 42 if manual_seed is None) to guarantee DDP ranks shuffle identically
+        seed = self.options.manual_seed if getattr(self.options, "manual_seed", None) is not None else 42
+        gen = torch.Generator().manual_seed(seed)
+        g = torch.randperm(len(selected_batches), generator=gen)
         self.batches = [selected_batches[i] for i in g]
         self.indices = selected_indices[g]
 

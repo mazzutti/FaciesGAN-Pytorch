@@ -68,7 +68,6 @@ def load_variant_options(model_path: str, args: ExperimentOptions, ev_value: Any
                 setattr(v_opts, k, v)
             v_opts.gpu_device = args.gpu_device
             v_opts.use_cpu = args.use_cpu
-            v_opts.num_train_pyramids = args.num_train_pyramids
             return v_opts
         except Exception as e:
             print(f"Error loading options.json from {opts_path}: {e}. Falling back to default CLI args.")
@@ -257,7 +256,7 @@ def main() -> None:
                 opt_dict = json.load(f)
             print(f"DEBUG OVERRIDE: loaded from {opts_path.resolve()}", flush=True)
             # Override scale parameters of _base_opts with those from options.json
-            for param in ["stop_scale", "start_scale", "min_size", "max_size", "crop_size"]:
+            for param in ["stop_scale", "start_scale", "min_size", "max_size", "crop_size", "num_train_pyramids"]:
                 if param in opt_dict:
                     print(f"  overriding {param}: {getattr(_base_opts, param)} -> {opt_dict[param]}", flush=True)
                     setattr(_base_opts, param, opt_dict[param])
@@ -302,6 +301,16 @@ def main() -> None:
                 logger.warning(
                     "Could not load seen indices from %s", ckpt_path, exc_info=True
                 )
+    # If the checkpoint seen_indices is incomplete (e.g. due to DDP gathering issues in old runs),
+    # reconstruct the deterministic training set to compute the correct test complement.
+    if _base_opts.num_train_pyramids < len(_dataset):
+        temp_dataset = PyramidsDataset(_base_opts)
+        reconstructed_seen = temp_dataset.select_equally_spaced(_base_opts.num_train_pyramids)
+        if not seen_indices or set(seen_indices).issubset(set(reconstructed_seen)):
+            seen_indices = reconstructed_seen
+            print(
+                f"[INFO] Reconstructed {len(seen_indices)} deterministic training indices for test complement calculation."
+            )
 
     # Compute test indices as the complement of seen indices
     test_indices = sorted(list(set(range(len(_dataset))) - set(seen_indices)))
@@ -309,10 +318,12 @@ def main() -> None:
         test_indices = sorted(list(range(len(_dataset))))
     print(f"\n[INFO] Computed test indices (complement of seen training indices): {test_indices}\n", flush=True)
 
-    # Subset _dataset in place so all downstream embedding/grid code uses test data only
-    _dataset.batches = [_dataset.batches[i] for i in test_indices]
-    _dataset.indices = _dataset.indices[torch.as_tensor(test_indices, dtype=torch.long)]
-    _dataset._scale_data_cache.clear()
+    # Create a test-only subset for comparison grids and generation conditioning.
+    # _dataset remains the FULL dataset (all 200 samples) for embedding computation.
+    _test_dataset = PyramidsDataset(_base_opts)
+    _test_dataset.batches = [_test_dataset.batches[i] for i in test_indices]
+    _test_dataset.indices = _test_dataset.indices[torch.as_tensor(test_indices, dtype=torch.long)]
+    _test_dataset._scale_data_cache.clear()
 
     # Pre-build pyramids for generation once
     wells_pyramid, seismic_pyramid = build_conditioning_pyramids(_base_opts)
@@ -323,7 +334,8 @@ def main() -> None:
 
     print("DEBUG SHAPES:", flush=True)
     print(f"  _base_opts.num_train_pyramids: {_base_opts.num_train_pyramids}", flush=True)
-    print(f"  _dataset size: {len(_dataset)}", flush=True)
+    print(f"  _dataset size (full, for embeddings): {len(_dataset)}", flush=True)
+    print(f"  _test_dataset size (test only, for generation/grids): {len(_test_dataset)}", flush=True)
     for k, v in wells_pyramid.items():
         print(f"  wells_pyramid[{k}]: {v.shape}", flush=True)
     for k, v in seismic_pyramid.items():
@@ -451,7 +463,7 @@ def main() -> None:
 
     # ── 1. Comparison Grids ───────────────────────────────────────────────
     # Split real tensor to avoid clamping categorical facies indices to [-1, 1]
-    real_tensor, _, _, real_seismic_tensor = _dataset.get_scale_data(-1)
+    real_tensor, _, _, real_seismic_tensor = _test_dataset.get_scale_data(-1)
     norm_range: tuple[float, float] = (
         float(_base_opts.normalization_range[0]),
         float(_base_opts.normalization_range[1]),
@@ -676,12 +688,12 @@ def main() -> None:
         real_facies_gt = real_full_np[relative_sel_idx, ..., :facies_ch]  # shape (H, W, 3)
         real_ip_gt = real_full_np[relative_sel_idx, ..., facies_ch]       # shape (H, W)
 
-        # real_seismic_tensor is (200, 1, H, W). Convert to numpy.
+        # real_seismic_tensor is (N_test, 1, H, W). Convert to numpy.
         real_seis_np = device_manager.to_numpy(real_seismic_tensor)
         real_seis_gt = real_seis_np[relative_sel_idx, 0, ...] if real_seis_np.size > 0 else np.zeros_like(real_ip_gt)
 
         # Also get well mask for indicators
-        _, _, real_masks_all, _ = _dataset.get_scale_data(-1)
+        _, _, real_masks_all, _ = _test_dataset.get_scale_data(-1)
         real_masks_np = device_manager.to_numpy(real_masks_all)
         real_masks_gt = real_masks_np[relative_sel_idx, 0, ...] if real_masks_np.size > 0 else np.zeros_like(real_ip_gt)
         well_cols = np.where(np.sum(real_masks_gt, axis=0) > 0)[0]
