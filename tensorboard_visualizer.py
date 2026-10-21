@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import matplotlib.cm as cm
+from matplotlib import colormaps
 import numpy as np
 import torch
 from tensorboardX import SummaryWriter  # pyright: ignore
@@ -543,7 +543,7 @@ class TensorBoardVisualizer:
         data_norm = np.clip(data_hw, 0.0, 1.0)
         # Apply colormap (returns HxWx4)
         rgb_hwc = np.asarray(
-            cm.get_cmap(cmap_name)(data_norm)[..., :3], dtype=np.float32
+            colormaps.get_cmap(cmap_name)(data_norm)[..., :3], dtype=np.float32
         )
         # Transpose to CHW for TensorBoard
         rgb_chw = np.transpose(rgb_hwc, (2, 0, 1))
