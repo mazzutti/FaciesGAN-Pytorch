@@ -19,5 +19,4 @@ tqdm
 apex
 joblib
 triton
-cuml
 umap-learn
