@@ -42,7 +42,9 @@ from training.metrics import (
     compute_diversity_loss,
     compute_gradient_penalty,
     compute_integrated_rpm_loss,
+    noise_pair_distances,
     compute_masked_loss,
+    compute_mode_seeking_loss,
     compute_r1_penalty,
     compute_reconstruction_loss,
     compute_rock_physics_loss,
@@ -958,11 +960,16 @@ class FaciesGAN(nn.Module):
                     )
                     _z_in_div = None
                     _div_prev_up = None
+                    _div_z_dist: torch.Tensor | None = None
                     if _div_active:
                         with torch.no_grad():
                             _div_noises_pyramid = self.build_batched_noise(
                                 _n_div, _b, scale, indexes, wells_pyramid, seismic_pyramid
                             )
+                            if self.use_mode_seeking:
+                                _div_z_dist = noise_pair_distances(
+                                    _div_noises_pyramid, _n_div
+                                )
                             _div_noise_s = _div_noises_pyramid[scale]
                             
                             if scale == 0:
@@ -1146,9 +1153,7 @@ class FaciesGAN(nn.Module):
                                 div_full = _quant(div_full)
 
                             div_samples = list(torch.chunk(div_full, _n_div, dim=0))
-                            div_l = compute_diversity_loss(
-                                div_samples, opts.diversity_loss_penalty, zero
-                            )
+                            div_l = self.diversity_loss(div_samples, _div_z_dist)
 
                         if task_idx is None or task_idx in (5, 6, 7):
                             fake_full = _Gen.residual_clamp_fn(
@@ -1322,6 +1327,7 @@ class FaciesGAN(nn.Module):
 
         with autocast(DeviceType.CUDA, enabled=use_amp, dtype=amp_dtype):
             # Generate diversity candidates
+            div_z_dist: torch.Tensor | None = None
             if precomputed_fakes is not None and scale in precomputed_fakes:
                 n_div = (
                     1
@@ -1330,7 +1336,7 @@ class FaciesGAN(nn.Module):
                 )
                 fake_samples = list(torch.chunk(precomputed_fakes[scale], n_div, dim=0))
             else:
-                fake_samples = self.generate_diverse_samples(
+                fake_samples, div_z_dist = self.generate_diverse_samples_with_noise(
                     indexes, scale, wells_pyramid, seismic_pyramid
                 )
             fake = fake_samples[0]
@@ -1396,9 +1402,7 @@ class FaciesGAN(nn.Module):
                 self.zero_scalar,
             )
 
-            div_loss = compute_diversity_loss(
-                fake_samples, getattr(self.options, "diversity_loss_penalty", 1.0), self.zero_scalar
-            )
+            div_loss = self.diversity_loss(fake_samples, div_z_dist)
 
             if (
                 getattr(self.options, "rec_facies_loss_penalty", 0.0) == 0.0
@@ -1499,6 +1503,58 @@ class FaciesGAN(nn.Module):
     # ---------------------------------------------------------------------------
     # Noise & Sample Generation
     # ---------------------------------------------------------------------------
+
+    @property
+    def use_mode_seeking(self) -> bool:
+        """True when the mode-seeking diversity loss is selected."""
+        return getattr(self.options, "diversity_loss_type", "exp") == "mode_seeking"
+
+    def diversity_loss(
+        self,
+        fake_samples: list[torch.Tensor],
+        z_dist: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Dispatch to the configured diversity loss.
+
+        Mode seeking needs the latent pair distances; when they are not
+        available (precomputed fakes) the legacy exponential loss is used.
+        """
+        penalty = float(getattr(self.options, "diversity_loss_penalty", 1.0))
+        if self.use_mode_seeking and z_dist is not None:
+            return compute_mode_seeking_loss(
+                fake_samples, z_dist, penalty, self.zero_scalar
+            )
+        return compute_diversity_loss(fake_samples, penalty, self.zero_scalar)
+
+    def generate_diverse_samples_with_noise(
+        self,
+        indexes: torch.Tensor,
+        scale: int,
+        wells_pyramid: dict[int, torch.Tensor] = {},
+        seismic_pyramid: dict[int, torch.Tensor] = {},
+    ) -> tuple[list[torch.Tensor], torch.Tensor | None]:
+        """Like :meth:`generate_diverse_samples`, also returning latent pair distances.
+
+        The distances are computed right after the noise is drawn, because the
+        noise buffers are cached and reused by later calls.
+        """
+        n = (
+            1
+            if self.current_epoch < self.div_skip_epochs
+            else self.options.num_diversity_samples
+        )
+        b = len(indexes)
+
+        batched_noises = self.build_batched_noise(
+            n, b, scale, indexes, wells_pyramid, seismic_pyramid
+        )
+        z_dist = noise_pair_distances(batched_noises, n) if n > 1 else None
+        amps = self.get_noise_amplitude(scale)
+        batched_out = self.generator(batched_noises, amps, stop_scale=scale)
+
+        if n <= 1:
+            return [batched_out], None
+        return list(torch.chunk(batched_out, n, dim=0)), z_dist
 
     def generate_diverse_samples(
         self,

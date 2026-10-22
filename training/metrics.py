@@ -422,6 +422,92 @@ def compute_diversity_loss(
     return penalty_weight * div_loss
 
 
+def pairwise_mean_abs_distance(x: torch.Tensor) -> torch.Tensor:
+    """Mean absolute distance between every pair of samples along dim 0.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Tensor of shape ``(n, b, ...)``: ``n`` samples for each of ``b``
+        batch elements.
+
+    Returns
+    -------
+    torch.Tensor
+        Shape ``(n * (n - 1) / 2, b)``: one distance per pair and batch element.
+    """
+    n = x.shape[0]
+    flat = x.reshape(n, x.shape[1], -1).float()
+    idx_i, idx_j = torch.triu_indices(n, n, offset=1, device=x.device)
+    return (flat[idx_i] - flat[idx_j]).abs().mean(dim=-1)
+
+
+@torch.no_grad()
+def noise_pair_distances(noises: list[torch.Tensor], n: int) -> torch.Tensor:
+    """Pairwise latent distances for ``n`` stacked noise draws across all scales.
+
+    ``noises[lvl]`` has shape ``(n * b, C, H, W)`` laid out as ``n`` groups of
+    ``b`` (the layout produced by ``FaciesGAN.build_batched_noise``).
+    Conditioning channels are identical inside a batch element, so they
+    cancel in the difference and only the random channels contribute.
+
+    Returns
+    -------
+    torch.Tensor
+        Shape ``(n * (n - 1) / 2, b)``: mean absolute latent distance.
+    """
+    total: torch.Tensor | None = None
+    count = 0
+    for z in noises:
+        b = z.shape[0] // n
+        flat = z.reshape(n, b, -1).float()
+        idx_i, idx_j = torch.triu_indices(n, n, offset=1, device=z.device)
+        part = (flat[idx_i] - flat[idx_j]).abs().sum(dim=-1)
+        total = part if total is None else total + part
+        count += flat.shape[-1]
+    assert total is not None, "noise_pair_distances needs at least one scale"
+    return total / float(count)
+
+
+def compute_mode_seeking_loss(
+    fake_samples: list[torch.Tensor],
+    z_dist: torch.Tensor,
+    penalty_weight: float,
+    zero_scalar: torch.Tensor,
+    eps: float = 1e-5,
+    ratio_eps: float = 0.05,
+) -> torch.Tensor:
+    """Mode-seeking regularization (MSGAN).
+
+    Reference: Mao et al., "Mode Seeking Generative Adversarial Networks for
+    Diverse Image Synthesis", CVPR 2019. For each pair of samples generated
+    from the same conditioning with different noise, the ratio
+    ``d(G(z1), G(z2)) / d(z1, z2)`` is maximized by minimizing its inverse.
+    Unlike ``exp(-k * d)``, the gradient does not vanish once samples differ a
+    little, and the ratio is normalized by how far apart the noises were.
+
+    Parameters
+    ----------
+    fake_samples : list[torch.Tensor]
+        ``n`` tensors of shape ``(b, C, H, W)``, one per noise draw.
+    z_dist : torch.Tensor
+        Latent distances from :func:`noise_pair_distances`, shape ``(P, b)``.
+    eps : float
+        Guards the latent-distance division.
+    ratio_eps : float
+        Added to the ratio before inversion. The original MSGAN uses ``1e-5``,
+        which makes the loss reach ``1e5`` on collapsed pairs and swamps
+        GradNorm's loss ratios; ``0.05`` caps the loss at ``20`` while keeping
+        a strong gradient in the collapsed regime.
+    """
+    if penalty_weight <= 0 or len(fake_samples) < 2:
+        return zero_scalar
+    stacked = torch.stack(fake_samples, dim=0)
+    f_dist = pairwise_mean_abs_distance(stacked)
+    ratio = f_dist / (z_dist.to(f_dist.device, f_dist.dtype) + eps)
+    return penalty_weight * (1.0 / (ratio + ratio_eps)).mean()
+
+
 def compute_gradient_penalty(
     disc: torch.nn.Module,
     real: torch.Tensor,

@@ -57,6 +57,7 @@ class TrainingOptions(argparse.Namespace):
         scale0_noise_amp: float = 1.0,
         grad_clip_norm: float = 1.0,
         diversity_loss_penalty: float = 1.0,
+        diversity_loss_type: str = "exp",
         adversarial_loss_penalty: float = 1.0,
         num_diversity_samples: int = 3,
         num_feature: int = 32,
@@ -322,6 +323,8 @@ class TrainingOptions(argparse.Namespace):
         self.scale0_noise_amp = scale0_noise_amp
         self.grad_clip_norm = grad_clip_norm
         self.diversity_loss_penalty = diversity_loss_penalty
+        # "exp" (legacy exp(-10 d)) or "mode_seeking" (MSGAN ratio loss).
+        self.diversity_loss_type = diversity_loss_type
         self.adversarial_loss_penalty = adversarial_loss_penalty
         self.num_diversity_samples = num_diversity_samples
         self.num_feature = num_feature

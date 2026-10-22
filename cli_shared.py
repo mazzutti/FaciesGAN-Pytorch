@@ -620,6 +620,16 @@ def add_gan_loss_args(
         default=d.get("diversity_loss_penalty", 1.0),
     )
     parser.add_argument(
+        "--diversity-loss-type",
+        dest="diversity_loss_type",
+        choices=["exp", "mode_seeking"],
+        default=d.get("diversity_loss_type", "exp"),
+        help=(
+            "Diversity loss: 'exp' = exp(-10 * mean pair distance) (legacy); "
+            "'mode_seeking' = MSGAN 1 / (d(G(z1), G(z2)) / d(z1, z2)). Default: exp."
+        ),
+    )
+    parser.add_argument(
         "--adversarial-loss-penalty",
         type=float,
         help="multiplier for generator adversarial loss (default: 1.0)",
