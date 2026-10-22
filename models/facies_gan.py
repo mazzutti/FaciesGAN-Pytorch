@@ -5,17 +5,18 @@ architecture, supporting parallel training of multiple pyramid scales with
 optimized PyTorch logic (AMP, DDP, torch.compile).
 """
 
+import copy
 import logging
 import math
 import os
 import time
+from functools import partial
 from pathlib import Path
-from typing import cast
+from typing import Callable, cast
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 
@@ -25,6 +26,7 @@ from datasets.utils import generate_scales
 from device import device_manager
 from enums import DeviceType
 from models import utils
+from models.diffaug import DEFAULT_POLICY, diff_augment
 from models.discriminator import Discriminator
 from models.generator import Generator
 from models.gradnorm import GradNorm
@@ -41,6 +43,7 @@ from training.metrics import (
     compute_gradient_penalty,
     compute_integrated_rpm_loss,
     compute_masked_loss,
+    compute_r1_penalty,
     compute_reconstruction_loss,
     compute_rock_physics_loss,
 )
@@ -233,7 +236,40 @@ class FaciesGAN(nn.Module):
             padding_size=options.padding_size,
             stride=options.stride,
             input_channels=self.disc_input_channels,
+            norm=str(getattr(options, "disc_norm", "instance")),
+            dropout=float(getattr(options, "disc_dropout", 0.0)),
         )
+
+        # --- DiffAugment: differentiable augmentation of every critic input ---
+        # Applied to real, fake, GP/R1 interpolates and the generator's
+        # adversarial pass, so the critic never sees un-augmented data.
+        self.diffaug: Callable[[torch.Tensor], torch.Tensor] | None = None
+        if getattr(options, "use_diffaug", False):
+            self.diffaug = partial(
+                diff_augment,
+                policy=str(getattr(options, "diffaug_policy", DEFAULT_POLICY)),
+                pad_value=self.padding_value,
+            )
+
+        # --- EMA generator: smoothed weights used for sampling/checkpoints ---
+        self.generator_ema: Generator | None = None
+        self.ema_decay: float = float(getattr(options, "ema_decay", 0.999))
+        self.ema_steps: dict[int, int] = {}
+        if getattr(options, "use_ema", False):
+            self.generator_ema = Generator(
+                num_layer=options.num_layer,
+                kernel_size=options.kernel_size,
+                padding_size=options.padding_size,
+                padding_value=self.padding_value,
+                stride=options.stride,
+                input_channels=self.gen_input_channels,
+                output_channels=self.gen_output_channels,
+                num_facies=self.num_facies_channels,
+                normalization_range=options.normalization_range,
+            )
+            # Share the SPADE scale registry so forward() dispatches identically.
+            self.generator_ema.spade_scales = self.generator.spade_scales
+            self.generator_ema.eval()
 
         if self.use_gradient_checkpointing:
             self.generator.use_gradient_checkpointing = True
@@ -484,7 +520,7 @@ class FaciesGAN(nn.Module):
             # Construct conditioning tensor if flag is active
             cond_tensor = None
             if self.options.use_disc_conditioning:
-                cond_parts = []
+                cond_parts: list[torch.Tensor] = []
                 if self.options.use_wells:
                     w_local = wells_pyramid.get(scale)
                     if w_local is not None:
@@ -514,6 +550,8 @@ class FaciesGAN(nn.Module):
                     disc_in = torch.cat([torch.cat([real, fake], dim=0), cond_both], dim=1)
                 else:
                     disc_in = torch.cat([real, fake], dim=0)
+                if self.diffaug is not None:
+                    disc_in = self.diffaug(disc_in)
                 d_both = discs[scale](disc_in)
                 d_real, d_fake = d_both[:b], d_both[b:]
                 rl = -d_real.mean()
@@ -532,9 +570,33 @@ class FaciesGAN(nn.Module):
                     if scale == 0 and self.options.scale0_gradient_loss_penalty > 0.0
                     else self.options.gradient_loss_penalty
                 )
+                # NOTE: the WGAN gradient penalty is two-sided (targets a unit
+                # RMS gradient on every input pixel). Cutout/translation zero
+                # the gradient on the erased/padded pixels, so an augmented
+                # critic can never satisfy that target and GP dominates the
+                # critic loss. Keep GP on clean interpolates; R1 below is
+                # zero-centred and therefore safe to augment.
                 gp = compute_gradient_penalty(
-                    disc, real, fake.detach(), lambda_gp, conditioning=cond_tensor
+                    disc,
+                    real,
+                    fake.detach(),
+                    lambda_gp,
+                    conditioning=cond_tensor,
                 )
+                r1_gamma = (
+                    self.options.scale0_r1_gamma
+                    if scale == 0 and self.options.scale0_r1_gamma > 0.0
+                    else float(getattr(self.options, "r1_gamma", 0.0))
+                )
+                if r1_gamma > 0.0:
+                    # R1 is reported together with GP under the ``gp`` metric.
+                    gp = gp + compute_r1_penalty(
+                        disc,
+                        real,
+                        r1_gamma,
+                        conditioning=cond_tensor,
+                        augment=self.diffaug,
+                    )
                 gp_det = gp.detach()
                 last_gp[scale] = gp_det
                 self.last_gp_value[scale] = gp_det
@@ -799,7 +861,7 @@ class FaciesGAN(nn.Module):
                     # Precompute cond_tensor for GradNorm if conditioning is used
                     _cond_tensor = None
                     if self.options.use_disc_conditioning:
-                        _cond_parts = []
+                        _cond_parts: list[torch.Tensor] = []
                         if self.options.use_wells:
                             _w_local = wells_pyramid.get(scale)
                             if _w_local is not None:
@@ -972,10 +1034,15 @@ class FaciesGAN(nn.Module):
                                 gen.normalization_range,
                             )
                             adv_l = compute_adversarial_loss(
-                                _adv_disc, fake_full, opts.adversarial_loss_penalty, conditioning=_cond_tensor
+                                _adv_disc,
+                                fake_full,
+                                opts.adversarial_loss_penalty,
+                                conditioning=_cond_tensor,
+                                augment=self.diffaug,
                             )
 
                         if (task_idx is None or task_idx in (1, 4)) and _z_in_rec is not None:
+                            assert _rec_up is not None
                             rec_local = scale_block(_z_in_rec)
                             rec_full = _Gen.residual_clamp_fn(
                                 rec_local,
@@ -1007,9 +1074,7 @@ class FaciesGAN(nn.Module):
                             _seismic_residual = None
                             if (
                                 getattr(opts, "use_residual_coupling", False)
-                                and seismic_s_dict is not None
                                 and seismic_s_dict.get(_scale) is not None
-                                and phys is not None
                                 and getattr(opts, "use_ip", True)
                             ):
                                 from training.metrics import compute_seismic_loss
@@ -1026,7 +1091,9 @@ class FaciesGAN(nn.Module):
                                     dz_pixel=(
                                         phys.dz_pyramid[_scale]
                                         if _scale in range(len(phys.dz_pyramid))
-                                        else 0.5
+                                        else torch.tensor(
+                                            0.5, device=phys.dz_pyramid.device
+                                        )
                                     ),
                                 )
                             
@@ -1050,6 +1117,7 @@ class FaciesGAN(nn.Module):
                             )
 
                         if (task_idx is None or task_idx == 3) and _z_in_div is not None:
+                            assert _div_prev_up is not None
                             div_local = scale_block(_z_in_div)
                             div_full = _Gen.residual_clamp_fn(
                                 div_local,
@@ -1101,7 +1169,10 @@ class FaciesGAN(nn.Module):
                                 gen.normalization_range,
                             )
                             int_rpm_l = compute_integrated_rpm_loss(
-                                fake_full, phys.facies_rp_means, opts, zero
+                                fake_full,
+                                cast(torch.Tensor, phys.facies_rp_means),
+                                opts,
+                                zero,
                             )
 
                         target_dtype = torch.float32
@@ -1189,6 +1260,7 @@ class FaciesGAN(nn.Module):
                     optimizers[scale].step()
                 # noinspection PyProtectedMember
                 setattr(optimizers[scale], "_opt_called", True)
+                self.update_ema(scale)
 
             if self.use_grad_scaler:
                 self.grad_scaler_g.update()
@@ -1266,7 +1338,7 @@ class FaciesGAN(nn.Module):
             # Construct conditioning tensor if flag is active
             cond_tensor = None
             if self.options.use_disc_conditioning:
-                cond_parts = []
+                cond_parts: list[torch.Tensor] = []
                 b = fake.shape[0]
                 if self.options.use_wells:
                     w_local = wells_pyramid.get(scale)
@@ -1297,7 +1369,11 @@ class FaciesGAN(nn.Module):
                 disc_mod = self.discriminator.discs[scale]
             adv_disc = unwrap_ddp(disc_mod)
             adv_loss = compute_adversarial_loss(
-                adv_disc, fake, self.options.adversarial_loss_penalty, conditioning=cond_tensor
+                adv_disc,
+                fake,
+                self.options.adversarial_loss_penalty,
+                conditioning=cond_tensor,
+                augment=self.diffaug,
             )
 
             well_loss = compute_masked_loss(
@@ -1314,7 +1390,10 @@ class FaciesGAN(nn.Module):
             )
 
             integrated_rpm_loss = compute_integrated_rpm_loss(
-                fake, self.physics_state.facies_rp_means, self.options, self.zero_scalar
+                fake,
+                cast(torch.Tensor, self.physics_state.facies_rp_means),
+                self.options,
+                self.zero_scalar,
             )
 
             div_loss = compute_diversity_loss(
@@ -1519,19 +1598,13 @@ class FaciesGAN(nn.Module):
             if self.options.use_wells and wells_pyramid:
                 w_local = wells_pyramid[lvl]
                 w_local = w_local.to(device_manager.device, non_blocking=True)
-                if isinstance(indexes, torch.Tensor) and w_local.shape[0] != b:
-                    w_local = w_local[indexes]
-                elif isinstance(indexes, list) and w_local.shape[0] != b:
+                if w_local.shape[0] != b:
                     w_local = w_local[indexes]
                 w_on_device = w_local
                 noise_channels -= w_local.shape[1]
 
             if self.options.use_seismic and seismic_pyramid:
-                s_local = (
-                    seismic_pyramid[lvl]
-                    if not isinstance(indexes, torch.Tensor)
-                    else seismic_pyramid.get(lvl)
-                )
+                s_local = seismic_pyramid.get(lvl)
                 if s_local is not None:
                     s_local = s_local.to(device_manager.device, non_blocking=True)
                     if s_local.shape[0] != b:
@@ -1709,7 +1782,7 @@ class FaciesGAN(nn.Module):
         """
         with torch.no_grad():
             amps = self.get_noise_amplitude(scale)
-            fake = self.generator(noises, amps, stop_scale=scale)
+            fake = self.inference_generator(noises, amps, stop_scale=scale)
         return fake
 
     def get_synthetic_seismic(
@@ -1823,6 +1896,9 @@ class FaciesGAN(nn.Module):
         if device_manager.is_distributed:
             for p in self.generator.gens[scale].parameters():
                 dist.broadcast(p.data, src=0)
+        # EMA copy is taken from the uncompiled block (deepcopy-safe).
+        self._init_ema_scale(scale)
+
         if self.use_compile and not self.generator.use_gradient_checkpointing:
             # noinspection PyTypeChecker
             self.generator.gens[scale] = torch.compile(  # type: ignore
@@ -1854,6 +1930,120 @@ class FaciesGAN(nn.Module):
                 mode="reduce-overhead",
             )
 
+    # ---------------------------------------------------------------------------
+    # EMA Generator
+    # ---------------------------------------------------------------------------
+
+    @property
+    def inference_generator(self) -> Generator:
+        """Generator used for sampling: the EMA copy when it is complete."""
+        ema = self.generator_ema
+        if (
+            ema is not None
+            and len(ema.gens) > 0
+            and len(ema.gens) == len(self.generator.gens)
+        ):
+            return ema
+        return self.generator
+
+    def _init_ema_scale(self, scale: int) -> None:
+        """Create the EMA block for ``scale`` as a frozen copy of the generator block."""
+        ema = self.generator_ema
+        if ema is None:
+            return
+        src = unwrap_ddp(self.generator.gens[scale])
+        block = cast(
+            nn.Module,
+            copy.deepcopy(src).to(  # type: ignore[call-overload]
+                device_manager.device, memory_format=torch.channels_last
+            ),
+        )
+        block.requires_grad_(False)
+        block.eval()
+        if scale < len(ema.gens):
+            ema.gens[scale] = block
+        else:
+            ema.gens.append(block)
+        self.ema_steps[scale] = 0
+
+    @torch.no_grad()
+    def update_ema(self, scale: int) -> None:
+        """Exponential moving average step for the generator block at ``scale``.
+
+        Uses the usual warm-up ``min(decay, (1 + t) / (10 + t))`` so the EMA
+        tracks the live weights closely right after a block is created.
+        """
+        ema = self.generator_ema
+        if ema is None or scale >= len(ema.gens):
+            return
+        step = self.ema_steps.get(scale, 0) + 1
+        self.ema_steps[scale] = step
+        decay = min(self.ema_decay, (1.0 + step) / (10.0 + step))
+
+        src = unwrap_ddp(self.generator.gens[scale])
+        dst = ema.gens[scale]
+        weight = 1.0 - decay
+        for p_src, p_dst in zip(src.parameters(), dst.parameters()):
+            p_dst.lerp_(p_src.detach(), weight)
+        for b_src, b_dst in zip(src.buffers(), dst.buffers()):
+            b_dst.copy_(b_src)
+
+    @torch.no_grad()
+    def sync_ema_scale(self, scale: int) -> None:
+        """Overwrite the EMA block with the live generator weights."""
+        ema = self.generator_ema
+        if ema is None:
+            return
+        if scale >= len(ema.gens):
+            self._init_ema_scale(scale)
+            return
+        src = unwrap_ddp(self.generator.gens[scale])
+        ema.gens[scale].load_state_dict(src.state_dict())
+        self.ema_steps[scale] = 0
+
+    def restore_ema_state(
+        self, scale: int, state: dict[str, torch.Tensor] | None
+    ) -> None:
+        """Load an EMA state dict for ``scale``; fall back to the live weights."""
+        ema = self.generator_ema
+        if ema is None:
+            return
+        if state:
+            if scale >= len(ema.gens):
+                self._init_ema_scale(scale)
+            self.load_state_dict_compat(ema.gens[scale], state)
+            # Past warm-up: use the configured decay immediately after resume.
+            self.ema_steps[scale] = 10**6
+        else:
+            self.sync_ema_scale(scale)
+
+    def generator_ema_state(self, scale: int) -> dict[str, torch.Tensor] | None:
+        """Return the EMA state dict for ``scale`` (``None`` when EMA is off)."""
+        ema = self.generator_ema
+        if ema is None or scale >= len(ema.gens):
+            return None
+        return ema.gens[scale].state_dict()
+
+    def save_generator_ema_state(self, scale_path: str, scale: int) -> None:
+        """Save the EMA generator state dict for a scale."""
+        state = self.generator_ema_state(scale)
+        if state is not None:
+            torch.save(
+                state, str(Path(scale_path) / CheckpointFilenames.GENERATOR_EMA)
+            )
+
+    def load_generator_ema_state(self, scale_path: str, scale: int) -> None:
+        """Load the EMA generator state for a scale, syncing from G when absent."""
+        if self.generator_ema is None:
+            return
+        ema_path = Path(scale_path) / CheckpointFilenames.GENERATOR_EMA
+        state = None
+        if ema_path.exists():
+            state = torch.load(
+                str(ema_path), map_location=device_manager.device, weights_only=False
+            )
+        self.restore_ema_state(scale, state)
+
     def freeze_generator_scales(self, active_scales: tuple[int, ...]) -> None:
         """Freeze generator blocks outside the active training set."""
         active_set = set(active_scales)
@@ -1874,7 +2064,7 @@ class FaciesGAN(nn.Module):
 
     def clear_stale_generator_grads(self) -> None:
         """Free ``.grad`` tensors on generator parameters outside active scales."""
-        for _idx, gen in enumerate(self.generator.gens):
+        for gen in self.generator.gens:
             if not hasattr(gen, "parameters"):
                 continue
             for p in gen.parameters():
@@ -2087,6 +2277,7 @@ class FaciesGAN(nn.Module):
                     self.load_state_dict_compat(
                         unwrap_ddp(self.generator.gens[s]), sd.generator
                     )
+                    self.restore_ema_state(s, sd.generator_ema)
 
                     if load_discriminator:
                         if s >= len(self.discriminator.discs):
@@ -2104,6 +2295,7 @@ class FaciesGAN(nn.Module):
                 if self.has_generator_checkpoint(str(scale_path)):
                     self.init_generator_for_scale(scale)
                     self.load_generator_state(str(scale_path), scale)
+                    self.load_generator_ema_state(str(scale_path), scale)
 
                 if load_discriminator and self.has_discriminator_checkpoint(
                     str(scale_path)
@@ -2128,6 +2320,7 @@ class FaciesGAN(nn.Module):
         """Save all model states and metadata for a specific scale."""
         os.makedirs(path, exist_ok=True)
         self.save_generator_state(path, scale)
+        self.save_generator_ema_state(path, scale)
         self.save_discriminator_state(path, scale)
         self.save_amp(path, scale)
         self.save_shape(path, scale)

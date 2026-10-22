@@ -36,7 +36,14 @@ class ConvBlock(nn.Sequential):
         Amount of padding to add.
     stride : int
         Stride of the convolution.
+    norm : str, optional
+        Normalization applied after the convolution. ``"instance"`` (default)
+        uses an affine ``InstanceNorm2d``; ``"none"`` skips normalization and
+        keeps the convolution bias; ``"spectral"`` applies spectral
+        normalization to the convolution weight and skips the norm layer.
     """
+
+    NORM_CHOICES = ("instance", "none", "spectral")
 
     def __init__(
         self,
@@ -45,6 +52,7 @@ class ConvBlock(nn.Sequential):
         kernel_size: int,
         padding: int,
         stride: int,
+        norm: str = "instance",
     ) -> None:
         """Initialize a ConvBlock sequential module.
 
@@ -52,18 +60,26 @@ class ConvBlock(nn.Sequential):
         """
         super(ConvBlock, self).__init__()
 
-        self.add_module(
-            "conv",
-            nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                bias=False,  # InstanceNorm2d(affine=True) has its own bias
-            ),
+        if norm not in self.NORM_CHOICES:
+            raise ValueError(
+                f"Unknown norm {norm!r}; expected one of {self.NORM_CHOICES}"
+            )
+        use_instance_norm = norm == "instance"
+
+        conv: nn.Module = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            # InstanceNorm2d(affine=True) has its own bias
+            bias=not use_instance_norm,
         )
-        self.add_module("norm", nn.InstanceNorm2d(out_channels, affine=True))
+        if norm == "spectral":
+            conv = nn.utils.parametrizations.spectral_norm(conv)
+        self.add_module("conv", conv)
+        if use_instance_norm:
+            self.add_module("norm", nn.InstanceNorm2d(out_channels, affine=True))
         self.add_module("LeakyRelu", nn.LeakyReLU(0.2, inplace=True))
 
 
@@ -375,6 +391,12 @@ class SPADEDiscriminator(nn.Module):
     minibatch_stddev_epsilon : float, optional
         Numerical stability constant added before the square root.
         Default is DomainConfig.EPSILON.
+    norm : str, optional
+        Normalization used inside every ``ConvBlock`` (``"instance"``,
+        ``"none"`` or ``"spectral"``). Default is ``"instance"``.
+    dropout : float, optional
+        ``Dropout2d`` probability inserted after every body block. ``0.0``
+        (default) disables dropout and keeps the legacy module layout.
     """
 
     def __init__(
@@ -388,6 +410,8 @@ class SPADEDiscriminator(nn.Module):
         input_channels: int,
         minibatch_stddev_group_size: int = 4,
         minibatch_stddev_epsilon: float = DomainConfig.EPSILON,
+        norm: str = "instance",
+        dropout: float = 0.0,
     ) -> None:
         """Initialize the convolutional discriminator.
 
@@ -417,6 +441,8 @@ class SPADEDiscriminator(nn.Module):
         nn.Module.__init__(self)  # type: ignore
         self.minibatch_stddev_group_size = minibatch_stddev_group_size
         self.minibatch_stddev_epsilon = minibatch_stddev_epsilon
+        self.norm = norm
+        self.dropout_p = float(dropout)
 
         self.head = ConvBlock(
             input_channels,
@@ -424,29 +450,36 @@ class SPADEDiscriminator(nn.Module):
             kernel_size,
             padding_size,
             stride,
+            norm=norm,
         )
 
-        self.body = nn.Sequential(
-            *[
+        body_layers: list[nn.Module] = []
+        for i in range(num_layer - 2):
+            body_layers.append(
                 ConvBlock(
                     max(num_features // (2**i), min_num_features),
                     max(num_features // (2 ** (i + 1)), min_num_features),
                     kernel_size,
                     padding_size,
                     stride,
+                    norm=norm,
                 )
-                for i in range(num_layer - 2)
-            ]
-        )
+            )
+            if self.dropout_p > 0.0:
+                body_layers.append(nn.Dropout2d(self.dropout_p))
+        self.body = nn.Sequential(*body_layers)
 
         output_channels = max(num_features // (2 ** (num_layer - 2)), min_num_features)
-        self.tail = nn.Conv2d(
+        tail: nn.Module = nn.Conv2d(
             output_channels + 1,
             1,
             kernel_size=kernel_size,
             stride=stride,
             padding=padding_size,
         )
+        if norm == "spectral":
+            tail = nn.utils.parametrizations.spectral_norm(tail)
+        self.tail = tail
 
     def _append_minibatch_stddev(self, x: torch.Tensor) -> torch.Tensor:
         """Append a minibatch standard-deviation feature map.

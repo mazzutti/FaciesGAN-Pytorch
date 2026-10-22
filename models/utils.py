@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import torch
 from apex.normalization import FusedLayerNorm  # type: ignore[import]
@@ -26,7 +26,13 @@ def weights_init(m: torch.nn.Module) -> None:
         The neural network module to initialize.
     """
     if isinstance(m, torch.nn.Conv2d):
-        m.weight.data.normal_(0.0, 0.02)
+        parametrizations = getattr(m, "parametrizations", None)
+        if parametrizations is not None and "weight" in parametrizations:
+            # Spectral-norm parametrized conv: ``m.weight`` is a computed
+            # tensor, so initialize the underlying parameter instead.
+            parametrizations.weight.original.data.normal_(0.0, 0.02)
+        else:
+            m.weight.data.normal_(0.0, 0.02)
     elif isinstance(m, (torch.nn.BatchNorm2d, torch.nn.InstanceNorm2d, FusedLayerNorm)):
         # Only initialize if affine parameters exist
         if getattr(m, "weight", None) is not None:
@@ -41,6 +47,7 @@ def calc_gradient_penalty(
     fake_data: torch.Tensor,
     LAMBDA: float,
     conditioning: torch.Tensor | None = None,
+    augment: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Calculate gradient penalty for WGAN-GP training.
 
@@ -59,6 +66,8 @@ def calc_gradient_penalty(
         Gradient penalty coefficient (typically 10.0).
     conditioning : torch.Tensor, optional
         Conditioning tensor to concatenate with the interpolates.
+    augment : callable, optional
+        Differentiable augmentation applied to the critic input (DiffAugment).
 
     Returns
     -------
@@ -76,6 +85,8 @@ def calc_gradient_penalty(
         disc_in = torch.cat([interpolates, conditioning], dim=1)
     else:
         disc_in = interpolates
+    if augment is not None:
+        disc_in = augment(disc_in)
 
     disc_interpolates: torch.Tensor = discriminator(disc_in)
 

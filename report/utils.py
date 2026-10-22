@@ -1,8 +1,13 @@
 import os
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
+import numpy as np
 import torch
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from numpy.typing import NDArray
 
 from options import TrainingOptions
 
@@ -104,21 +109,30 @@ def format_value(value: object) -> str:
     return str(value)
 
 
-def save_dual_theme_plot(fig: Any, axes: Any, out_path: Path, dpi: int = 120) -> None:
+def save_dual_theme_plot(
+    fig: Figure,
+    axes: Axes | Sequence[Axes] | NDArray[Any],
+    out_path: Path,
+    dpi: int = 120,
+) -> None:
     """Saves the figure in dark theme, then modifies it to light theme and saves a _light version."""
     from typing import Any as AnyType
     import matplotlib.colors as mcolors
 
     # 1. Save dark version (the figure is assumed to be styled for dark mode already)
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor="#151b26")
+    # ``Any`` view: Pylance's bundled matplotlib stubs leave ``**kwargs``
+    # untyped, which strict mode reports on every call.
+    fig_any: Any = fig
+    fig_any.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor="#151b26")
 
     # 2. Flatten axes to handle 1D, 2D arrays, lists or single axes objects
-    if hasattr(axes, "flat"):
-        ax_list = list(axes.flat)
-    elif isinstance(axes, (list, tuple)):
-        ax_list = list(axes)
-    else:
+    ax_list: list[Axes | None]
+    if isinstance(axes, Axes):
         ax_list = [axes]
+    elif isinstance(axes, np.ndarray):
+        ax_list = [cast(Axes | None, a) for a in axes.flat]
+    else:
+        ax_list = list(axes)
 
     # Include colorbar axes (and any other axes not in the grid)
     all_fig_axes = fig.get_axes()
@@ -140,8 +154,9 @@ def save_dual_theme_plot(fig: Any, axes: Any, out_path: Path, dpi: int = 120) ->
     # 3. Modify for light theme
     fig.patch.set_facecolor("#ffffff")
 
-    if hasattr(fig, "_suptitle") and fig._suptitle is not None:
-        fig._suptitle.set_color("#1f2937")
+    suptitle: Any = getattr(fig, "_suptitle", None)
+    if suptitle is not None:
+        suptitle.set_color("#1f2937")
 
     for ax in ax_list:
         if ax is None:
@@ -156,7 +171,7 @@ def save_dual_theme_plot(fig: Any, axes: Any, out_path: Path, dpi: int = 120) ->
         if getattr(ax, "yaxis", None) is not None:
             ax.yaxis.label.set_color("#4b5563")
 
-        ax.tick_params(axis="both", which="both", colors="#4b5563")
+        cast(Any, ax).tick_params(axis="both", which="both", colors="#4b5563")
 
         for spine in ax.spines.values():
             if hasattr(spine, "set_color"):
@@ -177,14 +192,18 @@ def save_dual_theme_plot(fig: Any, axes: Any, out_path: Path, dpi: int = 120) ->
                 # Keep alpha if it exists
                 alpha = patch.get_alpha()
                 if alpha is None:
-                    alpha = patch.get_facecolor()[3]
+                    alpha = cast(
+                        tuple[float, float, float, float], patch.get_facecolor()
+                    )[3]
                 rgba = mcolors.to_rgba("#4b5563", alpha=alpha)
                 patch.set_facecolor(rgba)
 
             if is_white_ish(patch.get_edgecolor()):
                 alpha = patch.get_alpha()
                 if alpha is None:
-                    alpha = patch.get_edgecolor()[3]
+                    alpha = cast(
+                        tuple[float, float, float, float], patch.get_edgecolor()
+                    )[3]
                 rgba = mcolors.to_rgba("#4b5563", alpha=alpha)
                 patch.set_edgecolor(rgba)
 
@@ -213,7 +232,7 @@ def save_dual_theme_plot(fig: Any, axes: Any, out_path: Path, dpi: int = 120) ->
 
     # 4. Save light version
     light_path = out_path.with_name(out_path.stem + "_light" + out_path.suffix)
-    fig.savefig(light_path, dpi=dpi, bbox_inches="tight", facecolor="#ffffff")
+    fig_any.savefig(light_path, dpi=dpi, bbox_inches="tight", facecolor="#ffffff")
 
 
 def load_configs(outputs_dir: Path) -> dict[str, dict[str, object]]:
@@ -240,7 +259,6 @@ def ensure_all_report_images(outputs_dir: Path, data_dir: Path) -> None:
         ensure_distribution_histograms,
         ensure_loss_plots,
         ensure_pyramid_images,
-        ensure_rock_physics_crossplots,
         ensure_seismic_images,
         ensure_training_pyramid_image,
         ensure_variogram_plots,

@@ -28,6 +28,7 @@ class ScaleCheckpoint:
     opt_d: dict[str, Any]
     sch_g: dict[str, Any]
     sch_d: dict[str, Any]
+    generator_ema: dict[str, Any] | None = None
 
 
 def _default_scales() -> Dict[int, ScaleCheckpoint]:
@@ -100,6 +101,7 @@ class Checkpoint:
                     "opt_d": sc.opt_d,
                     "sch_g": sc.sch_g,
                     "sch_d": sc.sch_d,
+                    "generator_ema": sc.generator_ema,
                 }
                 for s, sc in self.scales.items()
             },
@@ -126,6 +128,7 @@ class Checkpoint:
                     opt_d=sd["opt_d"],
                     sch_g=sd["sch_g"],
                     sch_d=sd["sch_d"],
+                    generator_ema=sd.get("generator_ema"),
                 )
                 for s, sd in scales_data.items()
             }

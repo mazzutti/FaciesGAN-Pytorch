@@ -136,7 +136,7 @@ def _generate_samples(
             noises = model.get_pyramid_noise(
                 max_scale, mi, wells_dict, seismic_dict, rec=opts.rec
             )
-            for j, g in enumerate(model.generator(noises, noise_amps)):
+            for j, g in enumerate(model.inference_generator(noises, noise_amps)):
                 # generator may be typed imprecisely; ensure we treat outputs as tensors
                 idx = start_index + off + j + 1
 
@@ -395,7 +395,7 @@ def generate_uncertainty_samples(
             noises = model.get_pyramid_noise(
                 max_scale, mi, wells_dict, seismic_dict, rec=opts.rec
             )
-            for j, g in enumerate(model.generator(noises, noise_amps)):
+            for g in model.inference_generator(noises, noise_amps):
                 split = split_facies_rp(
                     g.unsqueeze(0), num_facies=facies_ch, has_rp=has_rock_physics
                 )

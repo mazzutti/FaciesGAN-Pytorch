@@ -10,7 +10,7 @@ or writing to external sinks.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import torch
@@ -378,12 +378,19 @@ def compute_adversarial_loss(
     fake: torch.Tensor,
     penalty: float,
     conditioning: torch.Tensor | None = None,
+    augment: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """Compute adversarial loss for a generated tensor at a scale."""
+    """Compute adversarial loss for a generated tensor at a scale.
+
+    ``augment`` (DiffAugment) is applied to the full critic input so the
+    generator is trained against exactly what the critic sees.
+    """
     if conditioning is not None:
         disc_in = torch.cat([fake, conditioning], dim=1)
     else:
         disc_in = fake
+    if augment is not None:
+        disc_in = augment(disc_in)
     return penalty * (-disc(disc_in).mean())
 
 
@@ -421,6 +428,7 @@ def compute_gradient_penalty(
     fake: torch.Tensor,
     lambda_gp: float,
     conditioning: torch.Tensor | None = None,
+    augment: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Compute the gradient penalty for WGAN-GP style regularization."""
     import models.utils as model_utils
@@ -432,7 +440,49 @@ def compute_gradient_penalty(
             fake.float(),
             lambda_gp,
             conditioning=conditioning,
+            augment=augment,
         )
+
+
+def compute_r1_penalty(
+    disc: torch.nn.Module,
+    real: torch.Tensor,
+    gamma: float,
+    conditioning: torch.Tensor | None = None,
+    augment: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """R1 regularization: ``gamma / 2 * E[||grad_x D(x)||^2]`` on real samples.
+
+    Reference: Mescheder et al., "Which Training Methods for GANs do actually
+    Converge?", ICML 2018. The squared gradient norm is normalized by the
+    number of input dimensions (same convention as ``calc_gradient_penalty``)
+    so ``gamma`` has the same meaning at every pyramid scale.
+
+    ``disc`` must be the uncompiled critic (double backward is required).
+    """
+    if gamma <= 0.0:
+        return torch.zeros((), device=real.device)
+
+    with autocast(DeviceType.CUDA, enabled=False):
+        real_in = real.detach().float().requires_grad_(True)
+        if conditioning is not None:
+            disc_in = torch.cat([real_in, conditioning.float()], dim=1)
+        else:
+            disc_in = real_in
+        if augment is not None:
+            disc_in = augment(disc_in)
+
+        scores: torch.Tensor = disc(disc_in)
+        (grad,) = torch.autograd.grad(
+            outputs=scores.sum(),
+            inputs=real_in,
+            create_graph=True,
+            only_inputs=True,
+        )
+        batch_size = real_in.shape[0]
+        n_dims = float(grad.shape[1] * grad.shape[2] * grad.shape[3])
+        sq_norm = grad.reshape(batch_size, -1).pow(2).sum(dim=1) / n_dims
+        return 0.5 * gamma * sq_norm.mean()
 
 
 def compute_masked_loss(
@@ -712,7 +762,7 @@ def calculate_reconstruction_loss_from_output(
 
         # 2. Rock physics reconstruction
         # Build enabled indices
-        enabled_rp = []
+        enabled_rp: list[int] = []
         if getattr(options, "use_ip", True): enabled_rp.append(0)
         if getattr(options, "use_is", True): enabled_rp.append(1)
         if getattr(options, "use_vpvs", True): enabled_rp.append(2)
@@ -782,7 +832,7 @@ def compute_integrated_rpm_loss(
         return zero_scalar
 
     # Build enabled indices
-    enabled_indices = []
+    enabled_indices: list[int] = []
     if getattr(options, "use_ip", True):
         enabled_indices.append(0)
     if getattr(options, "use_is", True):

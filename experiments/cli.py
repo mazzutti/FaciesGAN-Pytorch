@@ -299,6 +299,17 @@ def build_training_args(
         cmd.append("--use-residual-coupling")
         cmd.extend(["--coupling-strength", str(args.coupling_strength)])
 
+    # Few-shot regularization (DiffAugment, D norm/dropout, R1, EMA)
+    cmd.extend(["--disc-norm", str(getattr(args, "disc_norm", "instance"))])
+    cmd.extend(["--disc-dropout", str(getattr(args, "disc_dropout", 0.0))])
+    cmd.extend(["--r1-gamma", str(getattr(args, "r1_gamma", 1.0))])
+    cmd.extend(["--ema-decay", str(getattr(args, "ema_decay", 0.999))])
+    cmd.extend(
+        ["--diffaug-policy", str(getattr(args, "diffaug_policy", "hflip,translation,cutout"))]
+    )
+    cmd.append("--use-diffaug" if getattr(args, "use_diffaug", True) else "--no-diffaug")
+    cmd.append("--use-ema" if getattr(args, "use_ema", True) else "--no-ema")
+
     return cmd
 
 

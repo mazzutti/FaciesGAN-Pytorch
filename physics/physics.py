@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -118,11 +118,14 @@ class PhysicsState(nn.Module):
         if "facies_rp_means" in stats:
             try:
                 # Load raw means and normalize them on the fly using stats min/max bounds to [0, 1]
+                rp_means: dict[str, dict[str, float]] = cast(Any, stats)[
+                    "facies_rp_means"
+                ]
                 computed_means_01 = np.zeros((4, 3), dtype=np.float32)
                 for c in range(4):
                     c_str = str(c)
-                    if c_str in stats["facies_rp_means"]:
-                        c_stats = stats["facies_rp_means"][c_str]
+                    if c_str in rp_means:
+                        c_stats = rp_means[c_str]
                         ip_val = float(c_stats["Ip"])
                         is_val = float(c_stats["Is"])
                         vpvs_val = float(c_stats["VP_VS"])
@@ -136,7 +139,7 @@ class PhysicsState(nn.Module):
                         computed_means_01[c, 2] = vpvs_01
                     else:
                         computed_means_01[c] = default_means_01[c].numpy()
-                means_tensor_01 = torch.from_numpy(computed_means_01)
+                means_tensor_01 = torch.as_tensor(computed_means_01)
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning(f"Error parsing facies RP means from stats: {e}. Using fallback defaults.")

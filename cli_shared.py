@@ -135,6 +135,44 @@ def add_network_args(parser: ArgumentParser) -> None:
         default=NORMALIZATION_RANGE,
     )
     parser.add_argument("--padding-size", type=int, help="net pad size", default=0)
+    parser.add_argument(
+        "--disc-norm",
+        dest="disc_norm",
+        choices=["instance", "none", "spectral"],
+        default="instance",
+        help=(
+            "Discriminator normalization: 'instance' (legacy InstanceNorm2d), "
+            "'none' (no norm, keeps conv bias) or 'spectral' (spectral norm on "
+            "conv weights). Default: instance."
+        ),
+    )
+    parser.add_argument(
+        "--disc-dropout",
+        dest="disc_dropout",
+        type=float,
+        default=0.0,
+        help="Dropout2d probability after each discriminator body block (default: 0.0).",
+    )
+    parser.add_argument(
+        "--use-ema",
+        dest="use_ema",
+        action="store_true",
+        default=True,
+        help="Keep an EMA copy of generator weights and use it for sampling (default: on).",
+    )
+    parser.add_argument(
+        "--no-ema",
+        dest="use_ema",
+        action="store_false",
+        help="Disable the EMA generator (legacy behaviour).",
+    )
+    parser.add_argument(
+        "--ema-decay",
+        dest="ema_decay",
+        type=float,
+        default=0.999,
+        help="EMA decay for generator weights (default: 0.999).",
+    )
 
 
 def add_optimization_args(
@@ -593,6 +631,44 @@ def add_gan_loss_args(
         dest="_drift_loss_penalty",
         help="multiplier for discriminator drift penalty loss (default: 0.0)",
         default=None,
+    )
+    parser.add_argument(
+        "--use-diffaug",
+        dest="use_diffaug",
+        action="store_true",
+        default=True,
+        help=(
+            "Apply DiffAugment (differentiable augmentation) to the critic inputs: "
+            "real, fake, R1 and the generator's adversarial pass. The WGAN gradient "
+            "penalty always uses clean interpolates. Default: on."
+        ),
+    )
+    parser.add_argument(
+        "--no-diffaug",
+        dest="use_diffaug",
+        action="store_false",
+        help="Disable DiffAugment (legacy behaviour).",
+    )
+    parser.add_argument(
+        "--diffaug-policy",
+        dest="diffaug_policy",
+        type=str,
+        default=d.get("diffaug_policy", "hflip,translation,cutout"),
+        help=(
+            "Comma-separated DiffAugment policy from {hflip, translation, cutout} "
+            "(default: hflip,translation,cutout). No vertical flip: it breaks stratigraphy."
+        ),
+    )
+    parser.add_argument(
+        "--r1-gamma",
+        dest="r1_gamma",
+        type=float,
+        default=d.get("r1_gamma", 1.0),
+        help=(
+            "R1 penalty weight (gamma/2 * E||grad D(real)||^2, per-dimension "
+            "normalized) applied at every scale; --scale0-r1-gamma overrides scale 0. "
+            "Computed on the lazy --gp-interval schedule. Default: 1.0; 0 disables."
+        ),
     )
 
 

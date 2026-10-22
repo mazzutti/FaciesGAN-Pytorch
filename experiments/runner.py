@@ -1,3 +1,4 @@
+# pyright: reportMissingTypeStubs=false
 """Main execution runner for experiments."""
 
 from __future__ import annotations
@@ -6,7 +7,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -62,9 +63,9 @@ def load_variant_options(model_path: str, args: ExperimentOptions, ev_value: Any
             with open(opts_path, encoding="utf-8") as f:
                 opt_dict = json.load(f)
             v_opts = TrainingOptions()
-            for k, v in opt_dict.items():
+            for k, v in cast(dict[str, Any], opt_dict).items():
                 if isinstance(v, list):
-                    v = tuple(v)
+                    v = tuple(cast(list[Any], v))
                 setattr(v_opts, k, v)
             v_opts.gpu_device = args.gpu_device
             v_opts.use_cpu = args.use_cpu
@@ -325,7 +326,7 @@ def main() -> None:
     _test_dataset = PyramidsDataset(_base_opts)
     _test_dataset.batches = [_test_dataset.batches[i] for i in test_indices]
     _test_dataset.indices = _test_dataset.indices[torch.as_tensor(test_indices, dtype=torch.long)]
-    _test_dataset._scale_data_cache.clear()
+    _test_dataset.clear_scale_cache()
 
     # Pre-build pyramids for generation once
     wells_pyramid, seismic_pyramid = build_conditioning_pyramids(_base_opts)
@@ -743,8 +744,8 @@ def main() -> None:
 
                 # ── 1. Facies: Mode (most frequent class) ──
                 from scipy import stats as sp_stats
-                facies_mode_result = sp_stats.mode(gen_facies_idxs, axis=0, keepdims=False)
-                facies_mode = facies_mode_result.mode.astype(np.int32)  # (H, W)
+                facies_mode_result: Any = cast(Any, sp_stats).mode(gen_facies_idxs, axis=0, keepdims=False)
+                facies_mode: np.ndarray = np.asarray(facies_mode_result.mode, dtype=np.int32)  # (H, W)
                 facies_mode_rgb = utils.facies_to_rgb(facies_mode).transpose(1, 2, 0)  # (H, W, 3)
 
                 # ── 2. Facies: Shannon Entropy ──
@@ -772,6 +773,10 @@ def main() -> None:
                 seis_std = np.std(gen_seis_arr, axis=0)      # (H, W)
 
                 # ── Plot 3×3 figure ──
+                # matplotlib objects stay ``Any``: Pylance's bundled matplotlib
+                # stubs leave ``**kwargs`` untyped, which strict mode flags.
+                fig: Any
+                axes: Any
                 fig, axes = plt.subplots(3, 3, figsize=(16, 13), squeeze=False)
                 fig.patch.set_facecolor("#151b26")
 
@@ -800,30 +805,36 @@ def main() -> None:
 
                 axes[1][1].imshow(ip_mean, aspect="auto", cmap="magma", interpolation="nearest")
 
-                seis_mean_plot = seis_mean - np.mean(seis_mean)
+                seis_mean_plot = np.asarray(seis_mean - np.mean(seis_mean), dtype=np.float64)
                 seis_mean_lo = float(np.percentile(seis_mean_plot, 2))
                 seis_mean_hi = float(np.percentile(seis_mean_plot, 98))
                 seis_mean_abs = max(abs(seis_mean_lo), abs(seis_mean_hi), 1e-6)
                 axes[1][2].imshow(seis_mean_plot, aspect="auto", cmap="RdBu", vmin=-seis_mean_abs, vmax=seis_mean_abs, interpolation="nearest")
 
                 # ── Row 2: Uncertainty ──
-                im_ent = axes[2][0].imshow(facies_entropy_norm, aspect="auto", cmap="viridis", vmin=0.0, vmax=1.0, interpolation="nearest")
-                cb_ent = fig.colorbar(im_ent, ax=axes[2][0], fraction=0.046, pad=0.04)
+                ax_ent = axes[2][0]
+                im_ent = ax_ent.imshow(facies_entropy_norm, aspect="auto", cmap="viridis", vmin=0.0, vmax=1.0, interpolation="nearest")
+                cb_ent = fig.colorbar(im_ent, ax=ax_ent, fraction=0.046, pad=0.04)
                 cb_ent.set_label("Normalized Entropy", color="#f0f4f9", fontsize=9)
                 cb_ent.ax.yaxis.set_tick_params(color="#f0f4f9")
-                plt.setp(cb_ent.ax.yaxis.get_ticklabels(), color="#f0f4f9")
+                for _tl in cb_ent.ax.yaxis.get_ticklabels():
+                    _tl.set_color("#f0f4f9")
 
-                im_ip = axes[2][1].imshow(ip_std, aspect="auto", cmap="inferno", interpolation="nearest")
-                cb_ip = fig.colorbar(im_ip, ax=axes[2][1], fraction=0.046, pad=0.04)
+                ax_ip = axes[2][1]
+                im_ip = ax_ip.imshow(ip_std, aspect="auto", cmap="inferno", interpolation="nearest")
+                cb_ip = fig.colorbar(im_ip, ax=ax_ip, fraction=0.046, pad=0.04)
                 cb_ip.set_label("Std Dev", color="#f0f4f9", fontsize=9)
                 cb_ip.ax.yaxis.set_tick_params(color="#f0f4f9")
-                plt.setp(cb_ip.ax.yaxis.get_ticklabels(), color="#f0f4f9")
+                for _tl in cb_ip.ax.yaxis.get_ticklabels():
+                    _tl.set_color("#f0f4f9")
 
-                im_seis = axes[2][2].imshow(seis_std, aspect="auto", cmap="cividis", interpolation="nearest")
-                cb_seis = fig.colorbar(im_seis, ax=axes[2][2], fraction=0.046, pad=0.04)
+                ax_seis = axes[2][2]
+                im_seis = ax_seis.imshow(seis_std, aspect="auto", cmap="cividis", interpolation="nearest")
+                cb_seis = fig.colorbar(im_seis, ax=ax_seis, fraction=0.046, pad=0.04)
                 cb_seis.set_label("Std Dev", color="#f0f4f9", fontsize=9)
                 cb_seis.ax.yaxis.set_tick_params(color="#f0f4f9")
-                plt.setp(cb_seis.ax.yaxis.get_ticklabels(), color="#f0f4f9")
+                for _tl in cb_seis.ax.yaxis.get_ticklabels():
+                    _tl.set_color("#f0f4f9")
 
                 # ── Subtitle labels for Row 2 ──
                 axes[2][0].set_title("Shannon Entropy", fontsize=10, color="#c0c8d4", style="italic", pad=4)
@@ -857,7 +868,7 @@ def main() -> None:
                     save_dual_theme_plot(fig, axes, out_path, dpi=150)
                 except Exception as e:
                     logger.warning(f"Failed to save dual theme plot: {e}")
-                    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+                    fig.savefig(out_path, dpi=150, bbox_inches="tight")
 
                 plt.close(fig)
                 print(f"Saved uncertainty map to: {out_path}", flush=True)

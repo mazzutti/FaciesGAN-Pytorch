@@ -1,18 +1,30 @@
 # pyright: reportMissingTypeStubs=false
 
+import importlib
 import json
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.ndimage import label
-from scipy.stats import entropy, wasserstein_distance
+from scipy import ndimage
+from scipy import stats as scipy_stats
+from scipy.stats import entropy
 
 from report.constants import VARIANTS
 from report.utils import get_denormalize_fn
 
 FloatArray = NDArray[np.float64]
+
+
+def _label(a: np.ndarray) -> tuple[np.ndarray, int]:
+    res: Any = cast(Any, ndimage).label(a)
+    return np.asarray(res[0]), int(res[1])
+
+
+def _wasserstein(a: np.ndarray, b: np.ndarray) -> float:
+    res: Any = cast(Any, scipy_stats).wasserstein_distance(a, b)
+    return float(res)
 
 
 class VariantQuantResult(TypedDict):
@@ -128,8 +140,8 @@ def compute_quantitative_results(
         
         # --- 1. Compute Facies Proportions and Variance from Cache ---
         real_proportions_list: list[list[float]] = []
-        all_indices = []
-        
+        all_indices: list[np.ndarray] = []
+
         for i in range(facies_batch.shape[0]):
             f_tensor = facies_batch[i].cpu()
             if num_facies_ch == 3:
@@ -149,39 +161,41 @@ def compute_quantitative_results(
             real_facies_proportions = (counts_all / counts_all.sum()).tolist()
             
         if real_proportions_list:
-            props_arr = np.array(real_proportions_list)
-            real_proportion_std = float(np.mean(np.std(props_arr, axis=0)))
+            props_arr: FloatArray = np.asarray(real_proportions_list, dtype=np.float64)
+            real_std_arr: FloatArray = np.asarray(np.std(props_arr, axis=0), dtype=np.float64)
+            real_proportion_std = float(real_std_arr.mean())
 
         # --- 2. Compute Rock Physics Stats from Cache ---
         denormalize = get_denormalize_fn(data_dir)
-        
+        denormalize_any = cast(Any, denormalize)
+
         # Channel indices offset by the number of facies channels
         ch_idx = num_facies_ch
         
         if use_ip and facies_batch.shape[1] > ch_idx:
             ip_flat = facies_batch[:, ch_idx].cpu().numpy().flatten()
-            ip_denorm = np.asarray(denormalize(ip_flat, "ip", opt))
+            ip_denorm = np.asarray(denormalize_any(ip_flat, "ip", opt))
             real_ip_mean = float(np.mean(ip_denorm))
             real_ip_std = float(np.std(ip_denorm))
             ch_idx += 1
             
         if use_is and facies_batch.shape[1] > ch_idx:
             is_flat = facies_batch[:, ch_idx].cpu().numpy().flatten()
-            is_denorm = np.asarray(denormalize(is_flat, "is", opt))
+            is_denorm = np.asarray(denormalize_any(is_flat, "is", opt))
             real_is_mean = float(np.mean(is_denorm))
             real_is_std = float(np.std(is_denorm))
             ch_idx += 1
             
         if use_vpvs and facies_batch.shape[1] > ch_idx:
             vpvs_flat = facies_batch[:, ch_idx].cpu().numpy().flatten()
-            vpvs_denorm = np.asarray(denormalize(vpvs_flat, "vpvs", opt))
+            vpvs_denorm = np.asarray(denormalize_any(vpvs_flat, "vpvs", opt))
             real_vpvs_mean = float(np.mean(vpvs_denorm))
             real_vpvs_std = float(np.std(vpvs_denorm))
             ch_idx += 1
             
-        if getattr(opt, "use_seismic", True) and seismic_batch is not None and seismic_batch.shape[0] > 0:
+        if getattr(opt, "use_seismic", True) and seismic_batch.shape[0] > 0:
             s_flat = seismic_batch.cpu().numpy().flatten()
-            s_denorm = np.asarray(denormalize(s_flat, "seismic", opt))
+            s_denorm = np.asarray(denormalize_any(s_flat, "seismic", opt))
             real_seismic_mean = float(np.mean(s_denorm))
             real_seismic_std = float(np.std(s_denorm))
             
@@ -201,7 +215,7 @@ def compute_quantitative_results(
             npy_files = sorted(list(facies_dir.glob("facies_*.npy")))
             if npy_files:
                 counts = np.zeros(4, dtype=np.int64)
-                loaded_arrays = []
+                loaded_arrays: list[np.ndarray] = []
                 for i, f in enumerate(npy_files[:200]):
                     arr = np.load(f)
                     loaded_arrays.append(arr)
@@ -220,8 +234,9 @@ def compute_quantitative_results(
                 
                 # Calculate proportion variance (measure of realization diversity)
                 if gen_proportions_list:
-                    props_arr = np.array(gen_proportions_list)
-                    proportion_std = float(np.mean(np.std(props_arr, axis=0)))
+                    props_arr = np.asarray(gen_proportions_list, dtype=np.float64)
+                    gen_std_arr: FloatArray = np.asarray(np.std(props_arr, axis=0), dtype=np.float64)
+                    proportion_std = float(gen_std_arr.mean())
                     
                 # Calculate pairwise structural similarity (diversity among generated samples)
                 # Comparing realization n vs n+1 to estimate intra-ensemble diversity
@@ -251,14 +266,14 @@ def compute_quantitative_results(
         if ip_dir.exists():
             npy_files = list(ip_dir.glob("*.npy"))
             if npy_files:
-                vals = [np.load(f) for f in npy_files[:200]]
+                vals: list[np.ndarray] = [np.load(f) for f in npy_files[:200]]
                 ip_mean, ip_std = float(np.mean(vals)), float(np.std(vals))
                 
                 # Calculate pixel-wise variance across realizations for IP (uncertainty spread)
                 if len(vals) > 1:
                     # Use a subset of realizations to compute pixel-wise standard deviation
                     stacked_ip = np.stack(vals[:20])
-                    pixel_std = np.std(stacked_ip, axis=0)
+                    pixel_std: FloatArray = np.asarray(np.std(stacked_ip, axis=0), dtype=np.float64)
                     ip_realization_std_mean = float(np.mean(pixel_std))
 
         is_dir = outputs_dir / var / "generated" / "is"
@@ -371,7 +386,7 @@ def compute_channel_connectivity(
                 channel_mask = (field == 2).astype(np.int32)
                 if channel_mask.sum() == 0:
                     continue
-                labeled, n_comp = label(channel_mask)
+                labeled, n_comp = _label(channel_mask)
                 sizes = np.bincount(labeled.flatten())[1:]
                 n_components_list.append(int(n_comp))
                 largest_frac_list.append(
@@ -405,7 +420,7 @@ def compute_channel_connectivity(
                             channel_mask = (indices[i] == 2).astype(np.int32)
                             if channel_mask.sum() == 0:
                                 continue
-                            labeled, n_comp = label(channel_mask)
+                            labeled, n_comp = _label(channel_mask)
                             sizes = np.bincount(labeled.flatten())[1:]
                             n_components_list.append(int(n_comp))
                             largest_frac_list.append(
@@ -440,7 +455,7 @@ def compute_channel_connectivity(
                 channel_mask = (arr == 2).astype(np.int32)
                 if channel_mask.sum() == 0:
                     continue
-                labeled, n_comp = label(channel_mask)
+                labeled, n_comp = _label(channel_mask)
                 sizes = np.bincount(labeled.flatten())[1:]
                 n_components_list.append(int(n_comp))
                 largest_frac_list.append(
@@ -582,7 +597,7 @@ def compute_distribution_metrics(
                 n_sub = min(50000, len(real_data), len(gen_data))
                 r_sub = np.random.choice(real_data, n_sub, replace=False)
                 g_sub = np.random.choice(gen_data, n_sub, replace=False)
-                wd = float(wasserstein_distance(r_sub, g_sub))
+                wd = _wasserstein(r_sub, g_sub)
 
                 bins: FloatArray = np.asarray(
                     np.linspace(
@@ -629,11 +644,11 @@ def get_performance_data(outputs_dir: Path) -> PerformanceData:
         log_dir = var_dir / "tensorboard_logs"
         if log_dir.exists():
             try:
-                from tensorboard.backend.event_processing.event_accumulator import (
-                    EventAccumulator,
+                ea_mod: Any = importlib.import_module(
+                    "tensorboard.backend.event_processing.event_accumulator"
                 )
 
-                ea = cast(Any, EventAccumulator(str(log_dir)))
+                ea: Any = ea_mod.EventAccumulator(str(log_dir))
                 ea.Reload()
                 all_tags = cast(list[str], ea.Tags().get("scalars", []))
                 if all_tags:

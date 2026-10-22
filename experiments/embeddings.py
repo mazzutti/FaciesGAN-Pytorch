@@ -1,3 +1,4 @@
+# pyright: reportMissingTypeStubs=false
 """Manifold learning pipeline for latent space visualization.
 
 This module provides a robust, CPU-based pipeline for dimensionality reduction
@@ -282,11 +283,11 @@ def prepare_features(
         for i in range(len(arr)):
             s = arr[i]
             # Remove DC bias (zero-mean)
-            s_zero = s - np.mean(s)
+            s_zero = np.asarray(s - np.mean(s), dtype=np.float64)
             p2 = float(np.percentile(s_zero, 2))
             p98 = float(np.percentile(s_zero, 98))
             max_abs = max(abs(p2), abs(p98), 1e-6)
-            s_norm = np.clip(s_zero / max_abs, -1.0, 1.0)
+            s_norm = np.asarray(np.clip(s_zero / max_abs, -1.0, 1.0), dtype=np.float64)
             arr[i] = (s_norm + 1.0) / 2.0 * (norm_hi - norm_lo) + norm_lo
     elif rock_physics_only:
         # If the input contains only 1 channel, it's already the extracted property (e.g. generated Ip)

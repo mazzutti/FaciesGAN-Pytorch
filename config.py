@@ -67,6 +67,7 @@ class _CheckpointFilenames:
     EPOCH_CKPT: str = "epoch_checkpoint.pth"
     COMPLETED_EPOCH: str = "completed_epoch.txt"
     GENERATOR: str = "generator.pth"
+    GENERATOR_EMA: str = "generator_ema.pth"
     DISCRIMINATOR: str = "discriminator.pth"
     MASKS: str = "masks.pth"
     REC_NOISE: str = "rec_noise.pth"

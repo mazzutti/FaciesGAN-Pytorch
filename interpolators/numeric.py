@@ -1,3 +1,4 @@
+# pyright: reportMissingTypeStubs=false
 """Unified numeric interpolator for categorical and continuous data.
 
 This module provides the :class:`NumericInterpolator`, which handles all
@@ -16,17 +17,25 @@ All outputs are returned as multiscale PyTorch pyramids.
 from __future__ import annotations
 
 import logging
+from typing import Any, cast
 
 import numpy as np
 import torch
 from numpy.typing import NDArray
-from scipy.ndimage import zoom
+from scipy import ndimage
 
 from enums import InterpolationStrategy
 from interpolators.base import BaseInterpolator
 from interpolators.config import InterpolatorConfig
 
 logger = logging.getLogger(__name__)
+
+_ndimage: Any = ndimage
+
+
+def zoom(*args: Any, **kwargs: Any) -> NDArray[np.float32]:
+    """Typed wrapper around ``scipy.ndimage.zoom``."""
+    return cast(NDArray[np.float32], _ndimage.zoom(*args, **kwargs))
 
 
 def _mode_filter_reduction(block: NDArray[np.float32]) -> float:

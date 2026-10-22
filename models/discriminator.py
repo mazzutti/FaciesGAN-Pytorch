@@ -34,6 +34,11 @@ class Discriminator(nn.Module):
         Padding size for convolutions.
     input_channels : int
         Number of input facies channels.
+    norm : str
+        Normalization used in the critic blocks (``instance``, ``none`` or
+        ``spectral``).
+    dropout : float
+        ``Dropout2d`` probability applied after every body block.
 
     Attributes
     ----------
@@ -48,6 +53,8 @@ class Discriminator(nn.Module):
         padding_size: int,
         stride: int,
         input_channels: int,
+        norm: str = "instance",
+        dropout: float = 0.0,
     ) -> None:
         """Initialize the convolutional discriminator.
 
@@ -67,6 +74,8 @@ class Discriminator(nn.Module):
         self.padding_size = padding_size
         self.stride = stride
         self.input_channels = input_channels
+        self.norm = norm
+        self.dropout = float(dropout)
 
         nn.Module.__init__(self)
 
@@ -110,5 +119,7 @@ class Discriminator(nn.Module):
             num_features=num_features,
             min_num_features=min_num_features,
             input_channels=self.input_channels,
+            norm=self.norm,
+            dropout=self.dropout,
         )
         self.discs.append(spade_disc)

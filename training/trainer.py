@@ -320,7 +320,7 @@ class Trainer:
                 cond_tensors: dict[int, torch.Tensor | None] = {}
                 if self.options.use_disc_conditioning:
                     for scale in scales:
-                        cond_parts = []
+                        cond_parts: list[torch.Tensor] = []
                         b = facies_pyramid[scale].shape[0]
                         if self.options.use_wells:
                             w_local = wells_pyramid.get(scale)
@@ -695,6 +695,9 @@ class Trainer:
 
             gen = unwrap_ddp(self.model.generator.gens[scale])
             gen.load_state_dict(model_utils.load(str(generator_path)))
+            self.model.load_generator_ema_state(
+                str(Path(self.checkpoint_path) / str(scale)), scale
+            )
             disc = unwrap_ddp(self.model.discriminator.discs[scale])
             disc.load_state_dict(model_utils.load(str(discriminator_path)))
         except (FileNotFoundError, RuntimeError, KeyError, ValueError, OSError) as e:
@@ -1188,6 +1191,7 @@ class Trainer:
                 opt_d=self.discriminator_optimizers[s].state_dict(),
                 sch_g=self.generator_schedulers[s].state_dict(),
                 sch_d=self.discriminator_schedulers[s].state_dict(),
+                generator_ema=self.model.generator_ema_state(s),
             )
 
         gradnorm_state = None
@@ -1248,6 +1252,7 @@ class Trainer:
                 self.model.load_state_dict_compat(
                     unwrap_ddp(self.model.generator.gens[s]), sd.generator
                 )
+                self.model.restore_ema_state(s, sd.generator_ema)
                 self.model.load_state_dict_compat(
                     unwrap_ddp(self.model.discriminator.discs[s]), sd.discriminator
                 )

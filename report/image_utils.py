@@ -262,7 +262,6 @@ def ensure_pyramid_images(outputs_dir: Path, data_dir: Path) -> None:
             continue
 
         if use_seismic_cond and dataset_cache is None:
-            import torch
             from datasets.dataset import PyramidsDataset
             from options import TrainingOptions
 
@@ -285,13 +284,14 @@ def ensure_pyramid_images(outputs_dir: Path, data_dir: Path) -> None:
         for row, (prop, prop_label) in enumerate(zip(properties, prop_labels)):
             for col in range(num_scales):
                 ax = axes[row, col]
+                img: Image.Image | None = None
                 if prop == "Seismic_Cond":
                     _, _, _, seismic_batch = dataset_cache.get_scale_data(col)
                     if seismic_batch is not None and seismic_batch.shape[0] > 0:
                         s = seismic_batch[0].cpu().numpy()
                         if s.ndim == 3:
                             s = s[0]
-                        s_plot = s - np.mean(s)
+                        s_plot = np.asarray(s - np.mean(s), dtype=np.float64)
                         p_lo = float(np.percentile(s_plot, 2))
                         p_hi = float(np.percentile(s_plot, 98))
                         max_abs = max(abs(p_lo), abs(p_hi), 1e-6)
@@ -309,7 +309,7 @@ def ensure_pyramid_images(outputs_dir: Path, data_dir: Path) -> None:
                 for spine in ax.spines.values():
                     spine.set_visible(False)
                 if row == 0:
-                    if prop != "Seismic_Cond" and img_path.exists():
+                    if img is not None:
                         w, h = img.size
                         ax.set_title(
                             f"Scale {col}\n({w}×{h})",
@@ -884,7 +884,7 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
         facies_labels = ["Floodplain", "Point Bar", "Channel", "Boundary"]
 
         # Pre-load variant proportions for facies to avoid doing it inside the subplot loop
-        facies_variant_props = {}
+        facies_variant_props: dict[str, NDArray[np.float64]] = {}
         for variant in VARIANTS:
             gen_dir = outputs_dir / variant / "generated" / "facies"
             props = np.zeros(4)
@@ -892,9 +892,9 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
                 npy_files = sorted(list(gen_dir.glob("*.npy")))[:200]
                 if npy_files:
                     try:
-                        all_gen_vals = []
+                        all_gen_vals: list[NDArray[Any]] = []
                         for f in npy_files:
-                            v = np.load(f).flatten()
+                            v: NDArray[Any] = np.load(f).flatten()
                             all_gen_vals.append(v)
                         gen_vals = np.concatenate(all_gen_vals)
                         u_gen, c_gen = np.unique(gen_vals, return_counts=True)
@@ -1008,7 +1008,7 @@ def ensure_distribution_histograms(outputs_dir: Path, data_dir: Path) -> None:
                         if npy_files:
                             all_gen_vals = []
                             for f in npy_files:
-                                v = np.load(f).flatten()
+                                v = np.asarray(np.load(f)).flatten()
                                 if is_seismic:
                                     v = (v - np.mean(v)) / (np.std(v) + 1e-8)
                                 all_gen_vals.append(v)
@@ -1187,7 +1187,7 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
                         if direction not in real_gammas:
                             real_gammas[direction] = {}
                         for cat in range(4):
-                            all_gammas = []
+                            all_gammas: list[NDArray[np.float64]] = []
                             for s_idx in range(min(10, facies_batch.shape[0])):
                                 f = facies_batch[s_idx].cpu()
                                 if num_facies_ch == 3:
@@ -1214,7 +1214,7 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
                             ch_idx = 0
                         else:
                             data_source = facies_batch
-                            active_properties = []
+                            active_properties: list[str] = []
                             if getattr(opt, "use_ip", True):
                                 active_properties.append("Ip")
                             if getattr(opt, "use_is", True):
@@ -1294,8 +1294,8 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
                         if gen_dir.exists():
                             npy_files = sorted(list(gen_dir.glob("*.npy")))[:50]
                             if npy_files:
-                                all_omni_gammas = []
-                                all_horiz_gammas = []
+                                all_omni_gammas: list[NDArray[np.float64]] = []
+                                all_horiz_gammas: list[NDArray[np.float64]] = []
                                 v_lags = np.array([], dtype=np.int_)
                                 for nf in npy_files:
                                     field = np.asarray(np.load(nf))
@@ -1496,13 +1496,17 @@ def ensure_variogram_plots(outputs_dir: Path, data_dir: Path) -> None:
 def ensure_loss_plots(outputs_dir: Path) -> None:
     """Extract scalars from TensorBoard logs and generate loss plots."""
     try:
+        import importlib
+
         import matplotlib.pyplot as plt
-        from tensorboard.backend.event_processing.event_accumulator import (
-            EventAccumulator,
-        )  # type: ignore[reportMissingTypeStubs]
+
+        _ea_module = importlib.import_module(
+            "tensorboard.backend.event_processing.event_accumulator"
+        )
     except ImportError:
         return
     plt = cast(Any, plt)
+    EventAccumulator: Any = _ea_module.EventAccumulator
 
     for variant in VARIANTS:
         variant_dir = outputs_dir / variant
@@ -1512,7 +1516,7 @@ def ensure_loss_plots(outputs_dir: Path) -> None:
 
         print(f"Generating smoothed loss plots for {variant}...")
         try:
-            ea = cast(Any, EventAccumulator(str(log_dir)))
+            ea: Any = EventAccumulator(str(log_dir))
             ea.Reload()
 
             tags = cast(list[str], ea.Tags().get("scalars", []))

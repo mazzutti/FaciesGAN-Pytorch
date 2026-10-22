@@ -9,7 +9,7 @@ with data prefetching systems.
 """
 
 from itertools import repeat
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from torch.utils.data import Dataset
@@ -301,6 +301,10 @@ class PyramidsDataset(Dataset[RawBatch]):
         # Invalidate the scale data cache since order has changed
         self._scale_data_cache.clear()
 
+    def clear_scale_cache(self) -> None:
+        """Invalidate the per-scale data cache."""
+        self._scale_data_cache.clear()
+
     def select_equally_spaced(self, n: int) -> list[int]:
         """Select n equally spaced indices, subset/shuffle in-place, and return absolute indices.
 
@@ -317,14 +321,15 @@ class PyramidsDataset(Dataset[RawBatch]):
         import numpy as np
         total = len(self)
         if n >= total:
-            return sorted(self.indices.tolist())
+            raw_all: Any = self.indices
+            return sorted(int(i) for i in raw_all.tolist())
 
         # Generate n equally spaced float indices between 0 and total - 1
         indices = np.round(np.linspace(0, total - 1, n)).astype(int)
 
         # Ensure they are unique and exactly n elements
-        unique_indices = []
-        seen = set()
+        unique_indices: list[int] = []
+        seen: set[int] = set()
         for idx in indices:
             val = int(idx)
             if val not in seen:
@@ -340,7 +345,7 @@ class PyramidsDataset(Dataset[RawBatch]):
                 unique_indices.append(val)
                 seen.add(val)
 
-        selected = sorted(unique_indices)
+        selected: list[int] = sorted(unique_indices)
 
         # Subset the dataset batches and indices
         selected_batches = [self.batches[i] for i in selected]
@@ -348,7 +353,8 @@ class PyramidsDataset(Dataset[RawBatch]):
 
         # Shuffle the selected subset via torch.randperm
         # Use a seed (falling back to 42 if manual_seed is None) to guarantee DDP ranks shuffle identically
-        seed = self.options.manual_seed if getattr(self.options, "manual_seed", None) is not None else 42
+        manual_seed: Optional[int] = getattr(self.options, "manual_seed", None)
+        seed: int = manual_seed if manual_seed is not None else 42
         gen = torch.Generator().manual_seed(seed)
         g = torch.randperm(len(selected_batches), generator=gen)
         self.batches = [selected_batches[i] for i in g]
@@ -357,7 +363,8 @@ class PyramidsDataset(Dataset[RawBatch]):
         # Invalidate cache
         self._scale_data_cache.clear()
 
-        return sorted(selected_indices.tolist())
+        raw_selected: Any = selected_indices
+        return sorted(int(i) for i in raw_selected.tolist())
 
     def clean_cache(self) -> None:
         """Clear the joblib pyramid cache and internal scale-data cache.

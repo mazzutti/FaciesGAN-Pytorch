@@ -488,7 +488,9 @@ def generate_html_report(
             bar_width = max(5, min(100, int(100 - sc["overall"])))
             
             # Add distribution metrics directly to the scorecard dict
-            dm = distribution_metrics.get(var, {}) if distribution_metrics else {}
+            dm: dict[str, dict[str, float]] = (
+                distribution_metrics.get(var, {}) if distribution_metrics else {}
+            )
             dist_data = {}
             prop_headers = [("ip", "Ip"), ("is", "Is"), ("vpvs", "Vp/Vs")]
             for pk, _pl in prop_headers:
@@ -659,17 +661,19 @@ def generate_html_report(
             # Loss curves
             loss_paths_g = sorted([p for p in variant_dir.glob("loss_G_*.png") if not p.stem.endswith("_light")])
             loss_paths_d = sorted([p for p in variant_dir.glob("loss_D_*.png") if not p.stem.endswith("_light")])
+            loss_entries_g: list[dict[str, str | None]] = []
+            loss_entries_d: list[dict[str, str | None]] = []
             var_data["losses"] = {
                 "has_g": len(loss_paths_g) > 0,
                 "has_d": len(loss_paths_d) > 0,
-                "g": [],
-                "d": [],
+                "g": loss_entries_g,
+                "d": loss_entries_d,
             }
             for path in loss_paths_g:
                 light = path.with_name(path.stem + "_light" + path.suffix)
                 label = re.sub(r'[_ -]?light', '', path.stem.replace("loss_", ""), flags=re.IGNORECASE)
                 label = label.replace("_", " ").strip()
-                var_data["losses"]["g"].append(
+                loss_entries_g.append(
                     {
                         "label": label,
                         "rel_path": md_relpath(path, report_dir),
@@ -682,7 +686,7 @@ def generate_html_report(
                 light = path.with_name(path.stem + "_light" + path.suffix)
                 label = re.sub(r'[_ -]?light', '', path.stem.replace("loss_", ""), flags=re.IGNORECASE)
                 label = label.replace("_", " ").strip()
-                var_data["losses"]["d"].append(
+                loss_entries_d.append(
                     {
                         "label": label,
                         "rel_path": md_relpath(path, report_dir),

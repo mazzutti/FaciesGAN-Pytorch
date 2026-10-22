@@ -110,7 +110,7 @@ def generate_facies(
     with torch.no_grad():
         generated_facies: list[NDArray[np.float32]] = [
             utils.torch2np(gen_facie.unsqueeze(0), denormalize=True)
-            for gen_facie in facies_model.generator(
+            for gen_facie in facies_model.inference_generator(
                 noises, facies_model.get_noise_amplitude(max_scale)
             )
         ]
@@ -209,7 +209,7 @@ def generate_comparison_plots(
                 scale, [i_idx] * num_generated, wells_pyramid, seismic_pyramid
             )
             with torch.no_grad():
-                fake = facies_model.generator(
+                fake = facies_model.inference_generator(
                     noises,
                     facies_model.get_noise_amplitude(scale),
                     stop_scale=scale,

@@ -125,6 +125,13 @@ class TrainingOptions(argparse.Namespace):
         seismic_loss_penalty: float | None = None,
         use_residual_coupling: bool = False,
         coupling_strength: float = 1.0,
+        use_diffaug: bool = True,
+        diffaug_policy: str = "hflip,translation,cutout",
+        disc_norm: str = "instance",
+        disc_dropout: float = 0.0,
+        r1_gamma: float = 1.0,
+        use_ema: bool = True,
+        ema_decay: float = 0.999,
     ) -> None:
         """Create a TrainingOptions namespace with defaults for training.
 
@@ -409,6 +416,20 @@ class TrainingOptions(argparse.Namespace):
         # Residual coupling
         self.use_residual_coupling = use_residual_coupling
         self.coupling_strength = coupling_strength
+
+        # Few-shot regularization (see models/diffaug.py, custom_layer.py)
+        # DiffAugment on every critic input; policy is a comma-separated list.
+        self.use_diffaug = use_diffaug
+        self.diffaug_policy = diffaug_policy
+        # Discriminator normalization: "instance" (legacy), "none", "spectral".
+        self.disc_norm = disc_norm
+        # Dropout2d probability after each discriminator body block.
+        self.disc_dropout = disc_dropout
+        # R1 penalty weight applied to every scale (scale0_r1_gamma overrides s0).
+        self.r1_gamma = r1_gamma
+        # Exponential moving average of generator weights used for sampling.
+        self.use_ema = use_ema
+        self.ema_decay = ema_decay
 
     def post_process(self) -> None:
         """Resolve conditional penalties after argparse has populated the flags.
