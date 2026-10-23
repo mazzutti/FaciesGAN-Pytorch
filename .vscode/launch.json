@@ -224,7 +224,7 @@
         "--generator-steps",
         "1",
         "--diversity-loss-penalty",
-        "4.0",
+        "1.0",
         "--adversarial-loss-penalty",
         "10.0",
         "--gradient-loss-penalty",

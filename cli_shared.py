@@ -623,10 +623,10 @@ def add_gan_loss_args(
         "--diversity-loss-type",
         dest="diversity_loss_type",
         choices=["exp", "mode_seeking"],
-        default=d.get("diversity_loss_type", "exp"),
+        default=d.get("diversity_loss_type", "mode_seeking"),
         help=(
             "Diversity loss: 'exp' = exp(-10 * mean pair distance) (legacy); "
-            "'mode_seeking' = MSGAN 1 / (d(G(z1), G(z2)) / d(z1, z2)). Default: exp."
+            "'mode_seeking' = MSGAN 1 / (d(G(z1), G(z2)) / d(z1, z2)). Default: mode_seeking."
         ),
     )
     parser.add_argument(

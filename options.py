@@ -57,7 +57,7 @@ class TrainingOptions(argparse.Namespace):
         scale0_noise_amp: float = 1.0,
         grad_clip_norm: float = 1.0,
         diversity_loss_penalty: float = 1.0,
-        diversity_loss_type: str = "exp",
+        diversity_loss_type: str = "mode_seeking",
         adversarial_loss_penalty: float = 1.0,
         num_diversity_samples: int = 3,
         num_feature: int = 32,

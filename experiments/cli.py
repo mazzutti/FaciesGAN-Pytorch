@@ -186,7 +186,7 @@ def build_training_args(
         "--diversity-loss-penalty",
         str(args.diversity_loss_penalty),
         "--diversity-loss-type",
-        str(getattr(args, "diversity_loss_type", "exp")),
+        str(getattr(args, "diversity_loss_type", "mode_seeking")),
         "--adversarial-loss-penalty",
         str(args.adversarial_loss_penalty),
         "--well-loss-penalty",
