@@ -309,6 +309,9 @@ def build_training_args(
     cmd.extend(
         ["--diffaug-policy", str(getattr(args, "diffaug_policy", "hflip,translation,cutout"))]
     )
+    cmd.extend(["--disc-crop-ratio", str(getattr(args, "disc_crop_ratio", 1.0))])
+    cmd.extend(["--disc-crop-min-scale", str(getattr(args, "disc_crop_min_scale", 2))])
+    cmd.extend(["--parallel-lr-factor", str(getattr(args, "parallel_lr_factor", 0.5))])
     cmd.append("--use-diffaug" if getattr(args, "use_diffaug", True) else "--no-diffaug")
     cmd.append("--use-ema" if getattr(args, "use_ema", True) else "--no-ema")
 

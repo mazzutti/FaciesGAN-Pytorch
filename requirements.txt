@@ -20,3 +20,5 @@ apex
 joblib
 triton
 umap-learn
+lpips
+pytorch-fid

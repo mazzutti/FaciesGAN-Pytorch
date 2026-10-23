@@ -561,14 +561,14 @@
         {% if scorecard_table %}
           <div class="card">
             <h3 class="card-title">🏆 Variant Performance & Distribution Scorecard</h3>
-            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Composite ranking evaluating the quality, physical consistency, and spatial/statistical diversity of generated realizations. Penalties are weighted equally (14.29% each). Lower is better for all metrics.</p>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Composite ranking evaluating the quality, physical consistency, and spatial/statistical diversity of generated realizations. Penalties are weighted equally ({{ "%.2f"|format(100 / scorecard_terms) }}% each). Lower is better for all metrics.</p>
             <div style="overflow-x: auto;">
               <table>
                 <thead>
                   <tr>
                     <th rowspan="2" style="text-align: center; width: 60px; vertical-align: middle;">Rank</th>
                     <th rowspan="2" style="text-align: left; vertical-align: middle;">Variant</th>
-                    <th colspan="7" style="text-align: center; border-bottom: 1px solid rgba(255, 255, 255, 0.08);">Evaluation Penalties (Lower is Better)</th>
+                    <th colspan="{{ scorecard_terms }}" style="text-align: center; border-bottom: 1px solid rgba(255, 255, 255, 0.08);">Evaluation Penalties (Lower is Better)</th>
                     {% if use_ip or use_is or use_vpvs %}
                     <th colspan="{{ (use_ip|int + use_is|int + use_vpvs|int) * 2 }}" style="text-align: center; border-bottom: 1px solid rgba(255, 255, 255, 0.08);">Distribution Distance (KL-Div / Wasserstein)</th>
                     {% endif %}
@@ -580,7 +580,12 @@
                     <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Physics Dev (%)</th>
                     <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Ip WD Pen (%)</th>
                     <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Conn. Dev (%)</th>
+                    {% if scorecard_has_sifid %}
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">SIFID Pen (%)</th>
+                    <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Diversity Pen (LPIPS, %)</th>
+                    {% else %}
                     <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Struct. Div. Pen</th>
+                    {% endif %}
                     <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Prop. Var. Pen</th>
                     <th style="text-align: center; font-size: 0.8rem; font-weight: 500;">Ip Spread Pen</th>
                     
@@ -608,7 +613,10 @@
                       <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.rp_dev }}</td>
                       <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.ip_wd_penalty }}</td>
                       <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.conn_dev }}</td>
-                      <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.pairwise_ssim_penalty|round(2) }}</td>
+                      {% if scorecard_has_sifid %}
+                      <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.sifid_penalty|round(2) }}</td>
+                      {% endif %}
+                      <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.diversity_penalty|round(2) }}</td>
                       <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.variance_matching_penalty|round(2) }}</td>
                       <td style="text-align: center; font-family: monospace; vertical-align: middle;">{{ row.ip_spread_penalty|round(2) }}</td>
                       
@@ -661,7 +669,12 @@
                   • <strong>Facies RMSE & Phys Dev:</strong> Deviation of mean facies proportions and rock physics properties from real data.<br>
                   • <strong>Ip WD Pen:</strong> Normalized Wasserstein distance penalty for acoustic impedance (I<sub>p</sub>).<br>
                   • <strong>Conn Dev:</strong> Absolute deviation of spatial connectivity (largest component fraction).<br>
+                  {% if scorecard_has_sifid %}
+                  • <strong>SIFID Pen:</strong> Excess single-image FID of each realization over its conditioning section, relative to the SIFID between two different real sections (0 = as close as an unrelated real section).<br>
+                  • <strong>Diversity Pen:</strong> Shortfall of LPIPS between realizations sharing the same conditioning, relative to the LPIPS between two different real sections (higher = less diverse).<br>
+                  {% else %}
                   • <strong>Struct Div:</strong> Pairwise SSIM penalty (higher penalty = structural replication/mode collapse).<br>
+                  {% endif %}
                   • <strong>Prop Var:</strong> Penalty for mismatch in facies proportion variance across realizations.<br>
                   • <strong>Ip Spread:</strong> Penalty for insufficient variance in I<sub>p</sub> across realizations (using 100% target std).
                 </div>
@@ -672,6 +685,44 @@
                   • <strong>Color Indicators:</strong> <span style="color: #34d399; font-weight: bold;">Green</span> represents excellent alignment (distance &lt; 0.05), <span style="color: #fbbf24; font-weight: bold;">Yellow</span> is acceptable (0.05 - 0.15), and <span style="color: #f87171; font-weight: bold;">Red</span> indicates significant deviation (&gt; 0.15).
                 </div>
               </div>
+            </div>
+          </div>
+        {% endif %}
+
+        <!-- Few-shot Metrics Table -->
+        {% if fewshot_table %}
+          <div class="card">
+            <h3 class="card-title">🔬 Few-shot Fidelity & Diversity</h3>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">SIFID compares the internal patch statistics of each realization with the real section it was conditioned on (lower is better). LPIPS is measured between realizations that share the same conditioning (higher means more diverse).</p>
+            <div style="overflow-x: auto;">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="text-align: left;">Source</th>
+                    <th style="text-align: center;">SIFID (mean ± std)</th>
+                    <th style="text-align: center;">LPIPS between realizations (mean ± std)</th>
+                    <th style="text-align: center;">Samples / Conditions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in fewshot_table %}
+                    <tr>
+                      <td style="font-weight: 600;">{{ row.label }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.sifid }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.lpips }}</td>
+                      <td style="text-align: center; font-family: monospace;">{{ row.n }}</td>
+                    </tr>
+                  {% endfor %}
+                  {% if fewshot_reference %}
+                    <tr>
+                      <td style="font-weight: 600; color: var(--text-muted);">Real (two different sections)</td>
+                      <td style="text-align: center; font-family: monospace; color: var(--text-muted);">{{ fewshot_reference.sifid }}</td>
+                      <td style="text-align: center; font-family: monospace; color: var(--text-muted);">{{ fewshot_reference.lpips }}</td>
+                      <td style="text-align: center; color: var(--text-muted);">—</td>
+                    </tr>
+                  {% endif %}
+                </tbody>
+              </table>
             </div>
           </div>
         {% endif %}

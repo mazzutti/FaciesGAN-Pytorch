@@ -982,6 +982,19 @@ class Trainer:
                             normalization_range=norm_range,
                         )
 
+    def generator_lr_for(self, scale: int, scales: tuple[int, ...]) -> float:
+        """Generator learning rate for ``scale`` inside a parallel training group.
+
+        ConSinGAN-style scaling: the finest scale of the group keeps ``lr_g``
+        and every coarser scale is multiplied by ``parallel_lr_factor`` once
+        per level, i.e. ``lr_g * factor ** (max(scales) - scale)``. The default
+        factor is ``0.5``; ``1.0`` keeps the same learning rate for every scale.
+        """
+        factor = float(getattr(self.options, "parallel_lr_factor", 0.5))
+        if factor == 1.0 or not scales:
+            return self.lr_g
+        return self.lr_g * factor ** (max(scales) - scale)
+
     def setup_optimizers(self, scales: tuple[int, ...]) -> None:
         """Initialize optimizers and schedulers for the given scales.
 
@@ -1008,7 +1021,7 @@ class Trainer:
 
             self.generator_optimizers[scale] = FusedAdam(
                 self.model.generator.gens[scale].parameters(),
-                lr=self.lr_g,
+                lr=self.generator_lr_for(scale, scales),
                 betas=(self.beta1, 0.999),
                 set_grad_none=True,
             )
@@ -1028,7 +1041,7 @@ class Trainer:
             # Reset optimizer param group LRs to initial values before
             # creating new schedulers.
             for pg in self.generator_optimizers[scale].param_groups:
-                pg["lr"] = self.lr_g
+                pg["lr"] = self.generator_lr_for(scale, scales)
             lr_d_scale = (
                 self.lr_d * self.options.scale0_disc_lr_factor
                 if scale == 0
@@ -1295,12 +1308,13 @@ class Trainer:
                 logger.debug("scale %d discriminator LR overridden to %s", s, new_lr_d)
 
             if s in self.generator_optimizers:
+                lr_g_s = self.generator_lr_for(s, scales)
                 for param_group in self.generator_optimizers[s].param_groups:
-                    param_group["lr"] = self.lr_g
+                    param_group["lr"] = lr_g_s
                 if s in self.generator_schedulers:
                     sch_g = self.generator_schedulers[s]
                     if hasattr(sch_g, "base_lrs"):
-                        sch_g.base_lrs = [self.lr_g] * len(
+                        sch_g.base_lrs = [lr_g_s] * len(
                             self.generator_optimizers[s].param_groups
                         )
 

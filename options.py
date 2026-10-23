@@ -133,6 +133,9 @@ class TrainingOptions(argparse.Namespace):
         r1_gamma: float = 1.0,
         use_ema: bool = True,
         ema_decay: float = 0.999,
+        parallel_lr_factor: float = 0.5,
+        disc_crop_ratio: float = 1.0,
+        disc_crop_min_scale: int = 2,
     ) -> None:
         """Create a TrainingOptions namespace with defaults for training.
 
@@ -433,6 +436,12 @@ class TrainingOptions(argparse.Namespace):
         # Exponential moving average of generator weights used for sampling.
         self.use_ema = use_ema
         self.ema_decay = ema_decay
+        # Generator LR multiplier per level below the finest scale of a
+        # parallel group (ConSinGAN-style); default 0.5, 1.0 disables.
+        self.parallel_lr_factor = parallel_lr_factor
+        # Random critic crop (fraction of H/W) on scales >= disc_crop_min_scale; 1.0 disables.
+        self.disc_crop_ratio = disc_crop_ratio
+        self.disc_crop_min_scale = disc_crop_min_scale
 
     def post_process(self) -> None:
         """Resolve conditional penalties after argparse has populated the flags.

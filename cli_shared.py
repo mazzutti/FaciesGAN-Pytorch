@@ -161,6 +161,33 @@ def add_network_args(parser: ArgumentParser) -> None:
         help="Keep an EMA copy of generator weights and use it for sampling (default: on).",
     )
     parser.add_argument(
+        "--disc-crop-ratio",
+        dest="disc_crop_ratio",
+        type=float,
+        default=1.0,
+        help=(
+            "Random crop of the critic input, as a fraction of height and width, "
+            "applied on scales >= --disc-crop-min-scale. 1.0 disables (default)."
+        ),
+    )
+    parser.add_argument(
+        "--disc-crop-min-scale",
+        dest="disc_crop_min_scale",
+        type=int,
+        default=2,
+        help="First scale that uses --disc-crop-ratio (default: 2).",
+    )
+    parser.add_argument(
+        "--parallel-lr-factor",
+        dest="parallel_lr_factor",
+        type=float,
+        default=0.5,
+        help=(
+            "Generator LR multiplier applied once per level below the finest scale of a "
+            "parallel group: lr_g * factor ** (max_scale - scale). Default: 0.5; 1.0 disables."
+        ),
+    )
+    parser.add_argument(
         "--no-ema",
         dest="use_ema",
         action="store_false",

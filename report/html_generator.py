@@ -6,6 +6,7 @@ from typing import Any, Callable, cast
 from jinja2 import Environment, FileSystemLoader
 
 import report.metrics as report_metrics
+from report.fewshot_metrics import load_or_compute_fewshot
 from report.constants import (
     EMBEDDING_LABELS,
     EMBEDDING_METHODS,
@@ -64,6 +65,11 @@ def generate_html_report(
         outputs_dir, data_dir
     )
     performance_data: dict[str, dict[str, float]] = get_performance_data_fn(outputs_dir)
+
+    # Few-shot metrics: SIFID (fidelity) and intra-condition LPIPS (diversity).
+    fewshot = load_or_compute_fewshot(outputs_dir, data_dir)
+    fewshot_results = fewshot[0] if fewshot is not None else {}
+    fewshot_ref = fewshot[1] if fewshot is not None else None
 
     if output is None:
         output = str(outputs_dir.parent.parent / "index.html")
@@ -147,10 +153,27 @@ def generate_html_report(
         else:
             rp_dev = 0.0
 
-        # 3. Structural Diversity: Pairwise SSIM (Lower means more diverse structure, so we penalize high similarity)
-        # Assuming avg SSIM ranges 0-1, penalty is proportional to how similar they are.
-        # So a pairwise SSIM of 1.0 (identical) gives 100% penalty.
-        pairwise_ssim_penalty = float(r.get("pairwise_ssim_mean", 1.0)) * 100
+        # 3. Structural Diversity.
+        # Preferred: intra-condition LPIPS (realizations sharing the same
+        # conditioning), penalized by its shortfall relative to the LPIPS
+        # between two different real sections.
+        # Fallback: legacy pairwise SSIM, which compares consecutive samples
+        # that have *different* conditioning and therefore mixes data
+        # variability with generator diversity.
+        fs = fewshot_results.get(var)
+        if fs is not None and fewshot_ref is not None:
+            diversity_penalty = max(
+                0.0, (1.0 - fs.lpips_intra / (fewshot_ref.real_lpips_cross + 1e-8)) * 100
+            )
+            # 3b. Fidelity: SIFID excess over the SIFID between two different
+            # real sections (0 when a realization is as close to its reference
+            # as an unrelated real section is).
+            sifid_penalty: float | None = max(
+                0.0, (fs.sifid_mean / (fewshot_ref.real_sifid_cross + 1e-8) - 1.0) * 100
+            )
+        else:
+            diversity_penalty = float(r.get("pairwise_ssim_mean", 1.0)) * 100
+            sifid_penalty = None
 
         # 4. Facies Variance Matching: Difference between generated proportion variance and real proportion variance
         prop_std = float(r.get("proportion_std", 0.0))
@@ -175,24 +198,27 @@ def generate_html_report(
             ip_wd = float(distribution_metrics[var]["ip"]["wasserstein"])
             ip_wd_penalty = (ip_wd / (real_ip_std + 1e-8)) * 100
 
-        # Weighted score (lower is better)
-        # Equal weights (1/7 each ~ 14.29%)
-        overall = (
-            facies_rmse
-            + rp_dev
-            + ip_wd_penalty
-            + conn_dev
-            + pairwise_ssim_penalty
-            + variance_matching_penalty
-            + ip_spread_penalty
-        ) / 7.0
+        # Weighted score (lower is better), equal weights over the available terms.
+        terms: list[float] = [
+            facies_rmse,
+            rp_dev,
+            ip_wd_penalty,
+            conn_dev,
+            diversity_penalty,
+            variance_matching_penalty,
+            ip_spread_penalty,
+        ]
+        if sifid_penalty is not None:
+            terms.append(sifid_penalty)
+        overall = sum(terms) / len(terms)
 
         scorecard[var] = {
             "facies_rmse": facies_rmse,
             "rp_dev": rp_dev,
             "ip_wd_penalty": ip_wd_penalty,
             "conn_dev": conn_dev,
-            "pairwise_ssim_penalty": pairwise_ssim_penalty,
+            "diversity_penalty": diversity_penalty,
+            "sifid_penalty": sifid_penalty if sifid_penalty is not None else float("nan"),
             "variance_matching_penalty": variance_matching_penalty,
             "ip_spread_penalty": ip_spread_penalty,
             "overall": overall,
@@ -526,7 +552,8 @@ def generate_html_report(
                     "rp_dev": f"{sc['rp_dev']:.2f}",
                     "ip_wd_penalty": f"{sc['ip_wd_penalty']:.2f}",
                     "conn_dev": f"{sc['conn_dev']:.2f}",
-                    "pairwise_ssim_penalty": sc['pairwise_ssim_penalty'],
+                    "diversity_penalty": sc["diversity_penalty"],
+                    "sifid_penalty": sc["sifid_penalty"],
                     "variance_matching_penalty": sc['variance_matching_penalty'],
                     "ip_spread_penalty": sc['ip_spread_penalty'],
                     "overall": f"{sc['overall']:.2f}",
@@ -973,6 +1000,31 @@ def generate_html_report(
                     }
                 )
 
+    # Few-shot metrics table
+    fewshot_table: list[dict[str, str]] = []
+    for var in VARIANTS:
+        fs_row = fewshot_results.get(var)
+        if fs_row is None:
+            continue
+        fewshot_table.append(
+            {
+                "label": VARIANT_LABELS[var],
+                "sifid": f"{fs_row.sifid_mean:.3f} ± {fs_row.sifid_std:.3f}",
+                "lpips": f"{fs_row.lpips_intra:.3f} ± {fs_row.lpips_intra_std:.3f}",
+                "n": f"{fs_row.n_samples} / {fs_row.n_conditions}",
+            }
+        )
+    fewshot_reference = (
+        {
+            "sifid": f"{fewshot_ref.real_sifid_cross:.3f}",
+            "lpips": f"{fewshot_ref.real_lpips_cross:.3f}",
+        }
+        if fewshot_ref is not None
+        else None
+    )
+    scorecard_has_sifid = bool(fewshot_results)
+    scorecard_terms = 8 if scorecard_has_sifid else 7
+
     # Prepare Jinja2 Environment & Context
     template_dir = Path(__file__).parent / "templates"
     env = Environment(loader=FileSystemLoader(template_dir))
@@ -991,6 +1043,10 @@ def generate_html_report(
         "facies_proportions": facies_proportions,
         "rock_physics_stats": rock_physics_stats,
         "scorecard_table": scorecard_table,
+        "scorecard_has_sifid": scorecard_has_sifid,
+        "scorecard_terms": scorecard_terms,
+        "fewshot_table": fewshot_table,
+        "fewshot_reference": fewshot_reference,
         "distribution_table": distribution_table,
         "connectivity_table": connectivity_table,
         "existing_rp": existing_rp,

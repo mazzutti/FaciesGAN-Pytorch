@@ -8,7 +8,11 @@ Typical use: baseline ablation run versus a regularized run.
 Example
 -------
     python compare_experiments.py outputs/experiments outputs/experiments_reg \
-        --labels baseline regularized --variants wells_seismic
+        --labels baseline regularized --variants wells_seismic --fewshot
+
+``--fewshot`` adds SIFID (fidelity) and intra-condition LPIPS (diversity),
+see ``report/fewshot_metrics.py``. It needs the ``lpips`` and ``pytorch-fid``
+packages and a GPU for reasonable speed.
 """
 
 from __future__ import annotations
@@ -61,6 +65,17 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument("--variants", nargs="+", default=VARIANTS, choices=VARIANTS)
     parser.add_argument("--output", type=Path, default=None, help="Optional markdown file to write.")
+    parser.add_argument(
+        "--fewshot",
+        action="store_true",
+        help="Also compute SIFID and intra-condition LPIPS (slower; needs lpips and pytorch-fid).",
+    )
+    parser.add_argument(
+        "--fewshot-max-conditions",
+        type=int,
+        default=None,
+        help="Limit few-shot metrics to the first N conditioning sections (all their realizations).",
+    )
     args = parser.parse_args()
 
     labels = args.labels or [d.name for d in args.dirs]
@@ -68,6 +83,17 @@ def main() -> None:
         parser.error("--labels must match the number of directories")
 
     results = [compute_quantitative_results(d, args.data_dir) for d in args.dirs]
+
+    fewshot: list[dict[str, Any]] = []
+    fewshot_ref: Any = None
+    if args.fewshot:
+        from report.fewshot_metrics import compute_fewshot_metrics
+
+        for d in args.dirs:
+            res, fewshot_ref = compute_fewshot_metrics(
+                d, args.data_dir, list(args.variants), max_conditions=args.fewshot_max_conditions
+            )
+            fewshot.append(dict(res))
 
     lines: list[str] = []
     for variant in args.variants:
@@ -94,12 +120,35 @@ def main() -> None:
                 f"| {label} | " + " | ".join(cells) + f" | {_fmt(ref) if ref is not None else '-'} | "
                 + (labels[best] if best is not None else "-") + " |"
             )
+        if fewshot and fewshot_ref is not None:
+            fs_rows: list[tuple[str, str, str, float]] = [
+                ("sifid_mean", "SIFID vs conditioning section (lower = better)", "lower", fewshot_ref.real_sifid_cross),
+                ("lpips_intra", "LPIPS between realizations (higher = more diverse)", "higher", fewshot_ref.real_lpips_cross),
+            ]
+            for attr, label, pref, ref_val in fs_rows:
+                fs_values: list[float | None] = []
+                for fs in fewshot:
+                    item: Any = fs.get(variant)
+                    fs_values.append(float(getattr(item, attr)) if item is not None else None)
+                best = _best(fs_values, pref, None)
+                cells = [_fmt(v) if v is not None else "-" for v in fs_values]
+                lines.append(
+                    f"| {label} | " + " | ".join(cells) + f" | {_fmt(ref_val)}* | "
+                    + (labels[best] if best is not None else "-") + " |"
+                )
         props = [r["proportions"] if r is not None else None for r in per_run]
         real_props = results[0]["real_facies_proportions"]
         lines.append(
             "| Facies proportions | "
             + " | ".join("[" + ", ".join(f"{p:.3f}" for p in pr) + "]" if pr else "-" for pr in props)
             + " | [" + ", ".join(f"{p:.3f}" for p in real_props) + "] | - |"
+        )
+
+    if fewshot:
+        lines.append(
+            "\n\\* Few-shot reference values are measured between two *different* real sections: "
+            "SIFID shows how far an unrelated real section is from the reference, "
+            "LPIPS shows the perceptual variability of the real data set."
         )
 
     text = "\n".join(lines) + "\n"

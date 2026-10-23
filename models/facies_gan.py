@@ -552,6 +552,7 @@ class FaciesGAN(nn.Module):
                     disc_in = torch.cat([torch.cat([real, fake], dim=0), cond_both], dim=1)
                 else:
                     disc_in = torch.cat([real, fake], dim=0)
+                disc_in = self.random_disc_crop(disc_in, scale)
                 if self.diffaug is not None:
                     disc_in = self.diffaug(disc_in)
                 d_both = discs[scale](disc_in)
@@ -1985,6 +1986,24 @@ class FaciesGAN(nn.Module):
                 dynamic=False,
                 mode="reduce-overhead",
             )
+
+    def random_disc_crop(self, x: torch.Tensor, scale: int) -> torch.Tensor:
+        """Random spatial crop of the critic input on fine scales.
+
+        Active when ``disc_crop_ratio < 1`` and ``scale >= disc_crop_min_scale``.
+        One window is drawn per call and shared by every sample and channel,
+        so real, fake and conditioning stay aligned. The crop size is fixed
+        per scale, so a compiled critic sees one extra static shape.
+        """
+        ratio = float(getattr(self.options, "disc_crop_ratio", 1.0))
+        min_scale = int(getattr(self.options, "disc_crop_min_scale", 0))
+        if ratio >= 1.0 or scale < min_scale:
+            return x
+        h, w = x.shape[2], x.shape[3]
+        ch, cw = max(1, int(round(h * ratio))), max(1, int(round(w * ratio)))
+        top = int(torch.randint(0, h - ch + 1, (1,)).item())
+        left = int(torch.randint(0, w - cw + 1, (1,)).item())
+        return x[:, :, top : top + ch, left : left + cw]
 
     # ---------------------------------------------------------------------------
     # EMA Generator
