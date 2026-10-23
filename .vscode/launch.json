@@ -180,7 +180,7 @@
         "--how-many",
         "1000",
         "--num-iter",
-        "4000",
+        "8000",
         "--num-train-pyramids",
         "4",
         "--batch-size",
